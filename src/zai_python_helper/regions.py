@@ -15,6 +15,17 @@ class Region(Enum):
     CHINA = "china"
 
 
+# Z.ai Anthropic-compatible base URLs, one per region. ``ANTHROPIC_BASE_URL``
+# in Claude Code ``settings.json`` must point at the Z.ai gateway (NOT at
+# ``api.anthropic.com``) so traffic is routed through Z.ai. This is the only
+# place this mapping lives; the planner reads it, the CLI never hard-codes a
+# URL literal. Pure data — no side effects.
+ZAI_ANTHROPIC_BASE_URL_BY_REGION: dict[Region, str] = {
+    Region.GLOBAL: "https://api.z.ai/api/anthropic",
+    Region.CHINA: "https://api.zai.cn/api/anthropic",
+}
+
+
 def get_endpoint(region: Region, service: str) -> str:
     """Get the API endpoint for a given region and service.
 

@@ -1,17 +1,124 @@
-"""Argparse parser builder for the ``zai-python-helper`` CLI.
+"""Argparse parser builder + handlers for the ``zai-python-helper`` CLI.
 
 The dispatch contract: each subcommand registers a handler via
 ``set_defaults(func=...)``, and :func:`zai_python_helper.__main__.main` calls
 ``args.func(args)``. Handlers are THIN SHELLS — resolve ``Paths.default()``,
-delegate to a service, return its int. They do NOT catch/print/exit:
-a :class:`ZaiPythonHelperError` propagates to :func:`main`, which formats it
-as one-line stderr + exit 1 (full traceback under ``--debug``).
+delegate to the planner + IO backends, return an int. They do NOT
+catch/print/exit: a :class:`ZaiPythonHelperError` propagates to :func:`main`,
+which formats it as one-line stderr + exit 1 (full traceback under ``--debug``).
 
 Root flags (``--debug`` / ``--dry-run``) attach via a single shared parent
-parser so they parse BOTH before and after the subcommand (dual-parser pattern).
+parser so they parse BOTH before and after the subcommand (dual-parser
+pattern).
 """
 
 import argparse
+import difflib
+import re
+from pathlib import Path
+
+from zai_python_helper.core.planner import DeltaKind, FileTag, PatchPlan
+from zai_python_helper.paths import Paths
+from zai_python_helper.regions import Region
+
+# Tag → Paths attribute. Single place that maps a semantic file tag to its
+# resolved path. Keeps the planner path-free and the CLI's apply loop generic.
+_TAG_TO_PATH = {
+    FileTag.SETTINGS: "claude_settings",
+    FileTag.CLAUDE_JSON: "claude_json",
+    FileTag.ZSHRC: "zshrc",
+}
+
+# Keys whose values are secrets and must be redacted in any diff/echo output
+# (ADR: secrets never logged). Used by both --dry-run and the post-run echo.
+_SECRET_ENV_KEYS = ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY")
+
+_RESTART_NOTICE = "restart recommended for deterministic switching"
+
+
+def _resolve_path(paths: Paths, tag: FileTag) -> Path:
+    """Map a semantic :class:`FileTag` to its resolved :class:`Path`."""
+    return getattr(paths, _TAG_TO_PATH[tag])
+
+
+def _redact_json_text(text: str) -> str:
+    """Redact secret values in rendered JSON text for safe diffing/echo.
+
+    Replaces the value of any secret key with ``"<redacted>"``. Works on the
+    rendered JSON string (post-serialize) so it catches the token wherever it
+    appears. A token never reaches stdout/stderr.
+    """
+    out = text
+    for _key in _SECRET_ENV_KEYS:
+        # Match ``"KEY": "value"`` and replace only the value. The value is
+        # JSON-quoted; we replace its inner contents with <redacted>.
+        out = re.sub(
+            rf'("{_key}"\s*:\s*")([^"]*)(")',
+            r"\1<redacted>\3",
+            out,
+        )
+    return out
+
+
+def _apply_plan(paths: Paths, plan: PatchPlan, *, dry_run: bool) -> list[FileTag]:
+    """Apply (or preview) a plan's deltas. Returns the list of written tags.
+
+    For each non-NOOP delta, in dry-run mode it computes a ``unified_diff``
+    between current and desired content (secrets redacted) and prints it; in
+    real mode it writes the file via the matching backend. NOOP deltas are
+    skipped silently in both modes.
+
+    Returns the tags that were actually written (empty under dry-run, since
+    dry-run writes nothing — callers use the return only in real mode).
+    """
+    from zai_python_helper.backends import JsonBackend, ShellBackend
+
+    written: list[FileTag] = []
+    for delta in plan.deltas:
+        if delta.kind == DeltaKind.NOOP:
+            continue
+        path = _resolve_path(paths, delta.tag)
+
+        if delta.kind == DeltaKind.WRITE_JSON:
+            current_doc = JsonBackend.read(path)
+            current_text = (
+                JsonBackend.render(current_doc) if current_doc is not None else ""
+            )
+            desired_text = JsonBackend.render(delta.content)
+        else:  # WRITE_TEXT
+            current_text = ShellBackend.read(path)
+            desired_text = delta.content
+
+        if dry_run:
+            _print_diff(path, current_text, desired_text, delta.tag)
+            continue
+
+        if delta.kind == DeltaKind.WRITE_JSON:
+            JsonBackend.write(path, delta.content)
+        else:
+            from zai_python_helper.backends import atomic_write_bytes
+
+            atomic_write_bytes(path, desired_text.encode("utf-8"))
+        written.append(delta.tag)
+    return written
+
+
+def _print_diff(path: Path, current: str, desired: str, tag: FileTag) -> None:
+    """Print a redacted unified_diff for one file under ``--dry-run``."""
+    label = f"{path} ({tag.value})"
+    cur_lines = current.splitlines(keepends=True)
+    des_lines = desired.splitlines(keepends=True)
+    diff = difflib.unified_diff(
+        cur_lines,
+        des_lines,
+        fromfile=f"{label} (current)",
+        tofile=f"{label} (desired)",
+    )
+    diff_text = "".join(diff)
+    if not diff_text:
+        # No textual diff — nothing would change for this file.
+        return
+    print(_redact_json_text(diff_text), end="")
 
 
 def _handle_list(args: argparse.Namespace) -> int:
@@ -45,27 +152,49 @@ def _handle_list(args: argparse.Namespace) -> int:
     return 0
 
 
-def _handle_use_zai(args: argparse.Namespace) -> int:
-    """Make Z.ai the default provider.
+def _build_provider_spec(args: argparse.Namespace, mode, region: Region):
+    """Build a ProviderSpec from CLI args. Carries the model mode + selection.
 
-    The ``--mode`` flag selects one of four model-selection strategies
-    (original / default / select / custom); the remaining flags carry the
-    model details that ``select``/``custom`` modes need. The actual config
-    patching is applied in a later phase — for now this handler plans the
-    env and reports what it would do (full effect under S2+).
+    The ``base_url`` stored on the spec is the region's Z.ai URL; the planner
+    also reads the canonical URL from ``base_url_for_region(region)`` so this
+    field is informational here (kept consistent for ``status``/echo).
+    """
+    from zai_python_helper.core.domain import ProviderSpec
+    from zai_python_helper.core.planner.claude_code import base_url_for_region
+
+    return ProviderSpec(
+        base_url=base_url_for_region(region),
+        model_mode=mode,
+        selected_model=getattr(args, "model", None) if mode.value == "select" else None,
+        custom_model_id=getattr(args, "model", None) if mode.value == "custom" else None,
+        custom_model_name=getattr(args, "name", None),
+        custom_model_description=getattr(args, "description", None),
+        custom_capabilities=getattr(args, "capabilities", None),
+    )
+
+
+def _handle_use_zai(args: argparse.Namespace) -> int:
+    """Make Z.ai the default provider — patch settings.json/.claude.json/.zshrc.
+
+    Plans the activation via the PURE planner, then either previews it
+    (``--dry-run`` prints redacted unified_diffs, writes nothing) or applies
+    it via the IO backends. Prints ``restart recommended`` whenever it changes
+    files (ADR-005). Idempotent: a second run with no drift is a no-op.
     """
     from zai_python_helper.constants import get_preset_model
-    from zai_python_helper.core.domain import ModelMode, ProviderSpec
-    from zai_python_helper.core.planner.models import plan_model_config
+    from zai_python_helper.core.domain import ModelMode
+    from zai_python_helper.core.planner import plan_zai
+    from zai_python_helper.core.planner.claude_code import base_url_for_region
     from zai_python_helper.errors import ValidationError
-    from zai_python_helper.paths import Paths
+    from zai_python_helper.io.secrets import resolve_key
 
     mode = ModelMode(getattr(args, "mode", ModelMode.ORIGINAL.value))
+    region = Region(getattr(args, "region", Region.GLOBAL.value))
     paths = Paths.default()
+    dry_run = getattr(args, "dry_run", False)
 
-    # These flags only carry meaning in CUSTOM mode; plan_model_config ignores
-    # them otherwise. Reject them up front rather than silently dropping the
-    # user's input (a typo'd --mode must not quietly discard --name, etc.).
+    # Custom-only flags must be rejected outside custom mode (a typo'd --mode
+    # must not silently drop the user's --name etc.).
     custom_only = {
         "--name": getattr(args, "name", None),
         "--description": getattr(args, "description", None),
@@ -74,79 +203,160 @@ def _handle_use_zai(args: argparse.Namespace) -> int:
     if mode != ModelMode.CUSTOM:
         used = [flag for flag, value in custom_only.items() if value]
         if used:
-            raise ValidationError(
-                f"{', '.join(used)} only apply to --mode custom"
-            )
+            raise ValidationError(f"{', '.join(used)} only apply to --mode custom")
 
-    # Build the domain spec and validate it against the mode before planning.
-    spec = ProviderSpec(
-        base_url="https://api.z.ai/api/anthropic",
-        model_mode=mode,
-        selected_model=getattr(args, "model", None) if mode == ModelMode.SELECT else None,
-        custom_model_id=getattr(args, "model", None) if mode == ModelMode.CUSTOM else None,
-        custom_model_name=getattr(args, "name", None),
-        custom_model_description=getattr(args, "description", None),
-        custom_capabilities=getattr(args, "capabilities", None),
-    )
+    spec = _build_provider_spec(args, mode, region)
     if not spec.validate():
         if mode == ModelMode.SELECT:
             raise ValidationError("--model is required for --mode select")
         if mode == ModelMode.CUSTOM:
             raise ValidationError("--model is required for --mode custom")
 
-    # Validate the preset before planning: plan_model_config raises a bare
-    # ValueError on an unknown preset, which would bypass the error contract.
-    # Wrap it here so __main__ can format it as "error: ..." with exit 1.
+    # Validate the preset before planning (plan_model_config raises a bare
+    # ValueError on an unknown preset; wrap it for the error contract).
     if mode == ModelMode.SELECT:
         selected = spec.selected_model
         if selected is None or get_preset_model(selected) is None:
             raise ValidationError(f"Unknown preset: {selected}")
 
-    env = plan_model_config(spec)
-
-    dry_run = getattr(args, "dry_run", False)
+    # Resolve the auth token in the IO layer (env/flag/prompt) — never in core.
+    # In dry-run we still need a token to plan (the planner writes it into the
+    # delta); a placeholder keeps the preview meaningful without prompting.
     if dry_run:
-        print(f"dry-run: would configure Z.ai provider (mode: {mode.value})")
-        print(f"  state_dir: {paths.state_dir}")
-        for key in sorted(env):
-            print(f"  {key}={env[key]}")
+        auth_token = getattr(args, "api_key", None) or "<redacted>"
+    else:
+        auth_token = resolve_key(getattr(args, "api_key", None))
+
+    # Read current parsed state for the planner (pure transform).
+    from zai_python_helper.backends import JsonBackend, ShellBackend
+
+    settings_doc = JsonBackend.read(paths.claude_settings)
+    claude_json_doc = JsonBackend.read(paths.claude_json)
+    zshrc_text = ShellBackend.read(paths.zshrc)
+
+    plan = plan_zai(
+        spec,
+        region,
+        settings_doc=settings_doc,
+        claude_json_doc=claude_json_doc,
+        zshrc_text=zshrc_text,
+        auth_token=auth_token,
+    )
+
+    print(f"Configuring Z.ai provider (mode: {mode.value}, region: {region.value})")
+
+    if dry_run:
+        print("--dry-run: no files written")
+        if plan.is_empty:
+            print("(no changes — already in desired state)")
+        _apply_plan(paths, plan, dry_run=True)
         return 0
 
-    print(f"Configuring Z.ai provider (mode: {mode.value})")
-    print(f"  state_dir: {paths.state_dir}")
-    for key in sorted(env):
-        print(f"  {key}={env[key]}")
-    print("Not yet written to settings — see epic #1 (planner/IO phases)")
+    written = _apply_plan(paths, plan, dry_run=False)
+    if not written:
+        print("(no changes — already in desired state)")
+    else:
+        for tag in written:
+            print(f"  updated: {_resolve_path(paths, tag)}")
+        print(f"  {_RESTART_NOTICE}")
+
+    # Echo the managed env (redacted) so the user can see what was applied.
+    desired_env = (
+        plan.delta_for(FileTag.SETTINGS).content.get("env", {}) if plan.delta_for(FileTag.SETTINGS) else {}
+    )
+    if desired_env:
+        print(f"  base_url: {base_url_for_region(region)}")
+        print("  env (managed):")
+        for key in sorted(desired_env):
+            val = desired_env[key]
+            if key in _SECRET_ENV_KEYS:
+                val = "<redacted>"
+            print(f"    {key}={val}")
     return 0
 
 
 def _handle_use_default(args: argparse.Namespace) -> int:
-    """Revert to default provider (stub for S2)."""
-    from zai_python_helper.paths import Paths
+    """Revert to the default provider — strip managed env keys, remove block.
 
+    Inverse of ``use zai`` for ``settings.json`` and ``.zshrc``.
+    ``.claude.json`` is intentionally NOT reverted. Idempotent.
+    """
+    from zai_python_helper.core.domain import ModelMode
+    from zai_python_helper.core.planner import plan_default
+    from zai_python_helper.errors import ValidationError
+
+    # Model mode is irrelevant to removal (the managed set is derived from it),
+    # but we accept --mode for symmetry and reject custom-only flags the same
+    # way use zai does so the CLI surface is consistent.
+    mode = ModelMode(getattr(args, "mode", ModelMode.ORIGINAL.value))
+    region = Region(getattr(args, "region", Region.GLOBAL.value))
     paths = Paths.default()
     dry_run = getattr(args, "dry_run", False)
+
+    custom_only = {
+        "--name": getattr(args, "name", None),
+        "--description": getattr(args, "description", None),
+        "--capabilities": getattr(args, "capabilities", None),
+    }
+    if mode != ModelMode.CUSTOM:
+        used = [flag for flag, value in custom_only.items() if value]
+        if used:
+            raise ValidationError(f"{', '.join(used)} only apply to --mode custom")
+
+    spec = _build_provider_spec(args, mode, region)
+
+    from zai_python_helper.backends import JsonBackend, ShellBackend
+
+    settings_doc = JsonBackend.read(paths.claude_settings)
+    zshrc_text = ShellBackend.read(paths.zshrc)
+
+    plan = plan_default(spec, settings_doc=settings_doc, zshrc_text=zshrc_text)
+
+    print(f"Reverting to default provider (region: {region.value})")
+
     if dry_run:
-        print("dry-run: would revert to default provider")
+        print("--dry-run: no files written")
+        if plan.is_empty:
+            print("(no changes — already at default)")
+        _apply_plan(paths, plan, dry_run=True)
         return 0
-    print(f"Reverted to default provider (paths: {paths.state_dir})")
+
+    written = _apply_plan(paths, plan, dry_run=False)
+    if not written:
+        print("(no changes — already at default)")
+    else:
+        for tag in written:
+            print(f"  updated: {_resolve_path(paths, tag)}")
+        print(f"  {_RESTART_NOTICE}")
     return 0
 
 
 def _handle_status(args: argparse.Namespace) -> int:
-    """Print current status (stub for S2)."""
+    """Print current status and whether Z.ai is active."""
     from zai_python_helper import __version__
-    from zai_python_helper.paths import Paths
+    from zai_python_helper.backends import JsonBackend, ShellBackend
+    from zai_python_helper.core.planner.claude_code import postconditions
 
+    region = Region(getattr(args, "region", Region.GLOBAL.value))
     paths = Paths.default()
+
+    settings_doc = JsonBackend.read(paths.claude_settings)
+    zshrc_text = ShellBackend.read(paths.zshrc)
+    active = postconditions(
+        region, settings_doc=settings_doc, zshrc_text=zshrc_text
+    )
+
     lines = [
         "Status:",
         f"  version: {__version__}",
+        f"  region: {region.value}",
+        f"  zai_active: {active}",
         f"  state_dir: {paths.state_dir}",
         "",
         "Config paths:",
         f"  claude_settings: {paths.claude_settings}",
         f"  claude_json: {paths.claude_json}",
+        f"  zshrc: {paths.zshrc}",
         f"  ownership_json: {paths.ownership_json}",
     ]
     print("\n".join(lines))
@@ -154,13 +364,13 @@ def _handle_status(args: argparse.Namespace) -> int:
 
 
 def _handle_doctor(args: argparse.Namespace) -> int:
-    """Run diagnostics (stub for S2)."""
+    """Run diagnostics (stub for later phases)."""
     print("Doctor: all checks passed (stub)")
     return 0
 
 
 def _add_use_zai_flags(parser: argparse.ArgumentParser) -> None:
-    """Attach the model-selection flags to the ``use zai`` subparser."""
+    """Attach the model-selection + region flags to a ``use`` subparser."""
     from zai_python_helper.core.domain import ModelMode
 
     parser.add_argument(
@@ -184,6 +394,16 @@ def _add_use_zai_flags(parser: argparse.ArgumentParser) -> None:
         ),
     )
     parser.add_argument(
+        "--region",
+        choices=[r.value for r in Region],
+        default=Region.GLOBAL.value,
+        help="Z.ai region (default: global)",
+    )
+    parser.add_argument(
+        "--api-key",
+        help="Z.ai auth token (else resolved from ZAI_API_KEY env / prompt)",
+    )
+    parser.add_argument(
         "--name",
         help="display name for the custom model (custom mode only)",
     )
@@ -205,11 +425,6 @@ def build_parser() -> argparse.ArgumentParser:
     subcommand via a single shared parent parser attached to the root parser
     AND every subparser via ``parents=[sub_flags]``.
     """
-    # Global flags: work BOTH before AND after the subcommand. ONE shared
-    # parent parser (SUPPRESS defaults) is attached to the root parser AND
-    # every subparser via parents=[sub_flags], so --debug/--dry-run parse in
-    # either position. SUPPRESS means a subparser copy does not override a
-    # value the root already parsed.
     sub_flags = argparse.ArgumentParser(add_help=False)
     sub_flags.add_argument(
         "--debug",
@@ -229,8 +444,6 @@ def build_parser() -> argparse.ArgumentParser:
         description="Manage Claude Code ⇄ Z.ai integration without hand-editing config.",
         parents=[sub_flags],
     )
-    # No subcommand → show help (the bare invocation default). Every
-    # subcommand overrides this via its own set_defaults.
     parser.set_defaults(func=lambda args: (parser.print_help(), 0)[1])
 
     subparsers = parser.add_subparsers(
@@ -273,17 +486,25 @@ def build_parser() -> argparse.ArgumentParser:
     _add_use_zai_flags(p_use_zai)
     p_use_zai.set_defaults(func=_handle_use_zai)
 
-    use_sub.add_parser(
+    p_use_default = use_sub.add_parser(
         "default",
         help="revert to default provider",
         parents=[sub_flags],
-    ).set_defaults(func=_handle_use_default)
+    )
+    _add_use_zai_flags(p_use_default)
+    p_use_default.set_defaults(func=_handle_use_default)
 
     # `status` — read-only observability
     p_status = subparsers.add_parser(
         "status",
         help="show current status and paths",
         parents=[sub_flags],
+    )
+    p_status.add_argument(
+        "--region",
+        choices=[r.value for r in Region],
+        default=Region.GLOBAL.value,
+        help="Z.ai region to check against (default: global)",
     )
     p_status.set_defaults(func=_handle_status)
 

@@ -166,6 +166,9 @@ def test_use_custom_happy_path_accepts_custom_flags():
 
     Guards the inverse of test_use_custom_only_flag_rejected_outside_custom:
     if the custom-only-flag guard were inverted, this happy path would break.
+
+    Under S2 ``--dry-run`` prints a unified_diff (redacted) rather than an
+    env list, so the custom vars must appear inside the settings.json diff.
     """
     result = subprocess.run(
         [
@@ -188,5 +191,7 @@ def test_use_custom_happy_path_accepts_custom_flags():
         text=True,
     )
     assert result.returncode == 0
-    assert "ANTHROPIC_CUSTOM_MODEL_OPTION=my-x" in result.stdout
-    assert "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME=My Model" in result.stdout
+    # Custom vars land in the settings.json env block, shown in the diff.
+    assert '"ANTHROPIC_CUSTOM_MODEL_OPTION": "my-x"' in result.stdout
+    assert '"ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "My Model"' in result.stdout
+    assert "--dry-run: no files written" in result.stdout
