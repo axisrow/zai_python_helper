@@ -313,6 +313,23 @@ class TestDryRun:
         assert "sk-foreign-secret-xyz" not in out
         assert "<redacted>" in out
 
+    def test_dry_run_redacts_shell_secret_in_zshrc_diff(self, tmp_path, monkeypatch, capsys):
+        """Regression (Codex cycle-3): a shell ``export`` secret in .zshrc must
+        be redacted in the --dry-run diff context (redaction covers shell
+        syntax, not only JSON).
+        """
+        monkeypatch.setenv("HOME", str(tmp_path))
+        _seed(
+            tmp_path,
+            zshrc="export PATH=/bin\nexport OPENAI_API_KEY=sk-shell-secret-xyz\n",
+        )
+        _run(["use", "zai", "--api-key", TOKEN, "--dry-run"])
+        out = capsys.readouterr().out
+        # The block is appended → a zshrc diff is printed.
+        assert "+++" in out
+        assert "sk-shell-secret-xyz" not in out
+        assert "<redacted>" in out
+
     def test_dry_run_on_already_desired_prints_no_changes(self, tmp_path, monkeypatch, capsys):
         monkeypatch.setenv("HOME", str(tmp_path))
         _seed(tmp_path)

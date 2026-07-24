@@ -63,24 +63,49 @@ def _resolve_path(paths: Paths, tag: FileTag) -> Path:
     return getattr(paths, _TAG_TO_PATH[tag])
 
 
-def _redact_json_text(text: str) -> str:
-    """Redact secret values in rendered JSON text for safe diffing/echo.
+def _redact_text(text: str) -> str:
+    """Redact secret values in rendered text for safe diffing/echo.
 
-    Replaces the value of any credential-looking key with ``"<redacted>"``.
-    Works on the rendered JSON string (post-serialize) so it catches secrets
-    wherever they appear — including foreign keys we don't manage
-    (OPENAI_API_KEY, cloud tokens) that could otherwise leak through a
-    ``--dry-run`` diff's context lines. A secret value never reaches
-    stdout/stderr.
+    Replaces the value of any credential-looking assignment with
+    ``<redacted>``. Covers BOTH syntaxes a managed file may use so a secret
+    never leaks through a ``--dry-run`` diff's context lines:
+
+    - JSON (``settings.json`` / ``.claude.json``): ``"KEY": "value"``
+    - shell (``.zshrc``): ``export KEY="value"``, ``export KEY=value``,
+      and bare ``KEY=value`` assignments.
+
+    A key is "secret" by :func:`_is_secret_key` (name heuristic), so foreign
+    credentials we don't manage (OPENAI_API_KEY, cloud tokens) are caught in
+    either file type. A secret value never reaches stdout/stderr.
     """
-    # Match ``"KEY": "value"`` and replace only the value for secret keys.
-    def _replace(match: re.Match[str]) -> str:
+    # JSON: ``"KEY": "value"`` → ``"KEY": "<redacted>"``.
+    def _replace_json(match: re.Match[str]) -> str:
         key = match.group(1)
         if _is_secret_key(key):
             return f'"{key}": "<redacted>"'
         return match.group(0)
 
-    return re.sub(r'"([A-Za-z0-9_]+)"\s*:\s*"([^"]*)"', _replace, text)
+    text = re.sub(r'"([A-Za-z0-9_]+)"\s*:\s*"([^"]*)"', _replace_json, text)
+
+    # Shell: ``[export ]KEY="value"`` (quoted) or ``[export ]KEY=value``
+    # (unquoted, value = run of non-whitespace). One alternation handles both
+    # so a line is matched at most once. Keep ``export`` + key + quotes,
+    # redact only the value for secret keys.
+    _shell_pat = re.compile(
+        r'(?m)^(\s*export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(?:"([^"\n]*)"|([^\s"\'#]+))'
+    )
+
+    def _replace_shell(match: re.Match[str]) -> str:
+        prefix = match.group(1) or ""
+        key = match.group(2)
+        if not _is_secret_key(key):
+            return match.group(0)
+        # group(3) = quoted value, group(4) = unquoted value.
+        if match.group(3) is not None:
+            return f'{prefix}{key}="<redacted>"'
+        return f"{prefix}{key}=<redacted>"
+
+    return _shell_pat.sub(_replace_shell, text)
 
 
 def _apply_plan(paths: Paths, plan: PatchPlan, *, dry_run: bool) -> list[FileTag]:
@@ -141,7 +166,7 @@ def _print_diff(path: Path, current: str, desired: str, tag: FileTag) -> None:
     if not diff_text:
         # No textual diff — nothing would change for this file.
         return
-    print(_redact_json_text(diff_text), end="")
+    print(_redact_text(diff_text), end="")
 
 
 def _handle_list(args: argparse.Namespace) -> int:
