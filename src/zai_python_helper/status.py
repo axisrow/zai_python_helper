@@ -25,7 +25,7 @@ import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlsplit
 
 from zai_python_helper.paths import Paths
 from zai_python_helper.regions import Region
@@ -75,10 +75,15 @@ class ZshrcState:
     ``export ANTHROPIC_*`` assignments (e.g. ``["ANTHROPIC_API_KEY"]``),
     never their values — a value could be a live secret, and the report
     must never carry one (the "no secrets in output" invariant).
+
+    ``readable`` is False when the file exists but could not be read
+    (permission denied, it is a directory, a filesystem race) — status
+    degrades instead of crashing.
     """
 
     exists: bool
     managed_block_present: bool
+    readable: bool = True
     foreign_exports: list[str] = field(default_factory=list)
 
 
@@ -127,26 +132,36 @@ def _classify_region(base_url: str) -> Region | None:
 
 
 def _safe_endpoint(url: str) -> str:
-    """Strip secret-bearing components from a URL for status display.
+    """Return a credential-free, recognizable form of a URL for status.
 
-    Removes userinfo (``user:pass@`` — a common place to embed a token),
-    the query string, and the fragment before rendering. The scheme, host,
-    port, and path are kept, which is enough to recognize the endpoint
-    without ever echoing an embedded credential. Pure parsing — no network.
-
-    **Fail-closed:** if the URL does not parse to a real authority/hostname
-    (malformed input — missing ``//`` before the authority, leading
-    whitespace/control chars, etc.), ``urlsplit`` would leave the raw string
-    in ``path`` and the credential could still be echoed. In that case we
-    return a placeholder rather than risk partial disclosure, because
-    ``status`` explicitly must tolerate malformed config without leaking.
+    **Whitelist approach (fail-closed for any malformed input).** Rather
+    than strip secret components off the raw string (a losing game — a
+    credential can hide in userinfo, query, fragment, OR the path), the
+    displayed endpoint is REBUILT only from a small set of validated
+    components: a known scheme, the parsed hostname, an optional port, and
+    a path that is truncated to a short prefix. The raw value is never
+    echoed. If parsing fails or yields no valid hostname, return a
+    placeholder — ``status`` must tolerate malformed config without leaking
+    or crashing. Pure parsing — no network.
     """
-    parts = urlsplit(url.strip())
-    # Require a parseable hostname; otherwise do not echo any of the raw URL.
-    if not parts.hostname:
+    try:
+        parts = urlsplit(url.strip())
+    except ValueError:
+        # NFKC-invalid netloc / other malformed authority — urlsplit raises.
         return "(malformed endpoint)"
-    # Drop userinfo, query, fragment; keep scheme/host/port/path.
-    return urlunsplit((parts.scheme, parts.netloc.split("@")[-1], parts.path, "", ""))
+
+    scheme = parts.scheme.lower()
+    host = parts.hostname or ""
+    # Only http(s) schemes carry an API endpoint worth showing; anything
+    # else (file:, ftp:, empty, garbage) is not a Z.ai endpoint.
+    if scheme not in ("http", "https") or not host:
+        return "(malformed endpoint)"
+    # Show scheme + host + port ONLY. The path is deliberately omitted: a
+    # credential can be embedded in the path (e.g. .../api/<key>), and the
+    # status report needs only the origin to identify the endpoint — the
+    # full path is not diagnostic and is never echoed.
+    port = f":{parts.port}" if parts.port else ""
+    return f"{scheme}://{host}{port}"
 
 
 def mask_key(value: str, visible_suffix: int = 4) -> str:
@@ -194,7 +209,15 @@ def _read_zshrc(zshrc: Path) -> ZshrcState:
     if not zshrc.exists():
         return ZshrcState(exists=False, managed_block_present=False)
 
-    text = zshrc.read_text(encoding="utf-8", errors="replace")
+    # Guard the read: the file may be unreadable (permission denied), be a
+    # directory, or disappear between exists() and read_text() (filesystem
+    # race). Degrade to an unreadable state rather than crashing status.
+    try:
+        text = zshrc.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ZshrcState(
+            exists=True, managed_block_present=False, readable=False
+        )
 
     # A well-formed block has BEGIN before END. Guard the ordering: if the
     # markers are inverted or duplicated, the slice would cut the wrong
@@ -328,6 +351,8 @@ def _render_claude_code(
     zsh = cc.zshrc
     if not zsh.exists:
         lines.append(f"  managed block: {dim}(no .zshrc){reset}")
+    elif not zsh.readable:
+        lines.append(f"  managed block: {yellow}(unreadable .zshrc){reset}")
     elif zsh.managed_block_present:
         lines.append(f"  managed block: {green}installed{reset}")
     else:

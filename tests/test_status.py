@@ -14,6 +14,7 @@ files. Rendering is forced to ``use_color=False`` so assertions are stable.
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
@@ -24,6 +25,7 @@ from zai_python_helper.status import (
     ZSHRC_BLOCK_END,
     ClaudeCodeStatus,
     ZshrcState,
+    _safe_endpoint,
     detect_status,
     mask_key,
     render_status,
@@ -180,7 +182,8 @@ class TestDetectClaudeCode:
 
         assert cc.zai_active is True
         assert cc.region is region
-        assert cc.base_url == url
+        # base_url is the sanitized origin (scheme+host), not the raw URL.
+        assert cc.base_url == _safe_endpoint(url)
 
     def test_non_zai_endpoint_is_inactive(self, tmp_path):
         # The real Anthropic endpoint is "not Z.ai" → inactive, no region.
@@ -266,10 +269,11 @@ class TestDetectClaudeCode:
         assert cc.key_masked is None
 
     def test_secret_bearing_endpoint_sanitized(self, tmp_path):
-        """Regression (review cycle 3): a URL with credentials in userinfo
-        or query must be sanitized before reaching the report."""
+        """Regression (review cycles 3–5): a URL with credentials in
+        userinfo, query, or path must be sanitized to its origin before
+        reaching the report."""
         secret_url = (
-            "https://user:secretPass@api.z.ai/api/anthropic?key=sk-hiddenkey#frag"
+            "https://user:secretPass@api.z.ai/api/sk-hiddenkey?q=1#frag"
         )
         _write_settings(tmp_path, {"ANTHROPIC_BASE_URL": secret_url})
         cc = _cc(tmp_path)
@@ -277,11 +281,10 @@ class TestDetectClaudeCode:
         # Still classified as active Z.ai (host is api.z.ai)...
         assert cc.zai_active is True
         assert cc.region is Region.GLOBAL
-        # ...but the stored/returned endpoint never carries the secret parts.
+        # ...but the stored endpoint is the origin only — no secret parts.
+        assert cc.base_url == "https://api.z.ai"
         assert "secretPass" not in (cc.base_url or "")
         assert "sk-hiddenkey" not in (cc.base_url or "")
-        assert "?key=" not in (cc.base_url or "")
-        assert "@api.z.ai" not in (cc.base_url or "")
 
     @pytest.mark.parametrize(
         "malformed",
@@ -306,6 +309,31 @@ class TestDetectClaudeCode:
         out = render_status(detect_status(Paths.from_home(tmp_path)), **FORCE_PLAIN)
         assert "CREDENTIAL" not in out
         assert "secret" not in out
+
+    def test_credential_in_endpoint_path_not_disclosed(self, tmp_path):
+        """Regression (review cycle 5): a credential embedded in the URL
+        *path* (not userinfo/query) must not reach the report. The
+        displayed endpoint is the origin (scheme+host) only."""
+        _write_settings(
+            tmp_path,
+            {"ANTHROPIC_BASE_URL": "https://api.z.ai/api/sk-live-CRED-123456"},
+        )
+        cc = _cc(tmp_path)
+        assert cc.base_url == "https://api.z.ai"
+        assert "sk-live-CRED-123456" not in (cc.base_url or "")
+        out = render_status(detect_status(Paths.from_home(tmp_path)), **FORCE_PLAIN)
+        assert "sk-live-CRED-123456" not in out
+
+    def test_nfkc_invalid_endpoint_does_not_crash(self, tmp_path):
+        """Regression (review cycle 5): an NFKC-invalid netloc makes urlsplit
+        raise ValueError on some Python versions — status must not crash."""
+        _write_settings(
+            tmp_path,
+            {"ANTHROPIC_BASE_URL": "https://user:CRED@api.z.ai／/path"},
+        )
+        cc = _cc(tmp_path)  # must not raise
+        # The raw credential never reaches the report.
+        assert "CRED" not in (cc.base_url or "")
 
     def test_malformed_settings_json_treated_as_no_env(self, tmp_path):
         # A corrupt settings.json must not crash status — degrade to inactive.
@@ -444,6 +472,29 @@ class TestDetectZshrc:
         assert zsh.exists is False
         assert zsh.managed_block_present is False
 
+    def test_unreadable_zshrc_degrades(self, tmp_path):
+        """Regression (review cycle 5): a .zshrc that exists but can't be
+        read (permission denied) must NOT crash status — degrade to an
+        unreadable state."""
+        zshrc = Paths.from_home(tmp_path).zshrc
+        zshrc.write_text("export ANTHROPIC_API_KEY=x\n", encoding="utf-8")
+        os.chmod(zshrc, 0o000)
+        try:
+            zsh = _zsh(tmp_path)
+            assert zsh.exists is True
+            assert zsh.readable is False
+            assert zsh.foreign_exports == []
+        finally:
+            os.chmod(zshrc, 0o644)  # restore so cleanup can delete it
+
+    def test_zshrc_is_directory_degrades(self, tmp_path):
+        """Regression (review cycle 5): if .zshrc is a directory, read_text
+        raises IsADirectoryError — status must degrade, not crash."""
+        os.makedirs(Paths.from_home(tmp_path).zshrc)
+        zsh = _zsh(tmp_path)
+        assert zsh.exists is True
+        assert zsh.readable is False
+
 
 # ---------------------------------------------------------------------------
 # render_status
@@ -503,18 +554,18 @@ class TestRender:
         assert "abc.def-LEAKED" not in out
 
     def test_render_never_discloses_endpoint_secret(self, tmp_path):
-        """Regression (review cycle 3): a credential embedded in the
-        endpoint URL (userinfo / query) must never reach the report."""
+        """Regression (review cycles 3–5): a credential embedded anywhere in
+        the endpoint URL (userinfo, query, or path) must never reach the
+        report. The displayed endpoint is the origin (scheme+host) only."""
         secret_url = (
-            "https://user:secretPass@api.z.ai/api/anthropic?key=sk-hiddenkey"
+            "https://user:secretPass@api.z.ai/api/sk-hiddenkey-12345"
         )
         _write_settings(tmp_path, {"ANTHROPIC_BASE_URL": secret_url})
         out = render_status(detect_status(Paths.from_home(tmp_path)), **FORCE_PLAIN)
         assert "secretPass" not in out
         assert "sk-hiddenkey" not in out
-        assert "?key=" not in out
-        # The sanitized host/path still shown so the endpoint is recognizable.
-        assert "api.z.ai/api/anthropic" in out
+        # The origin is shown so the endpoint stays recognizable.
+        assert "api.z.ai" in out
 
     def test_no_warning_when_clean(self, tmp_path):
         _write_settings(tmp_path, {"ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic"})
