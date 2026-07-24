@@ -122,7 +122,6 @@ def _zsh(home) -> ZshrcState:
     return _cc(home).zshrc
 
 
-
 class TestDetectClaudeCode:
     def test_no_settings_reports_inactive_and_absent_block(self, tmp_path):
         cc = _cc(tmp_path)
