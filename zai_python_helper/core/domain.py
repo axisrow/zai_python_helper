@@ -7,7 +7,6 @@ They represent the pure data structures that drive the configuration logic.
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional
 
 
 class ModelMode(Enum):
@@ -57,16 +56,16 @@ class ProviderSpec:
     model_mode: ModelMode
 
     # Optional API key (if not using environment variable)
-    api_key: Optional[str] = None
+    api_key: str | None = None
 
     # For SELECT mode
-    selected_model: Optional[str] = None
+    selected_model: str | None = None
 
     # For CUSTOM mode
-    custom_model_id: Optional[str] = None
-    custom_model_name: Optional[str] = None
-    custom_model_description: Optional[str] = None
-    custom_capabilities: Optional[str] = None  # e.g. "effort,thinking"
+    custom_model_id: str | None = None
+    custom_model_name: str | None = None
+    custom_model_description: str | None = None
+    custom_capabilities: str | None = None  # e.g. "effort,thinking"
 
     def validate(self) -> bool:
         """

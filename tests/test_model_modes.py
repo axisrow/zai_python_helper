@@ -214,7 +214,7 @@ class TestModelPresets:
 
     def test_presets_have_required_fields(self):
         """All presets have required fields."""
-        for preset_name, config in ZAI_MODEL_PRESETS.items():
+        for _preset_name, config in ZAI_MODEL_PRESETS.items():
             assert "model_id" in config
             assert "anthropic_alias" in config
             assert "name" in config

@@ -10,7 +10,6 @@ import sys
 
 from zai_python_helper import __version__
 from zai_python_helper.constants import (
-    ZAI_ANTHROPIC_BASE_URL,
     list_available_presets,
 )
 from zai_python_helper.core.domain import ModelMode
@@ -103,13 +102,13 @@ def create_parser() -> argparse.ArgumentParser:
     )
 
     # 'status' command — show current configuration (S4, future)
-    status_parser = subparsers.add_parser(
+    subparsers.add_parser(
         "status",
         help="Show current Claude Code configuration (future)",
     )
 
     # 'doctor' command — verify configuration (S6, future)
-    doctor_parser = subparsers.add_parser(
+    subparsers.add_parser(
         "doctor",
         help="Verify that the configuration works (future)",
     )
