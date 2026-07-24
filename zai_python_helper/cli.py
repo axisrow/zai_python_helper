@@ -116,6 +116,10 @@ def create_parser() -> argparse.ArgumentParser:
     return parser
 
 
+# Alias for compatibility with existing tests
+build_parser = create_parser
+
+
 def cmd_list_models(args: argparse.Namespace) -> int:
     """
     Handle the 'list' command — show available model presets.
