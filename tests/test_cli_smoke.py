@@ -70,15 +70,17 @@ def test_invoke_main_help():
 
 
 def test_invoke_status():
-    """Invoking status should succeed."""
+    """Invoking status should succeed and render the Claude Code block."""
     result = subprocess.run(
         [sys.executable, "-m", "zai_python_helper", "status"],
         capture_output=True,
         text=True,
     )
     assert result.returncode == 0
-    assert "Status:" in result.stdout
-    assert "version:" in result.stdout
+    # The status report always renders the Claude Code section (issue #5).
+    assert "Claude Code" in result.stdout
+    # Captured stdout is not a tty → plain text, no ANSI escapes.
+    assert "\033[" not in result.stdout
 
 
 def test_invoke_list():
