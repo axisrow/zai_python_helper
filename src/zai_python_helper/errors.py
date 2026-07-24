@@ -23,3 +23,15 @@ class ZaiPythonHelperError(Exception):
     print ``error: <msg>`` to stderr and exit non-zero; under ``--debug``
     re-raise so Python emits the full traceback for debugging.
     """
+
+
+class ConfigurationError(ZaiPythonHelperError):
+    """Error in a configuration file or settings document."""
+
+
+class ValidationError(ZaiPythonHelperError):
+    """Error in input or domain validation."""
+
+
+class ProviderError(ZaiPythonHelperError):
+    """Error in provider configuration or connection."""

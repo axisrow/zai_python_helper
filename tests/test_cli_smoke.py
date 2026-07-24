@@ -79,3 +79,114 @@ def test_invoke_status():
     assert result.returncode == 0
     assert "Status:" in result.stdout
     assert "version:" in result.stdout
+
+
+def test_invoke_list():
+    """`list` should show the model presets (regression guard for the list subcommand)."""
+    result = subprocess.run(
+        [sys.executable, "-m", "zai_python_helper", "list"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "Available Z.ai model presets:" in result.stdout
+    # A known preset must appear (constants wired through the src package)
+    assert "glm-4-plus" in result.stdout
+
+
+def test_invoke_list_json():
+    """`list --format json` should emit valid JSON with a known preset."""
+    import json
+
+    result = subprocess.run(
+        [sys.executable, "-m", "zai_python_helper", "list", "--format", "json"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    data = json.loads(result.stdout)
+    assert "glm-4-plus" in data
+    assert data["glm-4-plus"]["model_id"] == "zai/glm-4-plus"
+
+
+def test_use_select_bogus_preset_honours_error_contract():
+    """SELECT with an unknown preset must exit 1 with a one-line `error:` (not a traceback).
+
+    Regression guard: plan_model_config raises a bare ValueError on an unknown
+    preset; _handle_use_zai wraps it into a ValidationError so __main__ formats
+    it per the error contract.
+    """
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "zai_python_helper",
+            "use",
+            "zai",
+            "--mode",
+            "select",
+            "--model",
+            "bogus",
+            "--dry-run",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 1
+    assert "error: Unknown preset: bogus" in result.stderr
+    # No traceback leaked (error contract: one-line message unless --debug)
+    assert "Traceback" not in result.stderr
+
+
+def test_use_custom_only_flag_rejected_outside_custom():
+    """--name (custom-only) must be rejected outside --mode custom, not silently dropped."""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "zai_python_helper",
+            "use",
+            "zai",
+            "--mode",
+            "original",
+            "--name",
+            "X",
+            "--dry-run",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 1
+    assert "--name only apply to --mode custom" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+def test_use_custom_happy_path_accepts_custom_flags():
+    """A valid custom-mode invocation accepts --name/--description (guard must not over-reject).
+
+    Guards the inverse of test_use_custom_only_flag_rejected_outside_custom:
+    if the custom-only-flag guard were inverted, this happy path would break.
+    """
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "zai_python_helper",
+            "use",
+            "zai",
+            "--mode",
+            "custom",
+            "--model",
+            "my-x",
+            "--name",
+            "My Model",
+            "--description",
+            "desc",
+            "--dry-run",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "ANTHROPIC_CUSTOM_MODEL_OPTION=my-x" in result.stdout
+    assert "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME=My Model" in result.stdout
