@@ -92,6 +92,37 @@ class TestMaskKey:
             return
         assert masked.replace("•", "") != value
 
+    @pytest.mark.parametrize("value", ["abcdef", "abcdefg", "abcdefgh"])
+    def test_short_keys_6_to_8_fully_hidden(self, value):
+        """Regression (review cycle 4): a 6–8 char key must be fully hidden
+        (all bullets) — exposing a prefix+suffix that leaves only 1–2 hidden
+        chars makes the secret trivially enumerable."""
+        assert mask_key(value) == "••••"
+
+    @pytest.mark.parametrize(
+        "value,masked",
+        [
+            ("zai-abcd3f2a", "zai-••••3f2a"),
+            ("57a3eeb553bc48d98c70354a758f5af7.wkiny4JhBASee7Np", "57a3••••e7Np"),
+        ],
+    )
+    def test_long_key_keeps_recognizable_ends(self, value, masked):
+        """Long keys keep a meaningful prefix/suffix (the task's shape),
+        while the hidden core stays >= 4 chars."""
+        assert mask_key(value) == masked
+
+    def test_hidden_core_at_least_visible_suffix(self):
+        """For every exposed key, the hidden core must be >= the visible
+        suffix (default 4) — never a majority disclosed."""
+        from zai_python_helper.status import mask_key as mk
+        for v in ["abcdefghi", "abcdefghij", "zai-abcd3f2a", "x" * 20]:
+            m = mk(v)
+            if "••••" not in m or m == "••••":
+                continue
+            prefix, suffix = m.split("••••")
+            hidden = len(v) - len(prefix) - len(suffix)
+            assert hidden >= 4, f"{v!r}: hidden core {hidden} < 4"
+
 
 # ---------------------------------------------------------------------------
 # detect_status — Claude Code
@@ -251,6 +282,30 @@ class TestDetectClaudeCode:
         assert "sk-hiddenkey" not in (cc.base_url or "")
         assert "?key=" not in (cc.base_url or "")
         assert "@api.z.ai" not in (cc.base_url or "")
+
+    @pytest.mark.parametrize(
+        "malformed",
+        [
+            # No "//" before the authority → urlsplit puts userinfo in path.
+            "https:user:CREDENTIAL@api.z.ai/path?x=1",
+            # Leading non-breaking space breaks authority parsing.
+            "\xa0https://user:secret@api.z.ai/p",
+        ],
+    )
+    def test_malformed_endpoint_string_fail_closed(self, tmp_path, malformed):
+        """Regression (review cycle 4): malformed endpoint strings that
+        defeat urlsplit must NOT leak an embedded credential — fail closed
+        to a placeholder rather than echoing the raw value."""
+        _write_settings(tmp_path, {"ANTHROPIC_BASE_URL": malformed})
+        cc = _cc(tmp_path)
+
+        # Malformed → not classified as Z.ai (no parseable host) and the raw
+        # credential never reaches the stored endpoint or any render.
+        assert "CREDENTIAL" not in (cc.base_url or "")
+        assert "secret" not in (cc.base_url or "")
+        out = render_status(detect_status(Paths.from_home(tmp_path)), **FORCE_PLAIN)
+        assert "CREDENTIAL" not in out
+        assert "secret" not in out
 
     def test_malformed_settings_json_treated_as_no_env(self, tmp_path):
         # A corrupt settings.json must not crash status — degrade to inactive.

@@ -133,8 +133,18 @@ def _safe_endpoint(url: str) -> str:
     the query string, and the fragment before rendering. The scheme, host,
     port, and path are kept, which is enough to recognize the endpoint
     without ever echoing an embedded credential. Pure parsing — no network.
+
+    **Fail-closed:** if the URL does not parse to a real authority/hostname
+    (malformed input — missing ``//`` before the authority, leading
+    whitespace/control chars, etc.), ``urlsplit`` would leave the raw string
+    in ``path`` and the credential could still be echoed. In that case we
+    return a placeholder rather than risk partial disclosure, because
+    ``status`` explicitly must tolerate malformed config without leaking.
     """
-    parts = urlsplit(url)
+    parts = urlsplit(url.strip())
+    # Require a parseable hostname; otherwise do not echo any of the raw URL.
+    if not parts.hostname:
+        return "(malformed endpoint)"
     # Drop userinfo, query, fragment; keep scheme/host/port/path.
     return urlunsplit((parts.scheme, parts.netloc.split("@")[-1], parts.path, "", ""))
 
@@ -146,22 +156,28 @@ def mask_key(value: str, visible_suffix: int = 4) -> str:
     a leading prefix and a trailing visible suffix, so two different keys
     are still distinguishable at a glance while the secret body is hidden.
 
-    The visible prefix and suffix together must always be SHORTER than the
-    value: if they covered the whole value the bullets would hide nothing
-    and the two ends would reconstruct the secret. For values too short to
-    leave a non-empty hidden core, the entire value is shown as bullets.
+    **Fail-closed for short values.** The hidden core (characters covered
+    by the bullets) must be at least as large as the visible suffix, so a
+    short key cannot be trivially reconstructed by enumerating the few
+    hidden characters. Values too short to leave such a core are shown as
+    bullets only — we never disclose the majority of a secret's characters.
     """
     if not value:
         return ""
 
-    # Choose the largest suffix (<= visible_suffix) that still leaves a
-    # non-empty hidden core with a <=4-char prefix.
-    suffix = min(visible_suffix, max(0, len(value) - 5))
-    prefix_len = min(4, len(value) - suffix)
-    if prefix_len <= 0 or suffix <= 0 or prefix_len + suffix >= len(value):
-        # Too short to expose anything safely — hide the whole value.
-        return "•" * 4
-    return f"{value[:prefix_len]}{'•' * 4}{value[-suffix:]}"
+    # Visible chars = a <=4-char prefix + a suffix. Require the hidden core
+    # to be at least ``visible_suffix`` chars (4 by default), so a key short
+    # enough to enumerate can't have most of its body disclosed: a 6–8 char
+    # key is fully hidden, while a long production key keeps a recognizable
+    # prefix/suffix (e.g. ``zai-••••3f2a``). Try the largest suffix first;
+    # shrink until the invariant holds; if it can't, hide the whole value.
+    for suffix in range(min(visible_suffix, len(value)), 0, -1):
+        prefix_len = min(4, len(value) - suffix)
+        hidden = len(value) - prefix_len - suffix
+        if prefix_len > 0 and hidden >= visible_suffix:
+            return f"{value[:prefix_len]}{'•' * 4}{value[-suffix:]}"
+    # Too short to expose anything safely — hide the whole value.
+    return "•" * 4
 
 
 def _read_zshrc(zshrc: Path) -> ZshrcState:
