@@ -159,3 +159,34 @@ def test_use_custom_only_flag_rejected_outside_custom():
     assert result.returncode == 1
     assert "--name only apply to --mode custom" in result.stderr
     assert "Traceback" not in result.stderr
+
+
+def test_use_custom_happy_path_accepts_custom_flags():
+    """A valid custom-mode invocation accepts --name/--description (guard must not over-reject).
+
+    Guards the inverse of test_use_custom_only_flag_rejected_outside_custom:
+    if the custom-only-flag guard were inverted, this happy path would break.
+    """
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "zai_python_helper",
+            "use",
+            "zai",
+            "--mode",
+            "custom",
+            "--model",
+            "my-x",
+            "--name",
+            "My Model",
+            "--description",
+            "desc",
+            "--dry-run",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "ANTHROPIC_CUSTOM_MODEL_OPTION=my-x" in result.stdout
+    assert "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME=My Model" in result.stdout
