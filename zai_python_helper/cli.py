@@ -38,12 +38,31 @@ def create_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Show detailed debugging information",
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would change without making changes",
+    )
+
+    # Common flags shared by the root parser and all subcommands (so that
+    # --debug works both before and after the subcommand).
+    # Common flags shared by the root parser and all subcommands (so that
+    # --debug works both before and after the subcommand). SUPPRESS keeps the
+    # parent from overwriting the root parser's value when the flag is absent.
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument(
+        "--debug",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Show detailed debugging information",
+    )
 
     subparsers = parser.add_subparsers(dest="cmd", help="Available commands")
 
     # 'use' command — switch configuration
     use_parser = subparsers.add_parser(
         "use",
+        parents=[common],
         help="Switch Claude Code to use a provider",
     )
     use_parser.add_argument(
@@ -86,12 +105,14 @@ def create_parser() -> argparse.ArgumentParser:
     use_parser.add_argument(
         "--dry-run",
         action="store_true",
+        default=argparse.SUPPRESS,
         help="Show what would change without making changes",
     )
 
     # 'list' command — show available models
     list_parser = subparsers.add_parser(
         "list",
+        parents=[common],
         help="List available Z.ai model presets",
     )
     list_parser.add_argument(
@@ -101,15 +122,17 @@ def create_parser() -> argparse.ArgumentParser:
         help="Output format (default: table)",
     )
 
-    # 'status' command — show current configuration (S4, future)
+    # 'status' command — show current configuration
     subparsers.add_parser(
         "status",
-        help="Show current Claude Code configuration (future)",
+        parents=[common],
+        help="Show current Claude Code configuration",
     )
 
     # 'doctor' command — verify configuration (S6, future)
     subparsers.add_parser(
         "doctor",
+        parents=[common],
         help="Verify that the configuration works (future)",
     )
 
@@ -197,6 +220,24 @@ def cmd_use(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_status(args: argparse.Namespace) -> int:
+    """
+    Handle the 'status' command — show current configuration.
+
+    Args:
+        args: Parsed command-line arguments
+
+    Returns:
+        Exit code (0 for success, non-zero for error)
+    """
+    print(f"Status: zai-python-helper v{__version__}")
+    print(f"version: {__version__}")
+    print()
+    print("Configuration file patching is not yet implemented (see epic #1).")
+    print("Model selection modes are available via 'use zai --mode ...'")
+    return 0
+
+
 def main() -> int:
     """
     Main entry point for the CLI.
@@ -214,16 +255,15 @@ def main() -> int:
     try:
         if args.cmd == "list":
             return cmd_list_models(args)
-        elif args.command == "use":
+        elif args.cmd == "use":
             return cmd_use(args)
-        elif args.command == "status":
-            print("Status command not yet implemented — see issue #5")
-            return 1
-        elif args.command == "doctor":
+        elif args.cmd == "status":
+            return cmd_status(args)
+        elif args.cmd == "doctor":
             print("Doctor command not yet implemented — see issue #6")
             return 1
         else:
-            print(f"Unknown command: {args.command}")
+            print(f"Unknown command: {args.cmd}")
             return 1
     except ZaiPythonHelperError as e:
         # Per error contract: one-line error message + exit 1
