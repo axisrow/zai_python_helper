@@ -63,6 +63,35 @@ class TestMaskKey:
         leaked = masked.replace("•", "")
         assert len(leaked) <= 8
 
+    @pytest.mark.parametrize("value", ["abcde", "abcdef", "abcdefg", "abcdefgh"])
+    def test_short_keys_5_to_8_not_revealed_in_full(self, value):
+        """Regression (review cycle 1): for len 5–8 the old prefix+suffix
+        overlap reconstructed the whole secret. The masked form must never
+        let all of ``value`` be recoverable from its non-bullet chars."""
+        masked = mask_key(value)
+        non_bullet = masked.replace("•", "")
+        assert value != non_bullet
+        # The hidden core must be non-empty: prefix + suffix < len(value).
+        assert value not in non_bullet
+
+    def test_distinguishes_different_keys(self):
+        # Two distinct keys should usually produce distinct masks — the
+        # purpose of keeping a visible prefix/suffix.
+        a = mask_key("zai-aaa1111122223333")
+        b = mask_key("zai-bbb4444455556666")
+        assert a != b
+
+    @pytest.mark.parametrize(
+        "value", ["", "a", "ab", "abc", "abcd", "abcde", "abcdef", "abcdefgh"]
+    )
+    def test_value_never_equals_non_bullet_output(self, value):
+        """Universal guarantee: stripping bullets never yields the full value."""
+        masked = mask_key(value)
+        if value == "":
+            assert masked == ""
+            return
+        assert masked.replace("•", "") != value
+
 
 # ---------------------------------------------------------------------------
 # detect_status — Claude Code
@@ -225,8 +254,24 @@ class TestDetectZshrc:
         zsh = _zsh(tmp_path)
 
         assert zsh.managed_block_present is True
-        assert len(zsh.foreign_exports) == 1
-        assert "ANTHROPIC_BASE_URL" in zsh.foreign_exports[0]
+        # Only the variable NAME is collected — never the assigned value.
+        assert zsh.foreign_exports == ["ANTHROPIC_BASE_URL"]
+
+    def test_export_value_never_carried(self, tmp_path):
+        """Regression (review cycle 1): the assigned secret value must never
+        appear in the detected state — only the variable name."""
+        zshrc = Paths.from_home(tmp_path).zshrc
+        zshrc.write_text(
+            "export ANTHROPIC_API_KEY=sk-secret-LEAKED-value-12345\n"
+            "export ANTHROPIC_AUTH_TOKEN=abc.def-LEAKED\n",
+            encoding="utf-8",
+        )
+        zsh = _zsh(tmp_path)
+
+        assert zsh.foreign_exports == ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"]
+        # The values are gone from the state entirely.
+        assert "sk-secret-LEAKED-value-12345" not in str(zsh.foreign_exports)
+        assert "abc.def-LEAKED" not in str(zsh.foreign_exports)
 
     def test_export_inside_managed_block_not_flagged(self, tmp_path):
         # Per ADR-003 the block is ours; even a stray export inside it is
@@ -253,7 +298,24 @@ class TestDetectZshrc:
         zsh = _zsh(tmp_path)
 
         assert zsh.managed_block_present is False
-        assert len(zsh.foreign_exports) == 2
+        assert zsh.foreign_exports == ["ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY"]
+
+    def test_inverted_markers_treated_as_no_block(self, tmp_path):
+        """Regression (review cycle 1): END before BEGIN (or duplicated
+        markers) is a malformed pair — treat as no block so every export
+        is flagged rather than the wrong span being sliced out."""
+        zshrc = tmp_path / "inverted.zshrc"
+        zshrc.write_text(
+            f"{ZSHRC_BLOCK_END}\n"
+            "export ANTHROPIC_API_KEY=sk-x\n"
+            f"{ZSHRC_BLOCK_BEGIN}\n",
+            encoding="utf-8",
+        )
+        from zai_python_helper.status import _read_zshrc
+
+        zsh = _read_zshrc(zshrc)
+        assert zsh.managed_block_present is False
+        assert zsh.foreign_exports == ["ANTHROPIC_API_KEY"]
 
     def test_non_anthropic_exports_ignored(self, tmp_path):
         zshrc = Paths.from_home(tmp_path).zshrc
@@ -306,11 +368,29 @@ class TestRender:
         _write_settings(tmp_path, {"ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic"})
         zshrc = Paths.from_home(tmp_path).zshrc
         zshrc.write_text(
-            "export ANTHROPIC_BASE_URL=https://evil.example\n", encoding="utf-8"
+            "export ANTHROPIC_API_KEY=sk-secret-LEAKED-value-12345\n",
+            encoding="utf-8",
         )
         out = render_status(detect_status(Paths.from_home(tmp_path)), **FORCE_PLAIN)
 
         assert "shell env may override settings.json" in out
+        # The variable name is shown, but the value is redacted away.
+        assert "export ANTHROPIC_API_KEY=<redacted>" in out
+        assert "sk-secret-LEAKED-value-12345" not in out
+
+    def test_render_never_discloses_credential(self, tmp_path):
+        """Regression (review cycle 1): status output must never carry a
+        secret from a foreign shell export."""
+        _write_settings(tmp_path, {"ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic"})
+        zshrc = Paths.from_home(tmp_path).zshrc
+        zshrc.write_text(
+            "export ANTHROPIC_API_KEY=sk-secret-LEAKED-value-12345\n"
+            "export ANTHROPIC_AUTH_TOKEN=abc.def-LEAKED\n",
+            encoding="utf-8",
+        )
+        out = render_status(detect_status(Paths.from_home(tmp_path)), **FORCE_PLAIN)
+        assert "sk-secret-LEAKED-value-12345" not in out
+        assert "abc.def-LEAKED" not in out
 
     def test_no_warning_when_clean(self, tmp_path):
         _write_settings(tmp_path, {"ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic"})

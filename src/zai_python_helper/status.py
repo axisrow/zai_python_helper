@@ -36,9 +36,12 @@ ZSHRC_BLOCK_BEGIN = "# >>> zai-python-helper managed >>>"
 ZSHRC_BLOCK_END = "# <<< zai-python-helper managed <<<"
 
 # ``export ANTHROPIC_FOO=...`` outside our managed block can override
-# settings.json. We warn when we see one (ADR-003).
+# settings.json. We warn when we see one (ADR-003). The capture group
+# yields the variable NAME only (e.g. ``ANTHROPIC_API_KEY``) — the value
+# is deliberately never captured, so a secret in the assignment can never
+# reach the report (the "no secrets in output" invariant).
 _ANTHROPIC_EXPORT_RE = re.compile(
-    r"""^\s*export\s+ANTHROPIC_+\w*\s*=""", re.MULTILINE
+    r"""^\s*export\s+(ANTHROPIC_+\w*)\s*=""", re.MULTILINE
 )
 
 # Where Claude Code stores the API key. Z.ai keys live in AUTH_TOKEN
@@ -65,7 +68,13 @@ _ANSI = {
 
 @dataclass
 class ZshrcState:
-    """State of ``~/.zshrc`` relative to the integration."""
+    """State of ``~/.zshrc`` relative to the integration.
+
+    ``foreign_exports`` holds the **variable names** of foreign
+    ``export ANTHROPIC_*`` assignments (e.g. ``["ANTHROPIC_API_KEY"]``),
+    never their values — a value could be a live secret, and the report
+    must never carry one (the "no secrets in output" invariant).
+    """
 
     exists: bool
     managed_block_present: bool
@@ -118,19 +127,23 @@ def mask_key(value: str, visible_suffix: int = 4) -> str:
     Mirrors the task's ``zai-••••3f2a`` shape — a fixed 4-bullet core with
     a leading prefix and a trailing visible suffix, so two different keys
     are still distinguishable at a glance while the secret body is hidden.
-    Very short values (≤ ``visible_suffix``) are shown as bullets only, so
-    we never reveal a short secret in full.
+
+    The visible prefix and suffix together must always be SHORTER than the
+    value: if they covered the whole value the bullets would hide nothing
+    and the two ends would reconstruct the secret. For values too short to
+    leave a non-empty hidden core, the entire value is shown as bullets.
     """
     if not value:
         return ""
-    if len(value) <= visible_suffix:
+
+    # Choose the largest suffix (<= visible_suffix) that still leaves a
+    # non-empty hidden core with a <=4-char prefix.
+    suffix = min(visible_suffix, max(0, len(value) - 5))
+    prefix_len = min(4, len(value) - suffix)
+    if prefix_len <= 0 or suffix <= 0 or prefix_len + suffix >= len(value):
+        # Too short to expose anything safely — hide the whole value.
         return "•" * 4
-    # Preserve a short recognizable prefix (up to 4 chars, capped at the
-    # characters before the suffix) — e.g. "zai-" or the token id chunk.
-    prefix_len = min(4, len(value) - visible_suffix)
-    prefix = value[:prefix_len]
-    suffix = value[-visible_suffix:]
-    return f"{prefix}••••{suffix}"
+    return f"{value[:prefix_len]}{'•' * 4}{value[-suffix:]}"
 
 
 def _read_zshrc(zshrc: Path) -> ZshrcState:
@@ -140,33 +153,35 @@ def _read_zshrc(zshrc: Path) -> ZshrcState:
     block (ADR-003): exports inside the block are ours by definition and
     we never write any, so any ``export ANTHROPIC_*`` we see outside it is
     the user's (or another tool's) and may override ``settings.json``.
+
+    Only the variable **names** are collected (never the assigned values),
+    so a secret stored in such an export can never reach the report.
     """
     if not zshrc.exists():
         return ZshrcState(exists=False, managed_block_present=False)
 
     text = zshrc.read_text(encoding="utf-8", errors="replace")
-    in_block = ZSHRC_BLOCK_BEGIN in text and ZSHRC_BLOCK_END in text
+
+    # A well-formed block has BEGIN before END. Guard the ordering: if the
+    # markers are inverted or duplicated, the slice would cut the wrong
+    # span and mis-flag exports, so treat a malformed pair as "no block"
+    # (then every export is counted as foreign — the safe direction).
+    begin = text.find(ZSHRC_BLOCK_BEGIN)
+    end = text.find(ZSHRC_BLOCK_END)
+    in_block = begin != -1 and end != -1 and begin < end
 
     # Slice out our managed block so exports inside it are not flagged.
-    # The block is ours by definition (ADR-003), and we never write
-    # ``export ANTHROPIC_*`` into it — so anything matching outside it is
-    # the user's (or another tool's) and may override settings.json.
-    outside = text
     if in_block:
-        begin = text.index(ZSHRC_BLOCK_BEGIN)
-        end = text.index(ZSHRC_BLOCK_END) + len(ZSHRC_BLOCK_END)
-        outside = text[:begin] + text[end:]
+        outside = text[:begin] + text[end + len(ZSHRC_BLOCK_END):]
+    else:
+        outside = text
 
-    foreign_lines = [
-        line.strip()
-        for line in outside.splitlines()
-        if _ANTHROPIC_EXPORT_RE.match(line)
-    ]
+    foreign_names = _ANTHROPIC_EXPORT_RE.findall(outside)
 
     return ZshrcState(
         exists=True,
         managed_block_present=in_block,
-        foreign_exports=foreign_lines,
+        foreign_exports=foreign_names,
     )
 
 
@@ -278,14 +293,14 @@ def _render_claude_code(
         lines.append(f"  managed block: {dim}absent{reset}")
 
     # WARNING: foreign export may override settings.json (ADR-003).
+    # Render only the variable NAME with a literal ``<redacted>`` placeholder
+    # — the assigned value is a possible secret and must never be echoed.
     if zsh.foreign_exports:
         lines.append(
             f"  {yellow}⚠ shell env may override settings.json:{reset}"
         )
-        for line in zsh.foreign_exports:
-            # Truncate long lines so the warning stays readable.
-            shown = line if len(line) <= 60 else line[:57] + "..."
-            lines.append(f"    {dim}{shown}{reset}")
+        for name in zsh.foreign_exports:
+            lines.append(f"    {dim}export {name}=<redacted>{reset}")
 
     return lines
 
