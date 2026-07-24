@@ -5,7 +5,7 @@ This module implements the logic for generating PatchPlans for each
 of the 4 model modes (ORIGINAL, DEFAULT, SELECT, CUSTOM).
 """
 
-from typing import Any, Dict
+from typing import Any
 
 from zai_python_helper.constants import (
     ANTHROPIC_MODEL_ENV_VARS,
@@ -14,7 +14,7 @@ from zai_python_helper.constants import (
 from zai_python_helper.core.domain import ModelMode, ProviderSpec
 
 
-def plan_model_config(provider_spec: ProviderSpec) -> Dict[str, Any]:
+def plan_model_config(provider_spec: ProviderSpec) -> dict[str, Any]:
     """
     Generate environment variable configuration for a given ProviderSpec.
 
@@ -41,7 +41,7 @@ def plan_model_config(provider_spec: ProviderSpec) -> Dict[str, Any]:
         raise ValueError(f"Unknown ModelMode: {mode}")
 
 
-def _plan_original_mode(provider_spec: ProviderSpec) -> Dict[str, Any]:
+def _plan_original_mode(provider_spec: ProviderSpec) -> dict[str, Any]:
     """
     Plan for ORIGINAL mode — only ANTHROPIC_BASE_URL.
 
@@ -61,7 +61,7 @@ def _plan_original_mode(provider_spec: ProviderSpec) -> Dict[str, Any]:
     }
 
 
-def _plan_default_mode(provider_spec: ProviderSpec) -> Dict[str, Any]:
+def _plan_default_mode(provider_spec: ProviderSpec) -> dict[str, Any]:
     """
     Plan for DEFAULT mode — preset models via ANTHROPIC_DEFAULT_*_MODEL.
 
@@ -87,7 +87,7 @@ def _plan_default_mode(provider_spec: ProviderSpec) -> Dict[str, Any]:
     return env
 
 
-def _plan_select_mode(provider_spec: ProviderSpec) -> Dict[str, Any]:
+def _plan_select_mode(provider_spec: ProviderSpec) -> dict[str, Any]:
     """
     Plan for SELECT mode — user-selected model.
 
@@ -119,7 +119,7 @@ def _plan_select_mode(provider_spec: ProviderSpec) -> Dict[str, Any]:
     return env
 
 
-def _plan_custom_mode(provider_spec: ProviderSpec) -> Dict[str, Any]:
+def _plan_custom_mode(provider_spec: ProviderSpec) -> dict[str, Any]:
     """
     Plan for CUSTOM mode — user-provided model ID.
 
@@ -155,7 +155,7 @@ def _plan_custom_mode(provider_spec: ProviderSpec) -> Dict[str, Any]:
     return env
 
 
-def generate_model_overrides(provider_spec: ProviderSpec) -> Dict[str, str]:
+def generate_model_overrides(provider_spec: ProviderSpec) -> dict[str, str]:
     """
     Generate modelOverrides dict for settings.json.
 
