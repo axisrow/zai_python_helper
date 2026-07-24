@@ -25,13 +25,18 @@ def create_parser() -> argparse.ArgumentParser:
     """
     parser = argparse.ArgumentParser(
         prog="zai-python-helper",
-        description="Connect Claude Code to Z.ai GLM Coding Plan",
+        description="Connect Claude Code to Z.ai GLM Coding Plan. Switch between providers and configure model selection modes.",
         epilog="MIT licensed. See https://github.com/axisrow/zai_python_helper",
     )
     parser.add_argument(
         "--version",
         action="version",
         version=f"%(prog)s {__version__}",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Show detailed debugging information",
     )
 
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
@@ -82,11 +87,6 @@ def create_parser() -> argparse.ArgumentParser:
         "--dry-run",
         action="store_true",
         help="Show what would change without making changes",
-    )
-    use_parser.add_argument(
-        "--debug",
-        action="store_true",
-        help="Show detailed debugging information",
     )
 
     # 'list' command — show available models
