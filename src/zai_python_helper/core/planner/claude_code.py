@@ -73,17 +73,35 @@ def base_url_for_region(region: Region) -> str:
         raise ValueError(f"Unknown region: {region!r}") from e
 
 
-def _managed_model_keys(provider_spec: ProviderSpec) -> tuple[str, ...]:
-    """The env keys the given model mode contributes (beyond MANAGED_ZAI_KEYS).
+def _all_managed_model_keys() -> tuple[str, ...]:
+    """The UNION of env keys ANY model mode could contribute.
 
-    Computed by asking ``plan_model_config`` for the mode's env and removing
-    the always-managed keys. This keeps the managed set in sync with whatever
-    ``models.py`` decides — there is no second hand-maintained list that
-    could drift.
+    ``plan_default`` must remove every key that ANY activation could have
+    set, regardless of the mode the *current* invocation happens to carry.
+    Otherwise a cross-mode revert leaves stale keys: e.g. ``use zai --mode
+    default`` sets the four ``ANTHROPIC_DEFAULT_*_MODEL`` vars, then a bare
+    ``use default`` (which defaults to ORIGINAL mode, contributing none)
+    would leave those four behind — a broken half-activated config (Z.ai
+    model IDs with no auth/URL). This function closes that hole by computing
+    the full key set from the static preset table + the fixed custom-option
+    keys, so ``use default`` always strips a mode-agnostic superset.
+
+    Derived from :data:`~zai_python_helper.constants.ANTHROPIC_MODEL_ENV_VARS`
+    (the DEFAULT-mode tier vars, one per alias) plus the fixed
+    ``ANTHROPIC_CUSTOM_MODEL_OPTION*`` names. Never hand-maintained.
     """
-    mode_env = plan_model_config(provider_spec)
-    always = set(MANAGED_ZAI_KEYS)
-    return tuple(sorted(k for k in mode_env if k not in always))
+    from zai_python_helper.constants import ANTHROPIC_MODEL_ENV_VARS
+
+    keys: set[str] = set(ANTHROPIC_MODEL_ENV_VARS.values())
+    keys.update(
+        (
+            "ANTHROPIC_CUSTOM_MODEL_OPTION",
+            "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME",
+            "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION",
+            "ANTHROPIC_CUSTOM_MODEL_OPTION_SUPPORTED_CAPABILITIES",
+        )
+    )
+    return tuple(sorted(keys))
 
 
 # ---------------------------------------------------------------------------
@@ -136,14 +154,21 @@ def _plan_default_settings_doc(
 ) -> dict[str, Any]:
     """Return the desired ``settings.json`` document after ``use default``.
 
-    Removes every managed key (always-managed ZAI keys + model-mode keys)
-    from ``env``, preserving foreign keys. Drops ``env`` entirely if it
-    becomes empty. ``.claude.json`` is intentionally NOT touched.
+    Removes every managed key from ``env``, preserving foreign keys, and
+    drops ``env`` entirely if it becomes empty. ``.claude.json`` is
+    intentionally NOT touched.
+
+    The removed set is the mode-agnostic UNION (:func:`_all_managed_model_keys`)
+    so a cross-mode revert is clean: a bare ``use default`` (ORIGINAL mode)
+    still strips the ``ANTHROPIC_DEFAULT_*_MODEL`` vars a prior ``--mode
+    default`` activation set. ``provider_spec`` is accepted for signature
+    symmetry but does not scope the removal — revert is always total.
     """
+    del provider_spec  # revert is mode-agnostic (see _all_managed_model_keys)
     doc: dict[str, Any] = dict(settings_doc) if settings_doc else {}
     env: dict[str, Any] = dict(doc.get("env") or {})
 
-    managed = set(MANAGED_ZAI_KEYS) | set(_managed_model_keys(provider_spec))
+    managed = set(MANAGED_ZAI_KEYS) | set(_all_managed_model_keys())
     for key in managed:
         env.pop(key, None)
 

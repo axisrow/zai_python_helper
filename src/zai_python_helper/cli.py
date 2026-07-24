@@ -260,17 +260,24 @@ def _handle_use_zai(args: argparse.Namespace) -> int:
             print(f"  updated: {_resolve_path(paths, tag)}")
         print(f"  {_RESTART_NOTICE}")
 
-    # Echo the managed env (redacted) so the user can see what was applied.
-    desired_env = (
-        plan.delta_for(FileTag.SETTINGS).content.get("env", {}) if plan.delta_for(FileTag.SETTINGS) else {}
+    # Echo ONLY the tool-owned managed keys (never foreign env values, which
+    # may carry unrelated secrets like OPENAI_API_KEY). The managed set is
+    # derived from the planner so it stays in sync; secrets among them are
+    # redacted by name.
+    from zai_python_helper.core.planner.claude_code import (
+        MANAGED_ZAI_KEYS,
+        _all_managed_model_keys,
     )
-    if desired_env:
+
+    settings_delta = plan.delta_for(FileTag.SETTINGS)
+    desired_env = settings_delta.content.get("env", {}) if settings_delta else {}
+    managed_keys = set(MANAGED_ZAI_KEYS) | set(_all_managed_model_keys())
+    owned = {k: desired_env[k] for k in desired_env if k in managed_keys}
+    if owned:
         print(f"  base_url: {base_url_for_region(region)}")
         print("  env (managed):")
-        for key in sorted(desired_env):
-            val = desired_env[key]
-            if key in _SECRET_ENV_KEYS:
-                val = "<redacted>"
+        for key in sorted(owned):
+            val = "<redacted>" if key in _SECRET_ENV_KEYS else owned[key]
             print(f"    {key}={val}")
     return 0
 

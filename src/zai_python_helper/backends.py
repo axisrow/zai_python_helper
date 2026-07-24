@@ -28,7 +28,6 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from zai_python_helper.core.planner import DeltaKind, FileDelta
 from zai_python_helper.errors import ConfigurationError
 from zai_python_helper.shell_block import (
     install_owned_block,
@@ -84,8 +83,6 @@ def atomic_write_bytes(path: Path, data: bytes) -> None:
 def _fsync_dir(dir_path: Path) -> None:
     """Best-effort ``fsync`` of a directory (ignores unsupported filesystems)."""
     try:
-        with open(dir_path, "rb"):
-            pass
         dir_fd = os.open(str(dir_path), os.O_RDONLY)
         try:
             os.fsync(dir_fd)
@@ -207,34 +204,3 @@ class ShellBackend:
     def render_without_block(text: str) -> str:
         """Pure: the text this backend WOULD write to remove the block."""
         return remove_owned_block(text)
-
-
-def render_delta(
-    delta: FileDelta,
-    *,
-    current_json: dict[str, Any] | None = None,
-    current_text: str = "",
-) -> str:
-    """Render the exact post-write text of ``delta`` for ``--dry-run`` diffing.
-
-    Pure (no FS): given the delta and the file's CURRENT parsed content,
-    return what the file would contain after applying the delta. Used by the
-    CLI's ``--dry-run`` path to feed ``difflib.unified_diff`` without writing.
-
-    Args:
-        delta: The planned file delta.
-        current_json: For ``WRITE_JSON`` deltas, the current parsed document
-            (unused for the rendered text — the delta's ``content`` already
-            holds the full desired document). Kept in the signature for
-            symmetry / future partial-patch support.
-        current_text: For ``WRITE_TEXT`` / ``NOOP`` deltas, the current raw
-            text (returned as-is for NOOP).
-    """
-    del current_json  # symmetry only; delta.content is the full desired doc
-    if delta.kind == DeltaKind.NOOP:
-        return current_text
-    if delta.kind == DeltaKind.WRITE_JSON:
-        return JsonBackend.render(delta.content)
-    if delta.kind == DeltaKind.WRITE_TEXT:
-        return delta.content
-    raise ValueError(f"Unknown DeltaKind: {delta.kind}")  # pragma: no cover

@@ -248,6 +248,34 @@ class TestPlanDefault:
         assert env == {"SOME_FOREIGN_KEY": "keep"}
         assert delta.content["topLevel"] == 1
 
+    def test_default_mode_agnostic_strips_all_model_keys(self):
+        """Regression: revert must strip the UNION of all-mode keys regardless
+        of the revert invocation's mode. ``use zai --mode default`` sets the
+        four DEFAULT tier vars; a bare ``use default`` (ORIGINAL mode) must
+        still remove them — revert is mode-agnostic.
+        """
+        # Revert carries ORIGINAL mode (contributes no model keys of its own).
+        revert_spec = _spec(ModelMode.ORIGINAL)
+        settings = {
+            "env": {
+                "FOREIGN": "keep",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL": "zai/glm-4-plus",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL": "zai/glm-4.7",
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL": "zai/glm-4-flash",
+                "ANTHROPIC_DEFAULT_FABLE_MODEL": "zai/glm-4-plus",
+                "ANTHROPIC_CUSTOM_MODEL_OPTION": "some-custom",
+            }
+        }
+        plan = plan_default(revert_spec, settings_doc=settings)
+        env = plan.delta_for(FileTag.SETTINGS).content["env"]
+        # Every model-mode key any activation could set is stripped.
+        assert "ANTHROPIC_DEFAULT_OPUS_MODEL" not in env
+        assert "ANTHROPIC_DEFAULT_SONNET_MODEL" not in env
+        assert "ANTHROPIC_DEFAULT_HAIKU_MODEL" not in env
+        assert "ANTHROPIC_DEFAULT_FABLE_MODEL" not in env
+        assert "ANTHROPIC_CUSTOM_MODEL_OPTION" not in env
+        assert env == {"FOREIGN": "keep"}
+
     def test_default_drops_env_when_empty(self):
         """If env has only managed keys, default removes the env key entirely."""
         spec = _spec(ModelMode.DEFAULT)

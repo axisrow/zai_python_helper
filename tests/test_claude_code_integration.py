@@ -203,6 +203,51 @@ class TestUseDefault:
         # Foreign key survives; managed keys + API_KEY both gone.
         assert settings["env"] == {"FOREIGN": "keep"}
 
+    def test_cross_mode_default_strips_stale_model_keys(self, tmp_path, monkeypatch):
+        """Regression (Codex finding): ``use zai --mode default`` then a bare
+        ``use default`` (ORIGINAL) must still strip the DEFAULT-mode model
+        keys. Revert is mode-agnostic — otherwise stale Z.ai model IDs are
+        left behind with no auth/URL.
+        """
+        monkeypatch.setenv("HOME", str(tmp_path))
+        _seed(tmp_path)
+        _run(["use", "zai", "--mode", "default", "--api-key", TOKEN])
+        # Bare revert — defaults to ORIGINAL mode, which contributes no model keys.
+        _run(["use", "default"])
+
+        env = json.loads(Paths.from_home(tmp_path).claude_settings.read_text()).get(
+            "env", {}
+        )
+        for stale in (
+            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+            "ANTHROPIC_DEFAULT_FABLE_MODEL",
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_BASE_URL",
+        ):
+            assert stale not in env
+
+    def test_use_zai_echo_never_prints_foreign_secrets(self, tmp_path, monkeypatch, capsys):
+        """Regression (Codex finding): the post-activation echo must print ONLY
+        tool-owned managed keys, never foreign env values (e.g. an unrelated
+        OPENAI_API_KEY). Foreign secrets must not reach stdout.
+        """
+        monkeypatch.setenv("HOME", str(tmp_path))
+        _seed(
+            tmp_path,
+            settings={"env": {"OPENAI_API_KEY": "sk-foreign-secret-xyz"}},
+        )
+        _run(["use", "zai", "--api-key", TOKEN])
+
+        out = capsys.readouterr().out
+        # The foreign secret must NEVER appear in stdout.
+        assert "sk-foreign-secret-xyz" not in out
+        assert "OPENAI_API_KEY" not in out
+        # Our own token is redacted.
+        assert TOKEN not in out
+        assert "<redacted>" in out
+
 
 # ---------------------------------------------------------------------------
 # --dry-run — writes nothing, redacts, prints diff
