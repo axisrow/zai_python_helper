@@ -14,6 +14,7 @@ from zai_python_helper.constants import (
     list_available_presets,
 )
 from zai_python_helper.core.domain import ModelMode
+from zai_python_helper.errors import ZaiPythonHelperError
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -141,6 +142,10 @@ def cmd_list_models(args: argparse.Namespace) -> int:
             from zai_python_helper.constants import get_preset_model
 
             config = get_preset_model(preset)
+            if config is None:
+                print(f"  {preset}: (error: preset not found)")
+                continue
+
             print(f"  {preset}:")
             print(f"    ID: {config['model_id']}")
             print(f"    Name: {config['name']}")
@@ -161,11 +166,6 @@ def cmd_use(args: argparse.Namespace) -> int:
     Returns:
         Exit code (0 for success, non-zero for error)
     """
-    if args.dry_run:
-        print("[DRY RUN] Would make the following changes:")
-        # TODO: Show diff of planned changes
-        return 0
-
     if args.provider == "default":
         print("Switching to default (Anthropic) provider...")
         # TODO: Implement restore from ownership journal
@@ -176,9 +176,11 @@ def cmd_use(args: argparse.Namespace) -> int:
         mode = ModelMode(args.mode)
 
         if args.dry_run:
-            print(f"Would configure Z.ai with mode: {mode.value}")
-        else:
-            print(f"Configuring Z.ai with mode: {mode.value}")
+            print(f"[DRY RUN] Would configure Z.ai with mode: {mode.value}")
+            # TODO: Show diff of planned changes
+            return 0
+
+        print(f"Configuring Z.ai with mode: {mode.value}")
 
         # TODO: Implement actual configuration
         # 1. Resolve API key (from env or prompt)
@@ -220,7 +222,18 @@ def main() -> int:
         else:
             print(f"Unknown command: {args.command}")
             return 1
+    except ZaiPythonHelperError as e:
+        # Per error contract: one-line error message + exit 1
+        # Full traceback only with --debug
+        if args.debug:
+            import traceback
+
+            traceback.print_exc()
+        else:
+            print(f"error: {e}")
+        return 1
     except Exception as e:
+        # Unexpected exception
         if args.debug:
             import traceback
 

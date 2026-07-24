@@ -186,7 +186,8 @@ def generate_model_overrides(provider_spec: ProviderSpec) -> Dict[str, str]:
 
         preset = ZAI_MODEL_PRESETS.get(provider_spec.selected_model)
         if not preset:
-            return {}
+            # Consistent with plan_model_config: raise ValueError for unknown preset
+            raise ValueError(f"Unknown preset: {provider_spec.selected_model}")
 
         # Map based on which tier the selected model belongs to
         alias = preset["anthropic_alias"]
