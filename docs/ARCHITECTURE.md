@@ -149,6 +149,34 @@ This is per-transition and self-invalidating rather than a frozen snapshot. Live
 
 ---
 
+## Model Selection Modes (issue #10)
+
+Per issue #10, zai_python_helper supports 4 model selection modes for Z.ai:
+
+### Mode Definitions
+
+1. **ORIGINAL** — Only `ANTHROPIC_BASE_URL`, let server decide
+2. **DEFAULT** — Use preset models via `ANTHROPIC_DEFAULT_*_MODEL`
+3. **SELECT** — User selects from predefined list of models
+4. **CUSTOM** — User provides custom model ID
+
+### Implementation
+
+- **Domain types**: `ModelMode` enum, `ProviderSpec` dataclass in `core/domain.py`
+- **Presets**: `ZAI_MODEL_PRESETS` in `constants.py`
+- **Planning**: `plan_model_config()`, `generate_model_overrides()` in `core/planner/models.py`
+- **CLI**: `--mode`, `--model`, `--list` flags in `cli.py`
+
+### Architecture Compliance
+
+Per ADR-001:
+- `core/domain.py` — shared domain types (IO-free)
+- `core/planner/models.py` — pure planning functions
+- `constants.py` — static configuration
+- `cli.py` — thin argparse wrapper
+
+See [issue #10](../../issues/10) for full specification and CLI examples.
+
 ## Open architecture questions (defer to the phase that needs them)
 
 - v2 policy engine: pluggable strategies vs fixed enum? → decide at v2.
