@@ -1,0 +1,82 @@
+# Source: zai-codex-helper sibling pattern
+# Every key below is load-bearing for the skeleton package
+
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "zai-python-helper"
+dynamic = ["version"]
+description = "Z.ai Python helper: manage Claude Code ⇄ Z.ai integration without hand-editing config."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "axisrow" }]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS :: MacOS X",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Build Tools",
+]
+dependencies = [
+    # S1: no runtime deps yet (added in later phases)
+]
+
+[project.scripts]
+zai-python-helper = "zai_python_helper.__main__:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-httpserver>=1.1",
+    "build",
+    "hatchling>=1.21",
+    "ruff>=0.6",
+]
+
+[project.urls]
+Homepage = "https://github.com/axisrow/zai_python_helper"
+
+# --- hatchling: src-layout + dynamic version ---
+[tool.hatch.version]
+path = "src/zai_python_helper/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/zai_python_helper"]
+
+# --- ruff: linter + formatter ---
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP", "B"]
+ignore = []
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+# --- pytest: markers + HOME isolation ---
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+markers = [
+    "unit: fast isolated tests (pure logic, mocked IO)",
+    "integration: tests touching tmp HOME + fake services",
+    "smoke: end-to-end install+invoke (pip install . -> --help)",
+    "e2e: live Z.ai API calls (LOCAL ONLY, never in CI)",
+]
+addopts = [
+    "--strict-markers",
+    "-m", "not e2e",
+]
