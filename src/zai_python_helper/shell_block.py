@@ -42,15 +42,51 @@ def managed_block_lines() -> list[str]:
     return [MANAGED_BLOCK_BEGIN, *MANAGED_BLOCK_BODY_LINES, MANAGED_BLOCK_END]
 
 
-def owns_owned_block(text: str) -> bool:
-    """True iff ``text`` already contains our managed block (begin AND end).
+def _find_block_range(text: str) -> tuple[int, int] | None:
+    """Locate the managed block as a ``(begin_line_idx, end_line_idx)`` pair.
 
-    Pure substring check. We do not require the lines to be contiguous here —
-    ``install_owned_block`` is the authority on shape; this predicate only
-    answers "is the block present?". A second ``use zai`` short-circuits to a
-    NOOP when this returns True.
+    Validates the block is **well-formed**: exactly one BEGIN line followed
+    later by exactly one END line, in order, with nothing in between that
+    looks like another fence. Returns ``None`` when:
+
+    - no fences are present (the block was never installed);
+    - the fences are out of order (END before BEGIN — a manual edit or merge
+      conflict left the file malformed);
+    - either fence is duplicated (ambiguous — refuse to guess which region
+      is ours).
+
+    Fail-closed: any ambiguity returns ``None`` so the caller treats the
+    block as absent and never truncates foreign content. A malformed file is
+    left untouched; ``status``/``doctor`` can surface the anomaly separately.
     """
-    return MANAGED_BLOCK_BEGIN in text and MANAGED_BLOCK_END in text
+    lines = text.split("\n")
+    begin_idx = None
+    end_idx = None
+    for i, line in enumerate(lines):
+        if line == MANAGED_BLOCK_BEGIN:
+            if begin_idx is not None:
+                return None  # duplicate BEGIN — ambiguous
+            begin_idx = i
+        elif line == MANAGED_BLOCK_END:
+            if end_idx is not None:
+                return None  # duplicate END — ambiguous
+            end_idx = i
+    if begin_idx is None or end_idx is None:
+        return None  # missing one or both fences
+    if end_idx <= begin_idx:
+        return None  # END before BEGIN — malformed ordering
+    return begin_idx, end_idx
+
+
+def owns_owned_block(text: str) -> bool:
+    """True iff ``text`` contains a **well-formed** managed block.
+
+    Requires exactly one BEGIN followed by exactly one END, in order. A
+    malformed fence (reordered, duplicated, or lone) returns False — we do
+    not claim ownership of a file we cannot safely edit. A second ``use zai``
+    short-circuits to a NOOP only when this returns True.
+    """
+    return _find_block_range(text) is not None
 
 
 def install_owned_block(text: str) -> str:
@@ -62,10 +98,14 @@ def install_owned_block(text: str) -> str:
     and the result always ends with exactly one trailing newline so the file
     is well-formed whether it pre-existed or not.
 
-    If the block is already present this is a no-op (returns ``text``
-    unchanged) so the planner's equality check naturally yields a NOOP delta.
+    If a well-formed block is already present this is a no-op (returns
+    ``text`` unchanged) so the planner's equality check naturally yields a
+    NOOP delta. If ANY fence marker is present but the pair is MALFORMED
+    (reordered/duplicated/lone), we refuse to install rather than add a
+    second block on top of the corruption — the file is left untouched.
     """
-    if owns_owned_block(text):
+    if MANAGED_BLOCK_BEGIN in text or MANAGED_BLOCK_END in text:
+        # A marker is present: well-formed pair → no-op; malformed → refuse.
         return text
 
     block = "\n".join(managed_block_lines())
@@ -81,26 +121,23 @@ def install_owned_block(text: str) -> str:
 def remove_owned_block(text: str) -> str:
     """Return ``text`` with our managed block removed (idempotent).
 
-    Removes the fenced region INCLUSIVELY (begin fence, body, end fence) and
-    collapses the surrounding blank lines so no dangling whitespace is left.
-    Foreign lines are NEVER touched. If the block is absent this is a no-op.
+    Removes the fenced region INCLUSIVELY (begin fence, body, end fence) —
+    ONLY the exact, well-formed range — and collapses the surrounding blank
+    lines so no dangling whitespace is left. Foreign lines are NEVER touched.
+
+    Fail-closed: if the fences are absent or malformed (reordered/duplicated),
+    this is a no-op (returns ``text`` unchanged). It never deletes content
+    outside the validated begin→end range, so a manually-corrupted fence
+    cannot truncate the user's file.
     """
-    if not owns_owned_block(text):
+    rng = _find_block_range(text)
+    if rng is None:
         return text
+    begin_idx, end_idx = rng
 
     lines = text.split("\n")
-    out: list[str] = []
-    skipping = False
-    for line in lines:
-        if line == MANAGED_BLOCK_BEGIN:
-            skipping = True
-            continue
-        if skipping and line == MANAGED_BLOCK_END:
-            skipping = False
-            continue
-        if skipping:
-            continue
-        out.append(line)
+    # Drop the inclusive [begin_idx, end_idx] range only.
+    out = lines[:begin_idx] + lines[end_idx + 1 :]
 
     # Collapse runs of 2+ consecutive blank lines (the removal can leave a
     # dangling blank pair at the splice point) down to a single blank line.

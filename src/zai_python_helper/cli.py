@@ -31,9 +31,31 @@ _TAG_TO_PATH = {
 
 # Keys whose values are secrets and must be redacted in any diff/echo output
 # (ADR: secrets never logged). Used by both --dry-run and the post-run echo.
+# This is a conservative allowlist-by-name: a key is secret if it is one of
+# the explicit names below OR matches a credential-ish suffix/pattern. We
+# redact defensively so a foreign key we don't know about (OPENAI_API_KEY,
+# cloud tokens, etc.) never leaks through a dry-run diff or echo.
 _SECRET_ENV_KEYS = ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY")
+_SECRET_NAME_SUFFIXES = ("_KEY", "_TOKEN", "_SECRET", "_PASSWORD", "_PASSWD")
+_SECRET_NAME_SUBSTRINGS = ("SECRET", "PASSWORD", "CREDENTIAL", "TOKEN", "API_KEY")
 
 _RESTART_NOTICE = "restart recommended for deterministic switching"
+
+
+def _is_secret_key(key: str) -> bool:
+    """Heuristic: is ``key`` likely a credential that must be redacted?
+
+    Conservative — errs on the side of redacting. Matches the explicit
+    managed-secret names plus credential-ish suffixes/substrings so foreign
+    secrets (OPENAI_API_KEY, cloud tokens) are caught even though we don't
+    enumerate them.
+    """
+    upper = key.upper()
+    if key in _SECRET_ENV_KEYS:
+        return True
+    if any(upper.endswith(suf) for suf in _SECRET_NAME_SUFFIXES):
+        return True
+    return any(sub in upper for sub in _SECRET_NAME_SUBSTRINGS)
 
 
 def _resolve_path(paths: Paths, tag: FileTag) -> Path:
@@ -44,20 +66,21 @@ def _resolve_path(paths: Paths, tag: FileTag) -> Path:
 def _redact_json_text(text: str) -> str:
     """Redact secret values in rendered JSON text for safe diffing/echo.
 
-    Replaces the value of any secret key with ``"<redacted>"``. Works on the
-    rendered JSON string (post-serialize) so it catches the token wherever it
-    appears. A token never reaches stdout/stderr.
+    Replaces the value of any credential-looking key with ``"<redacted>"``.
+    Works on the rendered JSON string (post-serialize) so it catches secrets
+    wherever they appear — including foreign keys we don't manage
+    (OPENAI_API_KEY, cloud tokens) that could otherwise leak through a
+    ``--dry-run`` diff's context lines. A secret value never reaches
+    stdout/stderr.
     """
-    out = text
-    for _key in _SECRET_ENV_KEYS:
-        # Match ``"KEY": "value"`` and replace only the value. The value is
-        # JSON-quoted; we replace its inner contents with <redacted>.
-        out = re.sub(
-            rf'("{_key}"\s*:\s*")([^"]*)(")',
-            r"\1<redacted>\3",
-            out,
-        )
-    return out
+    # Match ``"KEY": "value"`` and replace only the value for secret keys.
+    def _replace(match: re.Match[str]) -> str:
+        key = match.group(1)
+        if _is_secret_key(key):
+            return f'"{key}": "<redacted>"'
+        return match.group(0)
+
+    return re.sub(r'"([A-Za-z0-9_]+)"\s*:\s*"([^"]*)"', _replace, text)
 
 
 def _apply_plan(paths: Paths, plan: PatchPlan, *, dry_run: bool) -> list[FileTag]:
@@ -277,7 +300,7 @@ def _handle_use_zai(args: argparse.Namespace) -> int:
         print(f"  base_url: {base_url_for_region(region)}")
         print("  env (managed):")
         for key in sorted(owned):
-            val = "<redacted>" if key in _SECRET_ENV_KEYS else owned[key]
+            val = "<redacted>" if _is_secret_key(key) else owned[key]
             print(f"    {key}={val}")
     return 0
 

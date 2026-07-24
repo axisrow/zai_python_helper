@@ -119,11 +119,24 @@ def _plan_settings_doc(
     """Return the desired ``settings.json`` document after ``use zai``.
 
     Deep-merges the Z.ai ``env`` over the existing ``env`` (foreign keys
-    survive), and removes ``ANTHROPIC_API_KEY`` from ``env`` (Z.ai
-    authenticates via AUTH_TOKEN). Does NOT mutate the input.
+    survive), removes ``ANTHROPIC_API_KEY`` (Z.ai authenticates via
+    AUTH_TOKEN), and clears stale model-mode keys from a *previous*
+    activation before applying this mode's contribution — so a Z.ai→Z.ai
+    mode switch (e.g. ``--mode default`` then ``--mode original``) does not
+    leave the prior mode's ``ANTHROPIC_DEFAULT_*_MODEL`` overrides behind.
+    Does NOT mutate the input.
     """
     doc: dict[str, Any] = dict(settings_doc) if settings_doc else {}
     env: dict[str, Any] = dict(doc.get("env") or {})
+
+    # Clear the union of all-mode keys first. We own the full model-mode
+    # namespace (no foreign key collides with ANTHROPIC_DEFAULT_*_MODEL /
+    # ANTHROPIC_CUSTOM_MODEL_OPTION*), so dropping the prior mode's residue
+    # before overlaying the new mode is safe and prevents a cross-mode
+    # switch from carrying stale overrides. The new mode's keys are written
+    # back below; modes that don't set a given tier simply leave it absent.
+    for stale in _all_managed_model_keys():
+        env.pop(stale, None)
 
     # Build the Z.ai env contribution: auth token, base URL (region), plus
     # whatever the selected model mode contributes. plan_model_config already

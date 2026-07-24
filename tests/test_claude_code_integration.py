@@ -295,6 +295,24 @@ class TestDryRun:
         assert "sk-real-secret" not in out
         assert "<redacted>" in out
 
+    def test_dry_run_redacts_foreign_secret_in_diff(self, tmp_path, monkeypatch, capsys):
+        """Regression (Codex F1): a foreign secret in settings.json must be
+        redacted in the --dry-run diff context, not just the Anthropic keys.
+        """
+        monkeypatch.setenv("HOME", str(tmp_path))
+        _seed(
+            tmp_path,
+            settings={"env": {"OPENAI_API_KEY": "sk-foreign-secret-xyz"}},
+        )
+        _run(
+            ["use", "zai", "--mode", "default", "--region", "global", "--api-key", TOKEN, "--dry-run"],
+        )
+        out = capsys.readouterr().out
+        assert "+++" in out  # a diff was printed
+        # The foreign secret never appears — it is redacted as diff context.
+        assert "sk-foreign-secret-xyz" not in out
+        assert "<redacted>" in out
+
     def test_dry_run_on_already_desired_prints_no_changes(self, tmp_path, monkeypatch, capsys):
         monkeypatch.setenv("HOME", str(tmp_path))
         _seed(tmp_path)

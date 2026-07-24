@@ -114,6 +114,61 @@ class TestForeignSurvival:
         assert text.count(MANAGED_BLOCK_END) == 1
 
 
+class TestMalformedMarkersFailClosed:
+    """Regression (Codex finding F5): malformed fences must NOT truncate the
+    user's file. ``owns`` returns False and ``remove``/``install`` are no-ops
+    for reordered, duplicated, or lone fences — we never edit a file whose
+    block we cannot identify unambiguously.
+    """
+
+    def test_reversed_markers_remove_is_noop(self):
+        """END before BEGIN: remove must leave the file byte-for-byte intact
+        (previously it deleted everything after the stray BEGIN).
+        """
+        text = (
+            "export A=1\n"
+            + MANAGED_BLOCK_END
+            + "\n"
+            + MANAGED_BLOCK_BEGIN
+            + "\nexport CRITICAL=1\n"
+        )
+        assert not owns_owned_block(text)
+        assert remove_owned_block(text) == text
+        # The critical foreign line is preserved.
+        assert "export CRITICAL=1" in remove_owned_block(text)
+
+    def test_lone_begin_remove_is_noop(self):
+        text = "export A=1\n" + MANAGED_BLOCK_BEGIN + "\nexport B=2\n"
+        assert not owns_owned_block(text)
+        assert remove_owned_block(text) == text
+
+    def test_lone_end_remove_is_noop(self):
+        text = "export A=1\n" + MANAGED_BLOCK_END + "\nexport B=2\n"
+        assert not owns_owned_block(text)
+        assert remove_owned_block(text) == text
+
+    def test_duplicate_begin_is_noop(self):
+        text = (
+            MANAGED_BLOCK_BEGIN
+            + "\n"
+            + MANAGED_BLOCK_BEGIN
+            + "\n"
+            + MANAGED_BLOCK_END
+            + "\n"
+        )
+        # Ambiguous — two BEGINs. Refuse to edit.
+        assert not owns_owned_block(text)
+        assert remove_owned_block(text) == text
+
+    def test_install_refuses_when_malformed(self):
+        """install must not append a second block over a malformed fence set."""
+        text = MANAGED_BLOCK_END + "\n" + MANAGED_BLOCK_BEGIN + "\nexport X=1\n"
+        out = install_owned_block(text)
+        # Left untouched — no second block added.
+        assert out == text
+        assert out.count(MANAGED_BLOCK_BEGIN) == 1
+
+
 # ---------------------------------------------------------------------------
 # IO backend (atomic write, file lifecycle)
 # ---------------------------------------------------------------------------

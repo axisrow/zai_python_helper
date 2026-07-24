@@ -248,6 +248,27 @@ class TestPlanDefault:
         assert env == {"SOME_FOREIGN_KEY": "keep"}
         assert delta.content["topLevel"] == 1
 
+    def test_cross_mode_activation_clears_prior_mode_keys(self):
+        """Regression (Codex F4): a Z.ai→Z.ai mode switch must not leave the
+        previous mode's model overrides behind. ``use zai --mode default``
+        sets ANTHROPIC_DEFAULT_*_MODEL; a later ``use zai --mode original``
+        must clear them (original mode sets none).
+        """
+        default_spec = _spec(ModelMode.DEFAULT)
+        plan1 = plan_zai(default_spec, Region.GLOBAL, auth_token=TOKEN)
+        after_default = plan1.delta_for(FileTag.SETTINGS).content
+
+        original_spec = _spec(ModelMode.ORIGINAL)
+        plan2 = plan_zai(original_spec, Region.GLOBAL, settings_doc=after_default, auth_token=TOKEN)
+        env = plan2.delta_for(FileTag.SETTINGS).content["env"]
+        for stale in (
+            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+            "ANTHROPIC_DEFAULT_FABLE_MODEL",
+        ):
+            assert stale not in env
+
     def test_default_mode_agnostic_strips_all_model_keys(self):
         """Regression: revert must strip the UNION of all-mode keys regardless
         of the revert invocation's mode. ``use zai --mode default`` sets the
