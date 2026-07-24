@@ -63,6 +63,21 @@ def _handle_use_zai(args: argparse.Namespace) -> int:
     mode = ModelMode(getattr(args, "mode", ModelMode.ORIGINAL.value))
     paths = Paths.default()
 
+    # These flags only carry meaning in CUSTOM mode; plan_model_config ignores
+    # them otherwise. Reject them up front rather than silently dropping the
+    # user's input (a typo'd --mode must not quietly discard --name, etc.).
+    custom_only = {
+        "--name": getattr(args, "name", None),
+        "--description": getattr(args, "description", None),
+        "--capabilities": getattr(args, "capabilities", None),
+    }
+    if mode != ModelMode.CUSTOM:
+        used = [flag for flag, value in custom_only.items() if value]
+        if used:
+            raise ValidationError(
+                f"{', '.join(used)} only apply to --mode custom"
+            )
+
     # Build the domain spec and validate it against the mode before planning.
     spec = ProviderSpec(
         base_url="https://api.z.ai/api/anthropic",
