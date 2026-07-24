@@ -196,6 +196,62 @@ class TestDetectClaudeCode:
         assert cc.key_var is None
         assert cc.key_masked is None
 
+    @pytest.mark.parametrize(
+        "bad_value", [123, ["https://api.z.ai"], {"x": 1}, True]
+    )
+    def test_non_string_base_url_does_not_crash(self, tmp_path, bad_value):
+        """Regression (review cycle 3): schema drift may put a non-string
+        in ANTHROPIC_BASE_URL. Status must degrade to inactive, not crash."""
+        settings = Paths.from_home(tmp_path).claude_settings
+        settings.parent.mkdir(parents=True, exist_ok=True)
+        settings.write_text(
+            json.dumps({"env": {"ANTHROPIC_BASE_URL": bad_value}}), encoding="utf-8"
+        )
+        cc = _cc(tmp_path)
+
+        assert cc.zai_active is False
+        assert cc.region is None
+        # base_url is never the raw non-string value.
+        assert not isinstance(cc.base_url, (int, list, dict, bool))
+
+    def test_non_string_key_value_does_not_crash(self, tmp_path):
+        """A non-string ANTHROPIC_API_KEY must not crash mask_key."""
+        settings = Paths.from_home(tmp_path).claude_settings
+        settings.parent.mkdir(parents=True, exist_ok=True)
+        settings.write_text(
+            json.dumps(
+                {
+                    "env": {
+                        "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
+                        "ANTHROPIC_API_KEY": 12345,
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        cc = _cc(tmp_path)
+        # Non-string key is ignored, not crashed on.
+        assert cc.key_var is None
+        assert cc.key_masked is None
+
+    def test_secret_bearing_endpoint_sanitized(self, tmp_path):
+        """Regression (review cycle 3): a URL with credentials in userinfo
+        or query must be sanitized before reaching the report."""
+        secret_url = (
+            "https://user:secretPass@api.z.ai/api/anthropic?key=sk-hiddenkey#frag"
+        )
+        _write_settings(tmp_path, {"ANTHROPIC_BASE_URL": secret_url})
+        cc = _cc(tmp_path)
+
+        # Still classified as active Z.ai (host is api.z.ai)...
+        assert cc.zai_active is True
+        assert cc.region is Region.GLOBAL
+        # ...but the stored/returned endpoint never carries the secret parts.
+        assert "secretPass" not in (cc.base_url or "")
+        assert "sk-hiddenkey" not in (cc.base_url or "")
+        assert "?key=" not in (cc.base_url or "")
+        assert "@api.z.ai" not in (cc.base_url or "")
+
     def test_malformed_settings_json_treated_as_no_env(self, tmp_path):
         # A corrupt settings.json must not crash status — degrade to inactive.
         settings = Paths.from_home(tmp_path).claude_settings
@@ -390,6 +446,20 @@ class TestRender:
         out = render_status(detect_status(Paths.from_home(tmp_path)), **FORCE_PLAIN)
         assert "sk-secret-LEAKED-value-12345" not in out
         assert "abc.def-LEAKED" not in out
+
+    def test_render_never_discloses_endpoint_secret(self, tmp_path):
+        """Regression (review cycle 3): a credential embedded in the
+        endpoint URL (userinfo / query) must never reach the report."""
+        secret_url = (
+            "https://user:secretPass@api.z.ai/api/anthropic?key=sk-hiddenkey"
+        )
+        _write_settings(tmp_path, {"ANTHROPIC_BASE_URL": secret_url})
+        out = render_status(detect_status(Paths.from_home(tmp_path)), **FORCE_PLAIN)
+        assert "secretPass" not in out
+        assert "sk-hiddenkey" not in out
+        assert "?key=" not in out
+        # The sanitized host/path still shown so the endpoint is recognizable.
+        assert "api.z.ai/api/anthropic" in out
 
     def test_no_warning_when_clean(self, tmp_path):
         _write_settings(tmp_path, {"ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic"})

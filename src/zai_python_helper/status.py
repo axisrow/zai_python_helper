@@ -25,6 +25,7 @@ import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 from zai_python_helper.paths import Paths
 from zai_python_helper.regions import Region
@@ -101,24 +102,41 @@ class StatusReport:
     claude_code: ClaudeCodeStatus | None = None
 
 
+def _host_of(url: str) -> str:
+    """Return the lowercase host of a URL, robust to userinfo/port.
+
+    Uses :func:`urllib.parse.urlsplit` (pure parsing, no network) so a
+    ``user:pass@host`` userinfo or a ``:port`` suffix does not corrupt the
+    host extraction the way a naive ``split(':')`` would.
+    """
+    return urlsplit(url).hostname or ""
+
+
 def _classify_region(base_url: str) -> Region | None:
     """Map a base URL to a :class:`Region`, or ``None`` if not a Z.ai host.
 
-    Normalizes scheme/path/port away — only the host matters. A URL pointing
-    at neither ``z.ai`` nor ``z.cn`` (e.g. the real ``api.anthropic.com``)
-    is "not Z.ai" → ``None``, reported as inactive.
+    Only the host matters. A URL pointing at neither ``z.ai`` nor ``z.cn``
+    (e.g. the real ``api.anthropic.com``) is "not Z.ai" → ``None``,
+    reported as inactive.
     """
-    # Strip scheme.
-    cleaned = base_url
-    for scheme in ("https://", "http://"):
-        if cleaned.startswith(scheme):
-            cleaned = cleaned[len(scheme):]
-    # Strip path / port / query.
-    host = cleaned.split("/", 1)[0].split(":", 1)[0].lower()
+    host = _host_of(base_url)
     for region, hosts in _ZAI_HOSTS.items():
         if any(host == h or host.endswith("." + h) for h in hosts):
             return region
     return None
+
+
+def _safe_endpoint(url: str) -> str:
+    """Strip secret-bearing components from a URL for status display.
+
+    Removes userinfo (``user:pass@`` — a common place to embed a token),
+    the query string, and the fragment before rendering. The scheme, host,
+    port, and path are kept, which is enough to recognize the endpoint
+    without ever echoing an embedded credential. Pure parsing — no network.
+    """
+    parts = urlsplit(url)
+    # Drop userinfo, query, fragment; keep scheme/host/port/path.
+    return urlunsplit((parts.scheme, parts.netloc.split("@")[-1], parts.path, "", ""))
 
 
 def mask_key(value: str, visible_suffix: int = 4) -> str:
@@ -207,12 +225,19 @@ def _detect_claude_code(paths: Paths) -> ClaudeCodeStatus:
             data = {}
         env = data.get("env") if isinstance(data, dict) else None
         if isinstance(env, dict):
-            base_url = env.get("ANTHROPIC_BASE_URL")
+            # ``ANTHROPIC_BASE_URL`` must be a string; a malformed settings
+            # file (schema drift / manual corruption) may hold an int/list/
+            # dict/bool. Degrade to "no endpoint" rather than crashing the
+            # diagnostic command (the read-only invariant must hold under
+            # corrupt input).
+            raw_url = env.get("ANTHROPIC_BASE_URL")
+            if isinstance(raw_url, str):
+                base_url = _safe_endpoint(raw_url)
             for var in _API_KEY_VARS:
                 val = env.get(var)
-                if val:
+                if isinstance(val, str) and val:
                     key_var = var
-                    key_masked = mask_key(str(val))
+                    key_masked = mask_key(val)
                     break
 
     region = _classify_region(base_url) if base_url else None
