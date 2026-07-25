@@ -113,8 +113,14 @@ class ProcessLock:
             self._fd = os_open(self.path)
             fcntl.flock(self._fd, fcntl.LOCK_EX)
         except BaseException:
-            # Release the intra lock if flock setup failed — never hold one
-            # layer without the other.
+            # Close the fd we opened (if flock failed) and release the intra
+            # lock — never hold one layer without the other, never leak the fd.
+            # release() is unreachable here because acquire() is raising, so we
+            # clean up explicitly before re-raising.
+            if self._fd is not None:
+                with contextlib.suppress(OSError):
+                    close_fd(self._fd)
+                self._fd = None
             self._release_intra()
             raise
 

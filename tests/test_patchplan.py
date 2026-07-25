@@ -13,6 +13,7 @@ and a NOOP plan writes nothing.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import threading
 import time
@@ -147,6 +148,46 @@ class TestProcessLock:
         # A second acquisition immediately after release succeeds (no deadlock).
         with ProcessLock(lock_path):
             pass
+
+    def test_acquire_closes_fd_if_flock_fails(self, tmp_path, monkeypatch):
+        """If flock fails after os_open, the opened fd is closed (no leak).
+
+        Regression for the fd-leak on the flock-failure path: acquire() opens
+        the lock file then takes flock; if flock raises, the fd it opened must
+        be closed (release() is unreachable because acquire() is raising).
+        """
+        import zai_python_helper.patchplan as pp
+
+        opened: list[int] = []
+
+        real_open = pp.os_open
+        real_flock = fcntl.flock
+
+        def tracking_open(path):
+            fd = real_open(path)
+            opened.append(fd)
+            return fd
+
+        def failing_flock(fd, op):
+            if op == fcntl.LOCK_EX:
+                raise OSError("simulated flock failure")
+            real_flock(fd, op)
+
+        monkeypatch.setattr(pp, "os_open", tracking_open)
+        monkeypatch.setattr(pp.fcntl, "flock", failing_flock)
+
+        lock = ProcessLock(tmp_path / "lock")
+        with pytest.raises(OSError):
+            lock.acquire()
+
+        # The fd we opened is now closed (not leaked).
+        import os
+
+        for fd in opened:
+            with pytest.raises(OSError):
+                os.fstat(fd)
+        # And the lock is not left half-held.
+        assert lock._held_intra is False
 
 
 # ---------------------------------------------------------------------------
