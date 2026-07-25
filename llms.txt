@@ -72,7 +72,7 @@ Auto-generated from `zai_python_helper.__all__` (the versioned contract, issue
 
 
 ```text
-# name → signature → one-line   (from __all__, n=23)
+# name → signature → one-line   (from __all__, n=27)
 - `__version__` = `0.1.0`
 - `ModelMode` (enum): Mode for model selection in Claude Code configuration.
 - `ProviderSpec` (dataclass): Specification for a provider configuration.
@@ -85,6 +85,10 @@ Auto-generated from `zai_python_helper.__all__` (the versioned contract, issue
 - `plan_zai(provider_spec: ProviderSpec, region: Region, settings_doc: dict[str, Any] | None, claude_json_doc: dict[str, Any] | None, zshrc_text: str, auth_token: str) -> PatchPlan`: Plan the `use zai` activation for Claude Code.
 - `postconditions(region: Region, settings_doc: dict[str, Any] | None, zshrc_text: str) -> bool`: True iff `settings.json` + `.zshrc` reflect an active `use zai`.
 - `base_url_for_region(region: Region) -> str`: Return the Z.ai Anthropic-compatible base URL for `region`.
+- `RevertAction` (enum): What `revert` decided to do with one managed key.
+- `RevertDecision` (dataclass): The outcome of `revert` for one key.
+- `take_over(records: dict[str, Any], tool: str, key: str, prior_value: str | None, prior_present: bool, set_hash: str | None) -> dict[str, Any]`: Record that we now own `(tool, key)`; return an updated journal copy.
+- `revert(records: dict[str, Any], tool: str, key: str, current_value: str | None) -> RevertDecision`: Decide how to revert one `(tool, key)` given its current value.
 - `Paths` (dataclass): Frozen bundle of every resolved filesystem path the tool touches.
 - `JsonBackend` (class): Atomic JSON document writer/reader.
 - `ShellBackend` (class): Owned marker-fenced block writer for shell rc files (ADR-003).
