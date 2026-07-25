@@ -27,15 +27,21 @@ Per tool (Claude Code first — the v1 front door), the chain is:
      offline/timeout → WARN (graceful). Redirects are disabled and only HTTPS
      is probed, so the key is not leaked across origins or downgraded to HTTP.
 
-**MCP probe** is deferred to S7 — left as an explicit TODO placeholder, not a
-check, so it contributes nothing to the exit code today.
+**MCP probe** (S7): for each Z.ai preset MCP and each cross-tool target, the
+probe reads the tool's MCP config (READ-ONLY) and reports which preset MCPs are
+installed. An installed preset is a PASS; an UN-installed one is a PASS too
+(installing a preset is an explicit opt-in, never a broken link) — doctor never
+FAILs on an absent MCP. The probe does NOT stdio-launch ``npx -y @z_ai/mcp-server``
+nor ping the http MCP endpoints: those would require network/a subprocess and
+would break the "doctor runs offline" contract. The check is purely a config
+read, so it stays cheap, offline-safe, and never fails doctor.
 
 READ-ONLY CONTRACT: doctor performs zero writes and no mutation of any
 config file. It reads ``settings.json`` and the environment through the
 injected :class:`Paths` and ``environ``. The only network call is the HTTP
 probe, issued through the injectable ``http_get`` seam (a test seam for
 pytest-httpserver: production uses :mod:`urllib` from the stdlib — no
-``httpx`` dependency).
+``httpx`` dependency). The MCP probe does no network at all.
 """
 
 from __future__ import annotations
@@ -581,6 +587,66 @@ def _check_shell_override(paths: Paths) -> CheckResult | None:
     return None
 
 
+def _check_mcp_installed(paths: Paths) -> CheckResult:
+    """Report installed Z.ai preset MCPs across tools (S7, READ-ONLY).
+
+    Reads each cross-tool MCP config (Claude Code, OpenCode, Crush, Factory
+    Droid) through :mod:`zai_python_helper.mcp` and reports how many of the four
+    preset MCPs are installed. ALL verdicts are ``pass`` — installing a preset
+    MCP is an explicit opt-in, so an UN-installed preset is NOT a broken link
+    and must NEVER fail doctor. The detail names the installed presets and the
+    tools that carry them; the hint points at the opt-in install command.
+
+    No network, no subprocess: this is a pure config read. Returns ``None``
+    when no tool config exists at all (nothing to report — the check is
+    informational and there is no chain to verify).
+    """
+    from zai_python_helper.mcp import (
+        PRESET_MCP_SERVICES,
+        Tool,
+        is_installed,
+        read_config,
+        tool_config_path,
+    )
+
+    # Derive home from claude_settings: it is ``<home>/.claude/settings.json``,
+    # so two parents up is home. (``parent`` = ``.claude``, ``parent.parent`` =
+    # home.) This is the resolved home the cross-tool MCP configs live under.
+    home = paths.claude_settings.parent.parent
+    preset_ids = [p["id"] for p in PRESET_MCP_SERVICES]
+    installed: list[str] = []
+    for tool in Tool:
+        try:
+            doc = read_config(tool_config_path(tool, home))
+        except Exception:
+            # Unreadable tool config: doctor reports, never raises. The check
+            # is informational, so skip this tool rather than FAIL.
+            continue
+        if doc is None:
+            continue
+        for mcp_id in preset_ids:
+            if is_installed(doc, tool, mcp_id):
+                # Tag the installed id with the tool it was found in, so the
+                # detail line is actionable when several tools are configured.
+                label = f"{mcp_id}@{tool.value}"
+                if label not in installed:
+                    installed.append(label)
+    name = "preset MCP servers"
+    if not installed:
+        return CheckResult(
+            name=name,
+            verdict="pass",
+            detail="none installed (opt-in)",
+            hint="install with `zai-python-helper mcp install <id> --tool <tool>`",
+        )
+    return CheckResult(
+        name=name,
+        verdict="pass",
+        detail=f"{len(installed)} installed ({', '.join(installed)})",
+        hint="",
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Public entry point.
 # --------------------------------------------------------------------------- #
@@ -661,9 +727,9 @@ def run_doctor(
     if shell is not None:
         _emit(shell)
 
-    # TODO(S7): MCP probe — stdio-launch `npx -y @z_ai/mcp-server` +
-    # reachability of the HTTP-MCP servers. Deferred; contributes nothing to
-    # the exit code today. Add it as a check (NOT a FAIL on absence) once S7
-    # lands, so an un-installed MCP never fails doctor.
+    # 6. preset MCP servers (S7) — READ-ONLY config read across tools. Always a
+    # PASS (installing a preset is an explicit opt-in, never a broken link), so
+    # it contributes nothing to the exit code; it surfaces what IS installed.
+    _emit(_check_mcp_installed(paths))
 
     return 1 if any(r.verdict == "fail" for r in results) else 0
