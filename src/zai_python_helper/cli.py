@@ -405,9 +405,16 @@ def _handle_status(args: argparse.Namespace) -> int:
 
 
 def _handle_doctor(args: argparse.Namespace) -> int:
-    """Run diagnostics (stub for later phases)."""
-    print("Doctor: all checks passed (stub)")
-    return 0
+    """Run the diagnostic pipeline — verify the configured chain works.
+
+    Thin shell: resolve ``Paths.default()`` and delegate to
+    :func:`zai_python_helper.doctor.run_doctor`. doctor owns its exit code
+    (``0`` unless a check FAILs; WARNs alone → ``0``) and its own rendering,
+    so this handler neither prints nor catches — it just returns the int.
+    """
+    from zai_python_helper.doctor import run_doctor
+
+    return run_doctor(Paths.default())
 
 
 def _add_use_zai_flags(parser: argparse.ArgumentParser) -> None:
