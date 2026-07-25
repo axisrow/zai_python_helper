@@ -48,3 +48,9 @@ jobs:
           fi
       - name: Run docs tests
         run: pytest tests/test_docs_gen.py -v
+      # #20 — human-docs i18n structure-sync gate. Committed here as a tool +
+      # `make human-docs-check` target, but NOT enforced in CI yet: it requires
+      # docs/zh/ to mirror docs/en/ file-for-file, and zh ships in the follow-up
+      # (#34). Enforcement is wired in once zh lands.
+      # - name: Enforce human-docs i18n structure sync
+      #   run: python tools/check_human_docs_structure.py
