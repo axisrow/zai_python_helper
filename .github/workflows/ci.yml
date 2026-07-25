@@ -45,11 +45,10 @@ jobs:
       - name: Build parity image
         run: |
           docker build -f docker/parity/Dockerfile -t zai-parity:smoke .
-      - name: Run parity version-format tests (docker primary)
-        env:
-          # Hint the test runner that docker is available; the auto-detection
-          # also works, but this keeps the job's intent explicit.
-          PARITY_RUNNER: docker
+      - name: Run parity version-format tests
+        # The test auto-detects docker via `_docker_available()`; no env hint
+        # is needed. The image built above is reused (not rebuilt) because the
+        # test's `_ensure_image()` sees it already present.
         run: |
           pytest tests/parity/ -v
 
