@@ -37,6 +37,18 @@ Machine-readable reference for the **importable public API** (`__all__`, issue #
 - [`StatusReport`](#statusreport)
 - [`detect_status`](#detect_status)
 - [`render_status`](#render_status)
+- [`McpPreset`](#mcppreset)
+- [`PRESET_MCP_SERVICES`](#preset_mcp_services)
+- [`preset_by_id`](#preset_by_id)
+- [`preset_ids`](#preset_ids)
+- [`build_mcp_entry`](#build_mcp_entry)
+- [`install_into_doc`](#install_into_doc)
+- [`uninstall_from_doc`](#uninstall_from_doc)
+- [`list_installed`](#list_installed)
+- [`is_installed`](#is_installed)
+- [`tool_config_path`](#tool_config_path)
+- [`install_mcp`](#install_mcp)
+- [`uninstall_mcp`](#uninstall_mcp)
 - [`ConfigurationError`](#configurationerror)
 - [`ProviderError`](#providererror)
 - [`ValidationError`](#validationerror)
@@ -940,6 +952,217 @@ render_status(report: StatusReport, stream, use_color: bool | None) -> str
 ```
 
 Render a `StatusReport` to a single string.
+
+---
+
+<a id="mcppreset"></a>
+
+### `McpPreset`
+
+*constant — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/mcp.py#L214)*
+
+Value: `dict[str, Any]`
+
+*(no docstring)*
+
+---
+
+<a id="preset_mcp_services"></a>
+
+### `PRESET_MCP_SERVICES`
+
+*constant — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/mcp.py#L157) (`list[dict[str, Any]]`)*
+
+Value: `[{'id': 'zai-mcp-server', 'name': 'Vision MCP', 'type': 'builtin', 'protocol': 'stdio', 'requiresAuth': True, 'description': 'Vision MCP Local Server', 'command': 'npx', 'args': ['-y', '@z_ai/mcp-server'], 'envTemplate': {'glm_coding_plan_global': {'Z_AI_MODE': 'ZAI'}, 'glm_coding_plan_china': {'Z_AI_MODE': 'ZHIPU'}}}, {'id': 'web-search-prime', 'name': 'Web Search MCP', 'type': 'builtin', 'protocol': 'streamable-http', 'requiresAuth': True, 'description': 'Web Search Prime MCP Server', 'urlTemplate': {'glm_coding_plan_global': 'https://api.z.ai/api/mcp/web_search_prime/mcp', 'glm_coding_plan_china': 'https://open.bigmodel.cn/api/mcp/web_search_prime/mcp'}}, {'id': 'web-reader', 'name': 'Web Reader MCP', 'type': 'builtin', 'protocol': 'streamable-http', 'requiresAuth': True, 'description': 'Web URL Reader MCP Server', 'urlTemplate': {'glm_coding_plan_global': 'https://api.z.ai/api/mcp/web_reader/mcp', 'glm_coding_plan_china': 'https://open.bigmodel.cn/api/mcp/web_reader/mcp'}}, {'id': 'zread', 'name': 'ZRead MCP', 'type': 'builtin', 'protocol': 'streamable-http', 'requiresAuth': True, 'description': 'ZRead Github MCP Server', 'urlTemplate': {'glm_coding_plan_global': 'https://api.z.ai/api/mcp/zread/mcp', 'glm_coding_plan_china': 'https://open.bigmodel.cn/api/mcp/zread/mcp'}}]`
+
+*(no docstring)*
+
+---
+
+<a id="preset_by_id"></a>
+
+### `preset_by_id()`
+
+*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/mcp.py#L217)*
+
+```python
+preset_by_id(mcp_id: str) -> McpPreset | None
+```
+
+Return the preset with id `mcp_id`, or `None` if no such preset.
+
+Linear scan — the preset table is four entries, so a dict index would be
+over-engineering. `None` (not raising) lets the caller produce a clean
+"unknown MCP id" error at the CLI/IO boundary.
+
+---
+
+<a id="preset_ids"></a>
+
+### `preset_ids()`
+
+*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/mcp.py#L230)*
+
+```python
+preset_ids() -> list[str]
+```
+
+Return the ids of all preset MCPs, in declaration order.
+
+---
+
+<a id="build_mcp_entry"></a>
+
+### `build_mcp_entry()`
+
+*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/mcp.py#L294)*
+
+```python
+build_mcp_entry(tool: Tool, mcp_id: str, key: str | None, region: Region, presets: list[McpPreset] | None) -> dict[str, Any]
+```
+
+Build ONE tool-specific MCP server entry for preset `mcp_id` (pure).
+
+This is the parity-critical transform: for a given tool and preset it
+produces exactly the dict the upstream's per-tool manager would write under
+`<section>[mcp_id]`. Pure — returns the entry without touching the
+filesystem.
+
+---
+
+<a id="install_into_doc"></a>
+
+### `install_into_doc()`
+
+*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/mcp.py#L392)*
+
+```python
+install_into_doc(doc: dict[str, Any] | None, tool: Tool, mcp_id: str, key: str | None, region: Region, presets: list[McpPreset] | None) -> dict[str, Any]
+```
+
+Return a NEW config doc with `mcp_id` installed into `tool`'s section.
+
+Pure: reads nothing, writes nothing. Foreign top-level keys and foreign MCP
+entries (other `mcp_id`s, including ones the user added by hand) are
+preserved verbatim — only `<section>[mcp_id]` is set/overwritten. A
+missing section is created. The input `doc` is not mutated.
+
+---
+
+<a id="uninstall_from_doc"></a>
+
+### `uninstall_from_doc()`
+
+*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/mcp.py#L432)*
+
+```python
+uninstall_from_doc(doc: dict[str, Any] | None, tool: Tool, mcp_id: str) -> dict[str, Any]
+```
+
+Return a NEW config doc with `mcp_id` removed from `tool`'s section.
+
+Pure. Removes ONLY `<section>[mcp_id]` — every other entry and every
+foreign top-level key is preserved. A missing doc, missing section, or
+absent `mcp_id` is a no-op (idempotent), returning a copy of the input.
+The section is dropped entirely when uninstalling leaves it empty, so we
+never write a stray `"mcpServers": {}` skeleton into a user's file.
+
+---
+
+<a id="list_installed"></a>
+
+### `list_installed()`
+
+*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/mcp.py#L460)*
+
+```python
+list_installed(doc: dict[str, Any] | None, tool: Tool) -> list[str]
+```
+
+Return the ids installed in `tool`'s MCP section (pure read).
+
+`None` doc / missing section → `[]`. Order is the document's insertion
+order (Python dict preserves it; JSON round-trips it).
+
+---
+
+<a id="is_installed"></a>
+
+### `is_installed()`
+
+*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/mcp.py#L474)*
+
+```python
+is_installed(doc: dict[str, Any] | None, tool: Tool, mcp_id: str) -> bool
+```
+
+True iff `mcp_id` is present in `tool`'s MCP section (pure read).
+
+---
+
+<a id="tool_config_path"></a>
+
+### `tool_config_path()`
+
+*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/mcp.py#L107)*
+
+```python
+tool_config_path(tool: Tool, home: str | Path) -> Path
+```
+
+Resolve the config file path for `tool` under `home` (pure).
+
+Each tool stores its MCP config at a fixed, tool-specific location::
+
+    claude-code    home/.claude.json
+    opencode       home/.config/opencode/opencode.json
+    crush          home/.config/crush/crush.json
+    factory-droid  home/.factory/mcp.json
+
+Pure path arithmetic — no IO, no existence check (mirrors
+`Paths.from_home`).
+
+---
+
+<a id="install_mcp"></a>
+
+### `install_mcp()`
+
+*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/mcp.py#L527)*
+
+```python
+install_mcp(tool: Tool | str, mcp_id: str, key: str | None, region: Region, home: str | Path | None, presets: list[McpPreset] | None, reader: ConfigReader, writer: ConfigWriter) -> bool
+```
+
+Install preset `mcp_id` into `tool`'s MCP config (importable, S7).
+
+The one-shot IO cycle: read the tool config, deep-merge the preset entry
+in via `install_into_doc`, and write it back atomically. Foreign keys
+and foreign MCP entries are preserved.
+
+IMPORTABLE (issue #18): the pure transform (`install_into_doc`) and
+the IO (`read_config`/`write_config`) are separately
+injectable, so a caller that already holds the parsed document (or wants a
+fake filesystem in tests) can bypass the defaults.
+
+---
+
+<a id="uninstall_mcp"></a>
+
+### `uninstall_mcp()`
+
+*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/mcp.py#L580)*
+
+```python
+uninstall_mcp(tool: Tool | str, mcp_id: str, home: str | Path | None, reader: ConfigReader, writer: ConfigWriter) -> bool
+```
+
+Remove preset `mcp_id` from `tool`'s MCP config (importable, S7).
+
+The one-shot inverse of `install_mcp`: read, surgically remove just
+`<section>[mcp_id]` via `uninstall_from_doc`, and write back
+atomically. Idempotent — removing an absent id is a no-op that writes
+nothing and returns `False`.
 
 ---
 
