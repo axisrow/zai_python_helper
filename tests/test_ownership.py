@@ -203,24 +203,57 @@ def test_take_over_preserves_restore_point_on_repeat_activation():
     """Re-activating the SAME value keeps the ORIGINAL prior (idempotent).
 
     S3 regression fix (Codex finding #1): P→Z→Z must not overwrite the
-    journal's prior=P on the second activation. Only a genuine value change
-    (different set_hash) records a new prior.
+    journal's prior=P on the second activation.
     """
     zai_hash = hash_value("sk-zai")
     # First activation: prior was the user's original P.
     records = take_over({}, TOOL, "K", prior_value="P", prior_present=True,
                         set_hash=zai_hash)
     # Second activation of the SAME value: prior would now be the current
-    # value "Z" if we blindly rewrote — but we must keep the original "P".
-    records = take_over(records, TOOL, "K", prior_value="Z", prior_present=True,
+    # value "sk-zai" if we blindly rewrote — but we must keep the original "P".
+    records = take_over(records, TOOL, "K", prior_value="sk-zai", prior_present=True,
                         set_hash=zai_hash)
     assert records[TOOL]["K"]["prior_value"] == "P"  # original restore point kept
 
-    # A genuine value change (rotated token) DOES record the new prior.
-    records = take_over(records, TOOL, "K", prior_value="Z", prior_present=True,
-                        set_hash=hash_value("sk-zai-rotated"))
-    assert records[TOOL]["K"]["prior_value"] == "Z"
-    assert records[TOOL]["K"]["set_hash"] == hash_value("sk-zai-rotated")
+
+def test_take_over_preserves_restore_point_across_token_rotation():
+    """P→Z1→Z2 (rotation, no external drift) keeps the ORIGINAL prior P.
+
+    S3 regression fix (Codex finding, cycle 3): rotating the Z.ai token must
+    NOT replace the restore point with the PREVIOUS Z.ai token. The live value
+    after Z1 is Z1 (still our value — no drift), so a rotation to Z2 advances
+    only ``set_hash`` and keeps the original prior=P. A later ``use default``
+    then restores P, not a stale Z1.
+    """
+    z1, z2, p = "sk-zai-1", "sk-zai-2", "sk-user-original-P"
+    records = take_over({}, TOOL, "K", prior_value=p, prior_present=True,
+                        set_hash=hash_value(z1))
+    # Rotate: live value is now z1 (what we set), new set_hash is z2.
+    records = take_over(records, TOOL, "K", prior_value=z1, prior_present=True,
+                        set_hash=hash_value(z2))
+    assert records[TOOL]["K"]["prior_value"] == p  # original restore point kept
+    assert records[TOOL]["K"]["set_hash"] == hash_value(z2)  # hash advanced
+    # And revert of z2 restores the ORIGINAL p, not the stale z1.
+    decision = revert(records, TOOL, "K", current_value=z2)
+    assert decision.action.name == "RESTORE"
+    assert decision.prior_value == p
+
+
+def test_take_over_starts_new_restore_point_on_external_drift():
+    """If the live value drifted from our set, start a fresh restore point.
+
+    The no-drift rotation guard preserves the original prior ONLY while the
+    live value is still ours. If the user (or another tool) changed it to a
+    value we never set, we cannot keep the old prior — the current value is a
+    genuine new starting point.
+    """
+    records = take_over({}, TOOL, "K", prior_value="P", prior_present=True,
+                        set_hash=hash_value("sk-zai"))
+    # Live value drifted to something we never set ("drifted") → new prior.
+    records = take_over(records, TOOL, "K", prior_value="drifted", prior_present=True,
+                        set_hash=hash_value("sk-zai-new"))
+    assert records[TOOL]["K"]["prior_value"] == "drifted"
+    assert records[TOOL]["K"]["set_hash"] == hash_value("sk-zai-new")
 
 
 def test_revert_decision_is_frozen():

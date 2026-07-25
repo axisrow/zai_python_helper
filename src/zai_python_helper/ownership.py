@@ -199,10 +199,37 @@ def take_over(
         existing_record = OwnershipRecord.from_dict(existing)
         # Re-activating the SAME value we already own: keep the ORIGINAL
         # restore point (do not let a repeat activation overwrite the prior
-        # with the now-current value). Only a genuine value change (different
-        # set_hash) records a new prior.
+        # with the now-current value).
         if existing_record.set_hash == set_hash:
             return new_records  # entry unchanged — original prior preserved
+
+        # VALUE ROTATION (different set_hash), but only safe to preserve the
+        # original restore point when the live value has NOT drifted from what
+        # we last set. If the value present now (``prior_value``) still hashes
+        # to the existing ``set_hash``, it is still our value (e.g. P→Z1→Z2:
+        # after Z1 the live value is Z1, which is what we set) — so we keep the
+        # ORIGINAL prior (P) and only advance ``set_hash`` to the new value.
+        # Without this, a token rotation would record the PREVIOUS Z.ai token
+        # (Z1) as the prior, and ``use default`` would restore a stale Z.ai
+        # credential against the default endpoint.
+        # Only when the live value has drifted externally (hash ≠ existing
+        # set_hash) do we treat the current value as a genuinely new starting
+        # point and record a fresh prior.
+        no_external_drift = (
+            existing_record.set_hash is not None
+            and prior_present
+            and prior_value is not None
+            and hash_value(prior_value) == existing_record.set_hash
+        )
+        if no_external_drift:
+            preserved = OwnershipRecord(
+                prior_value=existing_record.prior_value,
+                prior_present=existing_record.prior_present,
+                set_hash=set_hash,
+            )
+            tool_bucket[key] = preserved.to_dict()
+            new_records[tool] = tool_bucket
+            return new_records
 
     record = OwnershipRecord(
         prior_value=prior_value,

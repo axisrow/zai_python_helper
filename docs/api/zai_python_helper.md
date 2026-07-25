@@ -387,7 +387,7 @@ value change, e.g. a rotated token) do we record the new prior.
 
 ### `revert()`
 
-*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/ownership.py#L217)*
+*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/ownership.py#L244)*
 
 ```python
 revert(records: dict[str, Any], tool: str, key: str, current_value: str | None) -> RevertDecision

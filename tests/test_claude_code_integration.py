@@ -318,6 +318,34 @@ class TestOwnershipJournalE2E:
         # The API key we removed on activation is restored to the original.
         assert env.get("ANTHROPIC_API_KEY") == original_apikey
 
+    def test_token_rotation_preserves_original_restore_point(
+        self, tmp_path, monkeypatch
+    ):
+        """P→Z1→Z2→default restores the ORIGINAL P, not the previous Z1.
+
+        S3 regression (Codex cycle-3): rotating the Z.ai token between two
+        activations must NOT replace the restore point with the PREVIOUS Z.ai
+        token. ``use default`` after Z1→Z2 restores the user's original P —
+        never a stale Z.ai credential that would auth against the wrong
+        (default) endpoint.
+        """
+        monkeypatch.setenv("HOME", str(tmp_path))
+        original_token = "sk-user-original-P"
+        _seed(
+            tmp_path,
+            settings={"env": {"ANTHROPIC_AUTH_TOKEN": original_token}},
+        )
+        _run(["use", "zai", "--api-key", "sk-zai-1"])
+        _run(["use", "zai", "--api-key", "sk-zai-2"])  # rotate
+        _run(["use", "default", "--region", "global"])
+
+        env = json.loads(Paths.from_home(tmp_path).claude_settings.read_text()).get(
+            "env", {}
+        )
+        # The ORIGINAL user token is restored — NOT the previous Z.ai token.
+        assert env.get("ANTHROPIC_AUTH_TOKEN") == original_token
+        assert env.get("ANTHROPIC_AUTH_TOKEN") != "sk-zai-1"
+
     def test_use_default_refuses_when_user_readded_api_key(
         self, tmp_path, monkeypatch, capsys
     ):
