@@ -1,8 +1,10 @@
 """Tests for the ``doctor`` diagnostic pipeline (S5, issue #6).
 
-The HTTP probe is exercised through the real :func:`urllib_get` seam pointed
-at a pytest-httpserver instance — a REAL socket, no monkeypatched network — so
-the 200-OK / 401-bad-key / offline acceptance criteria are tested end-to-end.
+The HTTP probe is exercised through a real-socket test seam: a fake
+``http_get`` wired to a pytest-httpserver instance (no monkeypatched network)
+so the 200-OK / 401-bad-key / 429-degraded / offline acceptance criteria are
+tested end-to-end. The production seam (:func:`urllib_post`) is itself tested
+for its security posture (HTTPS-only, no redirect following, never raises).
 
 Conventions:
 - ``settings.json`` is written through the injected :class:`Paths` (tmp HOME
@@ -23,14 +25,52 @@ from zai_python_helper.doctor import (
     ProbeResult,
     render_check,
     run_doctor,
-    urllib_get,
+    urllib_post,
 )
 from zai_python_helper.paths import Paths
+
+#: The auth-enforcing probe path doctor appends to the base URL.
+_PROBE_PATH = "/v1/messages"
 
 #: A valid Z.ai base URL (the postcondition must accept this host).
 _ZAI_URL = "https://api.z.ai/api/anthropic"
 #: A non-Z.ai host (the postcondition must REJECT this).
 _WRONG_URL = "https://api.anthropic.com"
+
+
+def _httpserver_seam(httpserver: HTTPServer):
+    """Build a real-socket probe seam pointing at a pytest-httpserver instance.
+
+    Returns ``(seam, base_url)``: the seam POSTs whatever doctor hands it to
+    the live httpserver (a real local socket, no network), and ``base_url`` is
+    the value to write into settings.json so doctor's probe URL
+    (``base + /v1/messages``) lands on the configured handler.
+
+    The test seam is transport-agnostic (it does not enforce HTTPS — that is
+    the production seam's job, tested separately in the ``urllib_post`` block),
+    so the probe-acceptance tests can exercise a real socket over plain HTTP.
+    It records every call on ``seam.calls`` so tests can assert headers/body.
+    """
+    base_url = httpserver.url_for("").rstrip("/")
+    calls: list[tuple[str, dict[str, str], str]] = []
+    import urllib.error
+    import urllib.request
+
+    def seam(url: str, headers: dict[str, str], body: str) -> ProbeResult:
+        calls.append((url, headers, body))
+        req = urllib.request.Request(
+            url, data=body.encode("utf-8"), headers=headers, method="POST"
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                return ProbeResult(status=resp.status, error=None)
+        except urllib.error.HTTPError as e:
+            return ProbeResult(status=e.code, error=None)
+        except Exception as e:  # noqa: BLE001 — seam reports, never raises.
+            return ProbeResult(status=None, error=f"offline: {e}")
+
+    seam.calls = calls  # type: ignore[attr-defined]
+    return seam, base_url
 
 
 # --------------------------------------------------------------------------- #
@@ -144,26 +184,39 @@ def test_settings_without_base_url_fails(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# HTTP probe via the real urllib_get seam over a real socket (pytest-httpserver).
+# HTTP probe via a real-socket test seam over pytest-httpserver.
+# The probe targets {base}/v1/messages (the auth-enforcing endpoint).
 # --------------------------------------------------------------------------- #
 
 
-def test_http_probe_200_ok(httpserver: HTTPServer, tmp_path):
-    """A reachable endpoint returning 2xx → probe PASS, exit 0."""
-    httpserver.expect_request("/").respond_with_data("ok", status=200)
+def _probe_setup(httpserver, status: int, tmp_path):
+    """Configure httpserver to answer the probe path, return (paths, seam, base)."""
+    httpserver.expect_request(_PROBE_PATH, method="POST").respond_with_data(
+        "ok", status=status
+    )
     paths = Paths.from_home(tmp_path)
-    _write_settings(paths, {"ANTHROPIC_BASE_URL": httpserver.url_for("/")})
-    code, out = _run(paths, environ={"ZAI_API_KEY": "good-key"})
+    seam, base = _httpserver_seam(httpserver)
+    _write_settings(paths, {"ANTHROPIC_BASE_URL": base})
+    return paths, seam, base
+
+
+def test_http_probe_200_ok(httpserver: HTTPServer, tmp_path):
+    """A reachable auth-enforcing endpoint returning 2xx → probe PASS, exit 0."""
+    paths, seam, _ = _probe_setup(httpserver, 200, tmp_path)
+    code, out = _run(paths, environ={"ZAI_API_KEY": "good-key"}, http_get=seam)
     assert code == 0
     assert "[✓] HTTP probe" in out
 
 
 def test_http_probe_401_bad_key(httpserver: HTTPServer, tmp_path):
-    """A 401 → probe FAIL (bad key), exit 1."""
-    httpserver.expect_request("/").respond_with_data("nope", status=401)
-    paths = Paths.from_home(tmp_path)
-    _write_settings(paths, {"ANTHROPIC_BASE_URL": httpserver.url_for("/")})
-    code, out = _run(paths, environ={"ZAI_API_KEY": "bad-key"})
+    """A 401 from the auth-enforcing endpoint → probe FAIL (bad key), exit 1.
+
+    Regression for the Codex finding: a bare GET of the base URL returns 200
+    even for a bad key, so doctor MUST probe /v1/messages (the only path that
+    401s a bad key) to actually catch an invalid credential.
+    """
+    paths, seam, _ = _probe_setup(httpserver, 401, tmp_path)
+    code, out = _run(paths, environ={"ZAI_API_KEY": "bad-key"}, http_get=seam)
     assert code == 1
     assert "[✗] HTTP probe" in out
     assert "key rejected" in out
@@ -171,42 +224,111 @@ def test_http_probe_401_bad_key(httpserver: HTTPServer, tmp_path):
 
 def test_http_probe_403_bad_key(httpserver: HTTPServer, tmp_path):
     """A 403 → probe FAIL (key rejected), exit 1."""
-    httpserver.expect_request("/").respond_with_data("forbidden", status=403)
-    paths = Paths.from_home(tmp_path)
-    _write_settings(paths, {"ANTHROPIC_BASE_URL": httpserver.url_for("/")})
-    code, out = _run(paths, environ={"ZAI_API_KEY": "bad-key"})
+    paths, seam, _ = _probe_setup(httpserver, 403, tmp_path)
+    code, out = _run(paths, environ={"ZAI_API_KEY": "bad-key"}, http_get=seam)
     assert code == 1
     assert "[✗] HTTP probe" in out
 
 
-def test_http_probe_sends_configured_key(httpserver: HTTPServer, tmp_path):
-    """The probe sends the resolved key in both auth header conventions."""
-    httpserver.expect_request("/").respond_with_data("ok", status=200)
-    paths = Paths.from_home(tmp_path)
-    _write_settings(paths, {"ANTHROPIC_BASE_URL": httpserver.url_for("/")})
-    _run(paths, environ={"ZAI_API_KEY": "the-real-key"})
-    # pytest-httpserver records every handled request — assert the probe sent
-    # the key in BOTH auth header conventions Claude Code / Z.ai accept.
-    assert len(httpserver.log) == 1
-    sent_headers = httpserver.log[0][0].headers
-    assert sent_headers.get("x-api-key") == "the-real-key"
-    assert sent_headers.get("authorization") == "Bearer the-real-key"
+def test_http_probe_429_degraded_is_warn(httpserver: HTTPServer, tmp_path):
+    """A 429 → probe WARN (degraded), NOT pass — doctor never claims a
+    rate-limited endpoint is healthy; exit 0 (WARN doesn't fail)."""
+    paths, seam, _ = _probe_setup(httpserver, 429, tmp_path)
+    code, out = _run(paths, environ={"ZAI_API_KEY": "k"}, http_get=seam)
+    assert code == 0
+    assert "[!] HTTP probe" in out
+    assert "degraded" in out
+
+
+def test_http_probe_500_degraded_is_warn(httpserver: HTTPServer, tmp_path):
+    """A 5xx → probe WARN (degraded), NOT pass; exit 0."""
+    paths, seam, _ = _probe_setup(httpserver, 503, tmp_path)
+    code, out = _run(paths, environ={"ZAI_API_KEY": "k"}, http_get=seam)
+    assert code == 0
+    assert "[!] HTTP probe" in out
+    assert "degraded" in out
+
+
+def test_http_probe_404_unverified_is_warn(httpserver: HTTPServer, tmp_path):
+    """An unexpected 4xx → probe WARN (unverified), NOT pass; exit 0."""
+    paths, seam, _ = _probe_setup(httpserver, 404, tmp_path)
+    code, out = _run(paths, environ={"ZAI_API_KEY": "k"}, http_get=seam)
+    assert code == 0
+    assert "[!] HTTP probe" in out
+    assert "unverified" in out
+
+
+def test_http_probe_sends_key_in_both_headers(httpserver: HTTPServer, tmp_path):
+    """The probe sends the resolved key in BOTH auth header conventions and
+    targets /v1/messages (the auth-enforcing endpoint, not the base URL)."""
+    paths, seam, base = _probe_setup(httpserver, 200, tmp_path)
+    _run(paths, environ={"ZAI_API_KEY": "the-real-key"}, http_get=seam)
+    assert len(seam.calls) == 1
+    url, headers, body = seam.calls[0]
+    # Probe URL is the auth-enforcing messages endpoint, not the base URL.
+    assert url == base.rstrip("/") + _PROBE_PATH
+    assert headers["x-api-key"] == "the-real-key"
+    assert headers["authorization"] == "Bearer the-real-key"
+    assert "glm-4.5-flash" in body  # the minimal auth-enforcing payload
 
 
 def test_http_probe_uses_auth_token_from_settings(httpserver: HTTPServer, tmp_path):
     """ANTHROPIC_AUTH_TOKEN in the env block wins over ZAI_API_KEY env."""
-    httpserver.expect_request("/").respond_with_data("ok", status=200)
+    httpserver.expect_request(_PROBE_PATH, method="POST").respond_with_data("ok", status=200)
     paths = Paths.from_home(tmp_path)
+    seam, base = _httpserver_seam(httpserver)
     _write_settings(
         paths,
         {
-            "ANTHROPIC_BASE_URL": httpserver.url_for("/"),
+            "ANTHROPIC_BASE_URL": base,
             "ANTHROPIC_AUTH_TOKEN": "from-settings",
         },
     )
-    code, out = _run(paths, environ={"ZAI_API_KEY": "from-env"})
+    code, out = _run(
+        paths, environ={"ZAI_API_KEY": "from-env"}, http_get=seam
+    )
     assert code == 0
     assert "[✓] API key present" in out
+    assert seam.calls[0][1]["x-api-key"] == "from-settings"
+
+
+# --------------------------------------------------------------------------- #
+# Credential-egress gate: probe is SKIPPED for a FAILED endpoint, never sending
+# the key to a provably-wrong target (Codex critical finding #1).
+# --------------------------------------------------------------------------- #
+
+
+def test_probe_skipped_when_endpoint_fails_no_key_sent(tmp_path):
+    """A FAILED endpoint (pointed at Anthropic) → probe SKIPPED, and the key
+    is NEVER transmitted. Regression for credential-disclosure finding."""
+    paths = Paths.from_home(tmp_path)
+    _write_settings(paths, {"ANTHROPIC_BASE_URL": _WRONG_URL})
+
+    def seam_must_not_be_called(_url, _headers, _body):
+        raise AssertionError("probe must NOT run for a failed endpoint")
+
+    code, out = _run(
+        paths, environ={"ZAI_API_KEY": "secret"}, http_get=seam_must_not_be_called
+    )
+    assert code == 1  # the endpoint FAIL fails the run
+    assert "[!] HTTP probe" in out
+    assert "skipped" in out
+    assert "unsafe" in out
+
+
+def test_probe_skipped_when_no_base_url_no_key_sent(tmp_path):
+    """No base URL at all → endpoint FAIL → probe skipped, no key sent."""
+    paths = Paths.from_home(tmp_path)
+    _write_settings(paths, {"OTHER": "x"})  # no ANTHROPIC_BASE_URL → settings FAIL
+
+    def seam_must_not_be_called(_url, _headers, _body):
+        raise AssertionError("probe must NOT run with no base URL")
+
+    code, out = _run(
+        paths, environ={"ZAI_API_KEY": "secret"}, http_get=seam_must_not_be_called
+    )
+    assert code == 1
+    assert "skipped" in out
 
 
 # --------------------------------------------------------------------------- #
@@ -224,7 +346,7 @@ def test_offline_is_warn_not_fail(tmp_path):
     paths = Paths.from_home(tmp_path)
     _write_settings(paths, {"ANTHROPIC_BASE_URL": _ZAI_URL})
 
-    def offline_se(_url, _headers):
+    def offline_se(_url, _headers, _body):
         return ProbeResult(status=None, error="offline: connection refused")
 
     code, out = _run(paths, environ={"ZAI_API_KEY": "k"}, http_get=offline_se)
@@ -249,7 +371,7 @@ def test_http_seam_raises_is_warn(tmp_path):
     paths = Paths.from_home(tmp_path)
     _write_settings(paths, {"ANTHROPIC_BASE_URL": _ZAI_URL})
 
-    def raising_se(_url, _headers):
+    def raising_se(_url, _headers, _body):
         raise RuntimeError("boom")
 
     code, out = _run(paths, environ={"ZAI_API_KEY": "k"}, http_get=raising_se)
@@ -309,21 +431,30 @@ def test_no_zshrc_no_shell_check(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# urllib_get seam directly (offline path, real network attempt).
+# Production seam (urllib_post) security posture — tested directly.
 # --------------------------------------------------------------------------- #
 
 
-def test_urllib_get_offline_is_error_result():
-    """``urllib_get`` against a dead port → ProbeResult(error=...), no raise."""
-    # A port that is almost certainly closed. The seam must NOT raise and must
-    # report an offline-style error (WARN upstream), not a status.
-    probe = urllib_get("http://127.0.0.1:1/", {})
+def test_urllib_post_refuses_non_https():
+    """A plain-http probe URL → refused (no status), key never sent.
+
+    Regression for credential-egress: the production seam must not POST the
+    credential over an unencrypted transport.
+    """
+    probe = urllib_post("http://api.z.ai/api/anthropic" + _PROBE_PATH, {"x-api-key": "k"}, "{}")
+    assert probe.status is None
+    assert "non-https" in (probe.error or "")
+
+
+def test_urllib_post_offline_is_error_result():
+    """``urllib_post`` against a dead port → ProbeResult(error=...), no raise."""
+    probe = urllib_post("https://127.0.0.1:1" + _PROBE_PATH, {}, "{}")
     assert probe.status is None
     assert probe.error is not None
 
 
-def test_urllib_get_never_raises_on_bad_url():
+def test_urllib_post_never_raises_on_bad_url():
     """A garbage URL → ProbeResult(error=...), never an exception."""
-    probe = urllib_get("not a url at all", {})
+    probe = urllib_post("not a url at all", {}, "{}")
     assert probe.error is not None
     assert probe.status is None

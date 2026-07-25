@@ -17,9 +17,15 @@ Per tool (Claude Code first — the v1 front door), the chain is:
   3. **API key present** — ``ANTHROPIC_AUTH_TOKEN`` in the env block or
      ``ZAI_API_KEY`` in the environment. Missing → WARN (no point probing,
      but absence is not a broken link — the user may key interactively).
-  4. **HTTP probe** — a single ``GET`` to the configured endpoint with the
-     resolved key. ``401``/``403`` → FAIL (bad key); ``2xx``/other non-auth
-     → PASS; offline/timeout → WARN (graceful).
+  4. **HTTP probe** — a ``POST`` to ``{base_url}/v1/messages`` (the only
+     auth-enforcing Z.ai endpoint — a bare GET of the base URL returns 200
+     even with a bad key, so it cannot detect one) with the resolved key and a
+     minimal 1-token request. The probe is SKIPPED when the postcondition
+     FAILED (the endpoint is provably wrong — e.g. still pointed at the real
+     Anthropic — so we never send the key there). ``401``/``403`` → FAIL
+     (bad key); ``2xx`` → PASS; ``429``/``5xx`` → WARN (degraded, not PASS);
+     offline/timeout → WARN (graceful). Redirects are disabled and only HTTPS
+     is probed, so the key is not leaked across origins or downgraded to HTTP.
 
 **MCP probe** is deferred to S7 — left as an explicit TODO placeholder, not a
 check, so it contributes nothing to the exit code today.
@@ -67,9 +73,25 @@ def _host_of(url: str) -> str:
 #: so one ceiling bounds the whole request.
 _HTTP_TIMEOUT = 5.0
 
-#: HTTP status codes that mean "the key was rejected" — the one class of
-#: non-2xx that is a definitive FAIL (a bad credential is a broken link).
+#: HTTP status codes that mean "the key was rejected" — a bad credential is a
+#: broken link, so the probe FAILs on these.
 _AUTH_REJECT_CODES = {401, 403}
+
+#: HTTP status codes that mean "the endpoint is up but degraded right now"
+#: (rate-limited, upstream error). NOT a credential problem, NOT healthy →
+#: WARN, never PASS (so doctor never claims a degraded endpoint is working)
+#: and never FAIL (the key may be fine; retry later).
+_DEGRADED_CODES = {429, 500, 502, 503, 504}
+
+#: The auth-enforcing probe path appended to the configured base URL. The
+#: Claude-compatible Z.ai gateway only authenticates on the messages endpoint
+#: — a bare GET of the base URL returns 200 even with no/invalid key (verified
+#: live), so it cannot detect a bad credential. ``/v1/messages`` returns 401
+#: for a bad key and 2xx for a valid one (verified live, model glm-4.5-flash),
+#: so it is the real auth gate. The payload is a minimal 1-token request to
+#: keep the billable cost negligible.
+_PROBE_PATH = "/v1/messages"
+_PROBE_PAYLOAD = '{"model":"glm-4.5-flash","max_tokens":1,"messages":[{"role":"user","content":"ping"}]}'
 
 #: Known Z.ai region hosts, DERIVED from the canonical region→endpoint map in
 #: :mod:`zai_python_helper.regions` (single source of truth — the planner and
@@ -190,33 +212,49 @@ class ProbeResult:
     error: str | None
 
 
-#: The injectable HTTP seam. Production wires :func:`urllib_get`; tests wire a
+#: The injectable HTTP seam. Production wires :func:`urllib_post`; tests wire a
 #: fake that points at a pytest-httpserver instance (real socket, no network).
-#: The callable issues a single GET to ``url`` with ``headers`` and returns a
+#: The callable POSTs ``body`` to ``url`` with ``headers`` and returns a
 #: :class:`ProbeResult`. It MUST NOT raise — doctor reports, never raises.
-HttpProbe = Callable[[str, dict[str, str]], ProbeResult]
+HttpProbe = Callable[[str, dict[str, str], str], ProbeResult]
 
 
-def urllib_get(url: str, headers: dict[str, str]) -> ProbeResult:
-    """Default ``http_get`` seam: a stdlib ``urllib`` GET with a hard timeout.
+def urllib_post(url: str, headers: dict[str, str], body: str) -> ProbeResult:
+    """Default ``http_get`` seam: a stdlib ``urllib`` POST with a hard timeout.
 
-    Used in production. Returns a :class:`ProbeResult` — never raises. A
-    ``URLError`` whose reason is a socket error (connection refused / DNS /
-    unreachable) or a ``socket.timeout`` is reported as ``"offline"`` (WARN);
-    a non-auth HTTP error (``HTTPError``) carries its status; everything else
-    is reported as ``"error"``.
+    Used in production. Returns a :class:`ProbeResult` — never raises.
 
-    We deliberately do NOT follow redirects and treat any 2xx/3xx/4xx/5xx that
-    is not 401/403 as "the endpoint responded" (PASS) — doctor only FAILs on a
-    definitive auth rejection, matching the issue acceptance criteria.
+    Security (credential-egress) posture, distinct from the old GET probe:
+
+    - **HTTPS only.** A plain-``http`` probe URL is refused up front
+      (``error="refused: non-https endpoint"``) — the key must never travel in
+      the clear. The check maps this to a WARN (the user configured an
+      insecure transport; not a broken link, but not probed).
+    - **No redirect following.** A custom opener WITHOUT ``HTTPRedirectHandler``
+      is used, so a 3xx cannot carry the credential-bearing headers across
+      origins or downgrade HTTPS → HTTP. A 3xx is surfaced as the redirect
+      status itself (mapped to WARN below), not silently followed.
+
+    A ``URLError`` whose reason is a socket error (connection refused / DNS /
+    unreachable) is reported as ``"offline"`` (WARN); a non-auth HTTP error
+    (``HTTPError``) carries its status; everything else is reported as
+    ``"error"``. ``status`` and ``error`` are kept mutually exclusive so the
+    caller can branch on ``error is not None`` first.
     """
+    if not url.lower().startswith("https://"):
+        return ProbeResult(status=None, error="refused: non-https endpoint")
     try:
-        req = urllib.request.Request(url, headers=headers, method="GET")
-        with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT) as resp:
+        req = urllib.request.Request(
+            url, data=body.encode("utf-8"), headers=headers, method="POST"
+        )
+        # No HTTPRedirectHandler: a redirect must NOT carry the credential
+        # headers to a different origin or downgrade to HTTP.
+        opener = urllib.request.build_opener(urllib.request.HTTPSHandler())
+        with opener.open(req, timeout=_HTTP_TIMEOUT) as resp:
             return ProbeResult(status=resp.status, error=None)
     except urllib.error.HTTPError as e:
         # A non-2xx HTTP response: the server was reached and answered. Doctor
-        # decides pass/fail from the status (only 401/403 fail).
+        # decides the verdict from the status (only 401/403 fail; 429/5xx warn).
         return ProbeResult(status=e.code, error=None)
     except (TimeoutError, ConnectionError) as e:
         return ProbeResult(status=None, error=f"offline: {e}")
@@ -375,15 +413,40 @@ def _check_key_present(
 
 
 def _check_http_probe(
-    base_url: str | None, key: str | None, http_get: HttpProbe
+    base_url: str | None,
+    key: str | None,
+    endpoint_verdict: str,
+    http_get: HttpProbe,
 ) -> CheckResult:
-    """HTTP probe: GET the configured endpoint with the resolved key.
+    """HTTP probe: POST the auth-enforcing endpoint with the resolved key.
 
-    ``401``/``403`` → FAIL (bad key); ``2xx``/other responded status → PASS;
-    offline/timeout → WARN (graceful). No key / no base URL → WARN (the
-    upstream checks already reported the cause).
+    Credential-egress gate: the probe is SKIPPED when ``endpoint_verdict`` is
+    ``"fail"`` — the endpoint is provably wrong (e.g. still pointed at the real
+    Anthropic, or no base URL), so doctor must NOT send the API key there. This
+    is the fix for the credential-disclosure finding: a failed postcondition
+    never triggers a credentialed request.
+
+    Status mapping:
+
+    - ``401``/``403`` → FAIL (bad key) — the one definitive credential failure.
+    - ``2xx`` → PASS — the key was accepted (the gateway processed the request).
+    - ``429``/``5xx`` → WARN (degraded) — up but overloaded; NOT PASS (doctor
+      never claims a degraded endpoint is working) and NOT FAIL (the key may be
+      fine; retry later).
+    - any other 4xx → WARN (unverified) — the gateway responded in a way doctor
+      can't interpret as success or auth failure.
+    - offline / timeout / non-https → WARN (graceful — offline is never a FAIL).
+
+    No key, no base URL, or a FAILED endpoint → WARN (skipped), not a request.
     """
     name = "HTTP probe"
+    if endpoint_verdict == "fail":
+        return CheckResult(
+            name=name,
+            verdict="warn",
+            detail="skipped (endpoint check failed — key not sent to an unsafe URL)",
+            hint="fix the Z.ai endpoint check first; doctor never probes a wrong target",
+        )
     if not base_url or not key:
         return CheckResult(
             name=name,
@@ -391,9 +454,18 @@ def _check_http_probe(
             detail="skipped (no endpoint or key)",
             hint="resolve the upstream checks first",
         )
-    headers = {"x-api-key": key, "authorization": f"Bearer {key}"}
+    # The probe URL is the auth-enforcing messages endpoint, NOT the base URL:
+    # a bare GET of the base returns 200 even for a bad key (verified live), so
+    # only /v1/messages discriminates valid vs invalid credentials.
+    probe_url = base_url.rstrip("/") + _PROBE_PATH
+    headers = {
+        "x-api-key": key,
+        "authorization": f"Bearer {key}",
+        "content-type": "application/json",
+        "anthropic-version": "2023-06-01",
+    }
     try:
-        probe = http_get(base_url, headers)
+        probe = http_get(probe_url, headers, _PROBE_PAYLOAD)
     except Exception as e:  # noqa: BLE001 — doctor reports, never raises.
         return CheckResult(
             name=name,
@@ -406,7 +478,7 @@ def _check_http_probe(
             name=name,
             verdict="warn",
             detail=probe.error,
-            hint="endpoint unreachable or timed out (offline is not a failure)",
+            hint="endpoint unreachable, timed out, or non-https (offline is not a failure)",
         )
     status = probe.status
     if status in _AUTH_REJECT_CODES:
@@ -416,14 +488,24 @@ def _check_http_probe(
             detail=f"{status} (key rejected)",
             hint="the API key is invalid/expired; set a valid ZAI_API_KEY",
         )
-    # status is guaranteed non-None here: the only path that sets status=None
-    # also sets probe.error, which we returned on above. urllib_get keeps the
-    # two mutually exclusive.
+    if status in _DEGRADED_CODES:
+        return CheckResult(
+            name=name,
+            verdict="warn",
+            detail=f"{status} (endpoint degraded)",
+            hint="the endpoint is rate-limited or erroring; the key may be fine — retry later",
+        )
+    if status is not None and 200 <= status < 300:
+        # status is non-None here: the only path that sets status=None also
+        # sets probe.error, returned on above. urllib_post keeps the two
+        # mutually exclusive. The explicit ``is not None`` is for the type
+        # checker, which can't follow the mutual-exclusion invariant.
+        return CheckResult(name=name, verdict="pass", detail=f"{status} OK", hint="")
     return CheckResult(
         name=name,
-        verdict="pass",
-        detail=f"{status} OK",
-        hint="",
+        verdict="warn",
+        detail=f"{status} (unverified)",
+        hint="unexpected status; doctor could not confirm the key works",
     )
 
 
@@ -464,7 +546,7 @@ def _check_shell_override(paths: Paths) -> CheckResult | None:
 def run_doctor(
     paths: Paths,
     *,
-    http_get: HttpProbe = urllib_get,
+    http_get: HttpProbe = urllib_post,
     environ: Mapping[str, str] | None = None,
     color: bool | None = None,
 ) -> int:
@@ -482,8 +564,10 @@ def run_doctor(
         paths: the injected :class:`Paths` bundle. Tests inject
             ``Paths.from_home(tmp_path)``; the CLI handler injects
             ``Paths.default()``.
-        http_get: the injectable HTTP seam (production: :func:`urllib_get`;
-            tests: a fake pointing at pytest-httpserver over a real socket).
+        http_get: the injectable HTTP seam (production: :func:`urllib_post`,
+            a stdlib POST to the auth-enforcing ``/v1/messages`` endpoint with
+            redirects disabled and HTTPS enforced; tests: a fake pointing at
+            pytest-httpserver over a real socket).
         environ: the environment to consult for ``ZAI_API_KEY``. Defaults to
             ``os.environ`` (production); tests inject a controlled dict.
         color: force colored (``True``) / plain (``False``) markers; ``None``
@@ -508,17 +592,20 @@ def run_doctor(
     settings_result, settings_env = _check_settings_env(paths)
     _emit(settings_result)
 
-    # 2. Z.ai endpoint postcondition.
-    _emit(_check_zai_endpoint(settings_env))
+    # 2. Z.ai endpoint postcondition. Capture its verdict: the HTTP probe is
+    # GATED on it (a FAILED endpoint must never receive the credentialed probe).
+    endpoint_result = _check_zai_endpoint(settings_env)
+    _emit(endpoint_result)
 
     # 3. API key present (also resolves the key for the probe).
     key_result, key = _check_key_present(settings_env, env)
     _emit(key_result)
 
-    # 4. HTTP probe. Use the configured base URL (may be absent if step 1
-    # failed — the probe then WARNs "skipped").
+    # 4. HTTP probe against the auth-enforcing endpoint. The base URL may be
+    # absent if step 1 failed, and the probe is SKIPPED if step 2 FAILED —
+    # either way it WARNs "skipped" rather than sending the key.
     base_url = settings_env.get("ANTHROPIC_BASE_URL") if settings_env else None
-    _emit(_check_http_probe(base_url, key, http_get))
+    _emit(_check_http_probe(base_url, key, endpoint_result.verdict, http_get))
 
     # 5. shell env override risk (ADR-003) — WARN, skipped when no .zshrc.
     shell = _check_shell_override(paths)
