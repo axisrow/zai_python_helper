@@ -224,14 +224,16 @@ def render_param(p: griffe.Parameter) -> str:
 
 
 def signature_str(func: griffe.Function) -> str:
-    """Reconstruct a readable ``def name(params) -> return`` signature."""
+    """Reconstruct a readable ``def name(params) -> return`` signature.
+
+    Keyword-only parameters get a ``*`` separator before them. Positional-only
+    parameters are rare in this codebase; if one appears, a ``/`` separator
+    would be wanted — added then, not speculatively now.
+    """
     params: list[str] = []
     saw_kw_only = False
-    saw_pos_only = False
     for p in func.parameters:
         kind = p.kind.value
-        if kind == "positional_only" and not saw_pos_only:
-            saw_pos_only = True
         if kind == "keyword_only" and not saw_kw_only:
             saw_kw_only = True
             params.append("*")

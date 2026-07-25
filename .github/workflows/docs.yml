@@ -7,8 +7,9 @@ name: Docs
 # checked-in artifacts must be unchanged. A stale `docs/` or `llms.txt` (code
 # changed, docs not rebuilt) fails the build.
 #
-# The docs tests (tests/test_docs_gen.py) run in the main CI matrix when the
-# `docs` extra is installed; this job is the dedicated sync gate.
+# The docs tests (tests/test_docs_gen.py) skip in the main CI matrix (ci.yml
+# installs only [dev]); this job installs [docs] too, so it is where they
+# actually run, alongside the sync gate.
 
 on:
   push:
