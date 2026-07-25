@@ -43,7 +43,11 @@ FROM python:${PY_VERSION} AS runtime
 # Upstream toolchain (node + the globally installed coding-helper).
 COPY --from=node-stage /usr/local/lib/node_modules /usr/local/lib/node_modules
 COPY --from=node-stage /usr/local/bin/node /usr/local/bin/node
-# Recreate the bin shims that `npm install -g` would have linked.
+# Recreate the bin shims npm `install -g` linked. We can't COPY the originals
+# from node-stage because docker COPY dereferences symlinks: the shim is a
+# relative symlink into ../lib/node_modules, so COPY would flatten cli.js into
+# /usr/local/bin, breaking its own ./lib/command.js relative import. A fresh
+# symlink (the same relative path npm used) keeps the import resolving.
 RUN ln -s /usr/local/lib/node_modules/@z_ai/coding-helper/dist/cli.js /usr/local/bin/coding-helper \
  && ln -s /usr/local/lib/node_modules/@z_ai/coding-helper/dist/cli.js /usr/local/bin/chelper \
  && chmod +x /usr/local/lib/node_modules/@z_ai/coding-helper/dist/cli.js

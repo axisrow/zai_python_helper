@@ -40,11 +40,11 @@ IMAGE_TAG = "zai-parity:smoke"
 # embedded in ``prog 1.2.3``. Matches BOTH the upstream (``0.0.7``) and our
 # (``0.1.0``) outputs, and is tolerant of future bumps (``1.2.3``, ``0.2.0-rc1``).
 # The number is what we normalize AWAY; everything around it is the FORMAT
-# under test.
-_SEMVER_RE = re.compile(r"\bv?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?\b")
-# Strict "this whole (stripped) line is a bare semver" check — used to assert
-# our output is itself a bare semver, independent of the upstream comparison.
-_BARE_SEMVER_RE = re.compile(r"^v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$")
+# under test. The bare-semver check below is the SAME pattern anchored to a
+# whole line, so the two can never drift.
+_SEMVER = r"v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?"
+_SEMVER_RE = re.compile(rf"\b{_SEMVER}\b")
+_BARE_SEMVER_RE = re.compile(rf"^{_SEMVER}$")
 
 
 def normalize_version_format(output: str) -> str:
@@ -170,16 +170,31 @@ def upstream_version_outputs():
     pytest.skip("no docker daemon and no npx available; cannot reach upstream tool")
 
 
-def _ours_version_output(flag: str) -> str:
-    """Our tool's version stdout (incl. trailing newline)."""
-    res = subprocess.run(
+def _run_ours(flag: str) -> subprocess.CompletedProcess:
+    """Invoke ``python -m zai_python_helper <flag>`` once and return the result."""
+    return subprocess.run(
         [sys.executable, "-m", "zai_python_helper", flag],
         capture_output=True,
         text=True,
     )
-    assert res.returncode == 0, f"`zai-python-helper {flag}` failed: {res.stderr}"
-    assert res.stderr == "", f"`zai-python-helper {flag}` wrote to stderr: {res.stderr!r}"
-    return res.stdout
+
+
+@pytest.fixture(scope="module")
+def ours_version_outputs():
+    """Our tool's ``-v`` / ``--version`` stdout, captured ONCE per module.
+
+    Mirror of ``upstream_version_outputs``: caches both flags so the parametrized
+    assertions below don't each spawn a fresh interpreter. Asserts the
+    Phase-1 invariants (exit 0, empty stderr) here, so every consumer can treat
+    the cached value as clean stdout.
+    """
+    out: dict[str, str] = {}
+    for flag in ("-v", "--version"):
+        res = _run_ours(flag)
+        assert res.returncode == 0, f"`zai-python-helper {flag}` failed: {res.stderr}"
+        assert res.stderr == "", f"`zai-python-helper {flag}` wrote to stderr: {res.stderr!r}"
+        out[flag] = res.stdout
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -187,14 +202,14 @@ def _ours_version_output(flag: str) -> str:
 # --------------------------------------------------------------------------- #
 @pytest.mark.smoke
 @pytest.mark.parametrize("flag", ["-v", "--version"])
-def test_version_format_matches_upstream(flag, upstream_version_outputs):
+def test_version_format_matches_upstream(flag, upstream_version_outputs, ours_version_outputs):
     """The FORMAT of our version output must match the upstream tool's.
 
     Phase-1 parity (issue #17): bare semver on stdout, exit 0, empty stderr —
     no program-name prefix, no extra info. The number is normalized away.
     """
     upstream_fmt = normalize_version_format(upstream_version_outputs[flag])
-    ours_fmt = normalize_version_format(_ours_version_output(flag))
+    ours_fmt = normalize_version_format(ours_version_outputs[flag])
     assert ours_fmt == upstream_fmt, (
         f"version FORMAT drift for `{flag}`: "
         f"upstream={upstream_fmt!r}, ours={ours_fmt!r}"
@@ -203,12 +218,12 @@ def test_version_format_matches_upstream(flag, upstream_version_outputs):
 
 @pytest.mark.smoke
 @pytest.mark.parametrize("flag", ["-v", "--version"])
-def test_ours_version_is_bare_semver(flag):
+def test_ours_version_is_bare_semver(flag, ours_version_outputs):
     """Our version output must itself be a bare semver (independent of upstream).
 
     Guards the Phase-1 format directly, so the test still asserts something
     even when the upstream runner is skipped: a regression that added a prefix
     (e.g. ``zai-python-helper 0.1.0``) is caught here too.
     """
-    ours = _ours_version_output(flag).rstrip("\n")
+    ours = ours_version_outputs[flag].rstrip("\n")
     assert _BARE_SEMVER_RE.match(ours), f"`{flag}` output is not a bare semver: {ours!r}"
