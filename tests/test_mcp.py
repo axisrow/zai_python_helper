@@ -1,0 +1,383 @@
+"""Tests for preset MCP install/uninstall (S7, issue #8) — core layer.
+
+Parity focus: the per-tool MCP-entry shapes must match the upstream
+``@z_ai/coding-helper`` per-tool managers byte-for-byte (the issue's "parity
+required" contract — id/protocol/auth/url region-aware + the exact dict each
+tool stores). These tests assert the EXACT dict for each (tool, preset,
+region) so a drift in field name, nesting, or value is caught directly.
+
+The pure transforms (``build_mcp_entry`` / ``install_into_doc`` /
+``uninstall_from_doc``) are tested on plain dicts (no FS); the high-level
+``install_mcp`` / ``uninstall_mcp`` cycle is tested with a tmp HOME (autouse
+``_isolate_home``) and reads the written JSON back via ``JsonBackend``.
+
+Extended per-tool parity tests + the doctor-probe integration tests land in
+the follow-up CLI PR.
+"""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from zai_python_helper.backends import JsonBackend
+from zai_python_helper.mcp import (
+    Tool,
+    build_mcp_entry,
+    install_into_doc,
+    install_mcp,
+    is_installed,
+    list_installed,
+    preset_by_id,
+    preset_ids,
+    tool_config_path,
+    uninstall_from_doc,
+    uninstall_mcp,
+)
+from zai_python_helper.paths import Paths
+from zai_python_helper.regions import Region
+
+#: A clearly-fake key used everywhere — never a real credential.
+_KEY = "sk-fake-mcp-test-key"
+
+#: The four preset ids, in declaration order.
+_EXPECTED_IDS = ["zai-mcp-server", "web-search-prime", "web-reader", "zread"]
+
+
+# --------------------------------------------------------------------------- #
+# Preset table — the parity contract for the static definitions.
+# --------------------------------------------------------------------------- #
+
+
+def test_preset_ids_are_the_four_canonical_presets():
+    """The preset table ships exactly the four upstream preset MCPs, in order."""
+    assert preset_ids() == _EXPECTED_IDS
+
+
+def test_preset_by_id_roundtrip():
+    """Each declared id resolves to its preset; an unknown id resolves to None."""
+    for mcp_id in _EXPECTED_IDS:
+        assert preset_by_id(mcp_id)["id"] == mcp_id
+    assert preset_by_id("no-such-mcp") is None
+
+
+@pytest.mark.parametrize("mcp_id", _EXPECTED_IDS[1:])  # the three http presets
+def test_http_presets_carry_region_aware_url_template(mcp_id):
+    """Each http preset's urlTemplate has BOTH the global and china endpoints."""
+    template = preset_by_id(mcp_id)["urlTemplate"]
+    assert template["glm_coding_plan_global"].startswith("https://api.z.ai/api/mcp/")
+    assert template["glm_coding_plan_china"].startswith(
+        "https://open.bigmodel.cn/api/mcp/"
+    )
+    assert template["glm_coding_plan_global"].endswith("/mcp")
+    assert template["glm_coding_plan_china"].endswith("/mcp")
+
+
+def test_stdio_preset_carries_region_aware_env_template():
+    """The stdio zai-mcp-server carries Z_AI_MODE=ZAI (global) / ZHIPU (china)."""
+    env = preset_by_id("zai-mcp-server")["envTemplate"]
+    assert env["glm_coding_plan_global"] == {"Z_AI_MODE": "ZAI"}
+    assert env["glm_coding_plan_china"] == {"Z_AI_MODE": "ZHIPU"}
+
+
+# --------------------------------------------------------------------------- #
+# build_mcp_entry — the per-tool entry shape (parity byte-for-byte).
+# --------------------------------------------------------------------------- #
+
+
+def test_claude_code_stdio_entry_matches_upstream():
+    """Claude Code stdio: {type:stdio, command, args, env} with Z_AI_API_KEY."""
+    entry = build_mcp_entry(Tool.CLAUDE_CODE, "zai-mcp-server", _KEY, Region.GLOBAL)
+    assert entry == {
+        "type": "stdio",
+        "command": "npx",
+        "args": ["-y", "@z_ai/mcp-server"],
+        "env": {"Z_AI_MODE": "ZAI", "Z_AI_API_KEY": _KEY},
+    }
+
+
+def test_claude_code_http_entry_matches_upstream():
+    """Claude Code http: {type:http, url, headers:{Authorization: Bearer}}."""
+    entry = build_mcp_entry(Tool.CLAUDE_CODE, "web-search-prime", _KEY, Region.GLOBAL)
+    assert entry == {
+        "type": "http",
+        "url": "https://api.z.ai/api/mcp/web_search_prime/mcp",
+        "headers": {"Authorization": f"Bearer {_KEY}"},
+    }
+
+
+def test_opencode_entry_shapes_differ_from_claude_code():
+    """OpenCode stdio uses 'local' + command array + 'environment'; http 'remote'."""
+    stdio = build_mcp_entry(Tool.OPENCODE, "zai-mcp-server", _KEY, Region.GLOBAL)
+    assert stdio == {
+        "type": "local",
+        "command": ["npx", "-y", "@z_ai/mcp-server"],
+        "environment": {"Z_AI_MODE": "ZAI", "Z_AI_API_KEY": _KEY},
+    }
+    http = build_mcp_entry(Tool.OPENCODE, "zread", _KEY, Region.GLOBAL)
+    assert http["type"] == "remote"
+    assert http["headers"] == {"Authorization": f"Bearer {_KEY}"}
+
+
+def test_factory_droid_entries_carry_disabled_false():
+    """Factory Droid adds 'disabled: false' to both stdio and http entries."""
+    stdio = build_mcp_entry(Tool.FACTORY_DROID, "zai-mcp-server", _KEY, Region.GLOBAL)
+    assert stdio["disabled"] is False
+    http = build_mcp_entry(Tool.FACTORY_DROID, "web-reader", _KEY, Region.GLOBAL)
+    assert http["disabled"] is False
+
+
+def test_crush_http_matches_claude_code_shape():
+    """Crush uses the same http entry shape as Claude Code (type: http)."""
+    crush = build_mcp_entry(Tool.CRUSH, "web-search-prime", _KEY, Region.GLOBAL)
+    claude = build_mcp_entry(Tool.CLAUDE_CODE, "web-search-prime", _KEY, Region.GLOBAL)
+    assert crush == claude
+
+
+# --------------------------------------------------------------------------- #
+# Region awareness + auth handling.
+# --------------------------------------------------------------------------- #
+
+
+def test_region_china_swaps_url_host_and_mode():
+    """CHINA region: open.bigmodel.cn host + Z_AI_MODE=ZHIPU."""
+    http = build_mcp_entry(Tool.CLAUDE_CODE, "web-search-prime", _KEY, Region.CHINA)
+    assert http["url"] == "https://open.bigmodel.cn/api/mcp/web_search_prime/mcp"
+    stdio = build_mcp_entry(Tool.CLAUDE_CODE, "zai-mcp-server", _KEY, Region.CHINA)
+    assert stdio["env"]["Z_AI_MODE"] == "ZHIPU"
+
+
+def test_region_global_uses_api_z_ai_and_zai_mode():
+    """GLOBAL region: api.z.ai host + Z_AI_MODE=ZAI."""
+    http = build_mcp_entry(Tool.CLAUDE_CODE, "zread", _KEY, Region.GLOBAL)
+    assert http["url"] == "https://api.z.ai/api/mcp/zread/mcp"
+    stdio = build_mcp_entry(Tool.CLAUDE_CODE, "zai-mcp-server", _KEY, Region.GLOBAL)
+    assert stdio["env"]["Z_AI_MODE"] == "ZAI"
+
+
+def test_install_without_key_omits_auth():
+    """A None key installs the entry WITHOUT the auth env/header."""
+    stdio = build_mcp_entry(Tool.CLAUDE_CODE, "zai-mcp-server", None, Region.GLOBAL)
+    assert stdio["env"] == {"Z_AI_MODE": "ZAI"}
+    http = build_mcp_entry(Tool.CLAUDE_CODE, "web-reader", None, Region.GLOBAL)
+    assert http["headers"] == {}
+
+
+def test_unknown_preset_raises():
+    """An unknown preset id surfaces as a ValueError (caller wraps it)."""
+    with pytest.raises(ValueError, match="Unknown MCP preset"):
+        build_mcp_entry(Tool.CLAUDE_CODE, "nope", _KEY, Region.GLOBAL)
+
+
+# --------------------------------------------------------------------------- #
+# Pure document transforms — install_into_doc / uninstall_from_doc.
+# --------------------------------------------------------------------------- #
+
+
+def test_install_into_doc_creates_section_and_preserves_foreign():
+    """Installing creates the section, keeps foreign keys + foreign entries, pure."""
+    prior = {
+        "hasCompletedOnboarding": True,  # foreign top-level key
+        "mcpServers": {"user-custom": {"type": "stdio"}},  # foreign entry
+    }
+    doc = install_into_doc(prior, Tool.CLAUDE_CODE, "zread", _KEY, Region.GLOBAL)
+    assert doc["hasCompletedOnboarding"] is True
+    assert doc["mcpServers"]["user-custom"] == {"type": "stdio"}
+    assert "zread" in doc["mcpServers"]
+    # Input not mutated (pure).
+    assert "zread" not in prior["mcpServers"]
+
+
+def test_install_into_doc_uses_correct_section_per_tool():
+    """OpenCode writes to 'mcp'; Claude Code to 'mcpServers'."""
+    opencode = install_into_doc(None, Tool.OPENCODE, "zread", _KEY, Region.GLOBAL)
+    assert "mcp" in opencode and "mcpServers" not in opencode
+    claude = install_into_doc(None, Tool.CLAUDE_CODE, "zread", _KEY, Region.GLOBAL)
+    assert "mcpServers" in claude and "mcp" not in claude
+
+
+def test_uninstall_from_doc_removes_only_its_id_and_drops_empty_section():
+    """uninstall removes ONLY the named id; siblings survive; empty section dropped."""
+    doc = {
+        "hasCompletedOnboarding": True,
+        "mcpServers": {
+            "zread": {"type": "http"},
+            "user-custom": {"type": "stdio"},
+        },
+    }
+    out = uninstall_from_doc(doc, Tool.CLAUDE_CODE, "zread")
+    assert "zread" not in out["mcpServers"]
+    assert out["mcpServers"]["user-custom"] == {"type": "stdio"}
+    assert out["hasCompletedOnboarding"] is True
+    # Input not mutated.
+    assert "zread" in doc["mcpServers"]
+    # Removing the last entry drops the section entirely.
+    last = uninstall_from_doc(out, Tool.CLAUDE_CODE, "user-custom")
+    assert "mcpServers" not in last
+
+
+def test_uninstall_idempotent_on_absent_id():
+    """Removing an absent id is a no-op; None doc -> empty dict."""
+    doc = {"mcpServers": {"zread": {"type": "http"}}}
+    assert uninstall_from_doc(doc, Tool.CLAUDE_CODE, "web-reader") == doc
+    assert uninstall_from_doc(None, Tool.CLAUDE_CODE, "zread") == {}
+
+
+def test_list_installed_and_is_installed():
+    """list_installed returns ids in order; is_installed is membership."""
+    doc = {"mcpServers": {"zread": {}, "web-reader": {}}}
+    assert list_installed(doc, Tool.CLAUDE_CODE) == ["zread", "web-reader"]
+    assert is_installed(doc, Tool.CLAUDE_CODE, "zread") is True
+    assert is_installed(doc, Tool.CLAUDE_CODE, "nope") is False
+    assert list_installed(None, Tool.CLAUDE_CODE) == []
+
+
+@pytest.mark.parametrize(
+    "tool,rel",
+    [
+        (Tool.CLAUDE_CODE, ".claude.json"),
+        (Tool.OPENCODE, ".config/opencode/opencode.json"),
+        (Tool.CRUSH, ".config/crush/crush.json"),
+        (Tool.FACTORY_DROID, ".factory/mcp.json"),
+    ],
+)
+def test_tool_config_path_resolves_per_tool(_isolate_home, tool, rel):
+    """Each tool's config path resolves off home at its fixed location."""
+    assert tool_config_path(tool, _isolate_home) == _isolate_home / rel
+
+
+# --------------------------------------------------------------------------- #
+# High-level install_mcp / uninstall_mcp — the IO cycle on a tmp HOME.
+# --------------------------------------------------------------------------- #
+
+
+def test_install_mcp_writes_section_and_entry_to_disk(_isolate_home):
+    """install_mcp writes the tool config with the exact entry to disk."""
+    changed = install_mcp(
+        Tool.CLAUDE_CODE, "zread", _KEY, Region.GLOBAL, home=_isolate_home
+    )
+    assert changed is True
+    on_disk = JsonBackend.read(tool_config_path(Tool.CLAUDE_CODE, _isolate_home))
+    assert on_disk == {
+        "mcpServers": {
+            "zread": build_mcp_entry(Tool.CLAUDE_CODE, "zread", _KEY, Region.GLOBAL)
+        }
+    }
+
+
+def test_install_mcp_preserves_foreign_and_is_idempotent(_isolate_home):
+    """install deep-merges (foreign kept); re-install with same value is a no-op."""
+    path = tool_config_path(Tool.CLAUDE_CODE, _isolate_home)
+    JsonBackend.write(path, {"hasCompletedOnboarding": True, "mcpServers": {"x": {}}})
+    install_mcp(Tool.CLAUDE_CODE, "zread", _KEY, Region.GLOBAL, home=_isolate_home)
+    on_disk = JsonBackend.read(path)
+    assert on_disk["hasCompletedOnboarding"] is True
+    assert on_disk["mcpServers"]["x"] == {}
+    assert "zread" in on_disk["mcpServers"]
+    # Idempotent re-install writes nothing.
+    assert (
+        install_mcp(Tool.CLAUDE_CODE, "zread", _KEY, Region.GLOBAL, home=_isolate_home)
+        is False
+    )
+
+
+def test_install_mcp_accepts_string_tool(_isolate_home):
+    """A string tool value ('claude-code') coerces to the Tool enum."""
+    assert install_mcp("claude-code", "zread", _KEY, Region.GLOBAL, home=_isolate_home)
+    on_disk = JsonBackend.read(tool_config_path(Tool.CLAUDE_CODE, _isolate_home))
+    assert is_installed(on_disk, Tool.CLAUDE_CODE, "zread")
+
+
+def test_uninstall_mcp_removes_entry_leaving_siblings(_isolate_home):
+    """uninstall_mcp removes the id and leaves siblings on disk; idempotent."""
+    install_mcp(Tool.CLAUDE_CODE, "zread", _KEY, Region.GLOBAL, home=_isolate_home)
+    install_mcp(Tool.CLAUDE_CODE, "web-reader", _KEY, Region.GLOBAL, home=_isolate_home)
+    assert uninstall_mcp(Tool.CLAUDE_CODE, "zread", home=_isolate_home) is True
+    on_disk = JsonBackend.read(tool_config_path(Tool.CLAUDE_CODE, _isolate_home))
+    assert "zread" not in on_disk["mcpServers"]
+    assert "web-reader" in on_disk["mcpServers"]
+    # Idempotent on absent id.
+    assert uninstall_mcp(Tool.CLAUDE_CODE, "zread", home=_isolate_home) is False
+
+
+def test_install_mcp_uses_injected_io_seams(_isolate_home):
+    """The reader/writer seams are injectable (tests fake the FS)."""
+    store: dict = {}
+
+    def fake_reader(path):
+        return store.get(str(path))
+
+    def fake_writer(path, doc):
+        store[str(path)] = doc
+
+    install_mcp(
+        Tool.OPENCODE,
+        "zread",
+        _KEY,
+        Region.GLOBAL,
+        home=_isolate_home,
+        reader=fake_reader,
+        writer=fake_writer,
+    )
+    path = str(tool_config_path(Tool.OPENCODE, _isolate_home))
+    assert store[path]["mcp"]["zread"]["type"] == "remote"
+
+
+def test_written_config_is_valid_json_with_trailing_newline(_isolate_home):
+    """The written tool config is parseable JSON ending in a newline."""
+    install_mcp(Tool.CLAUDE_CODE, "zread", _KEY, Region.GLOBAL, home=_isolate_home)
+    text = tool_config_path(Tool.CLAUDE_CODE, _isolate_home).read_text(encoding="utf-8")
+    assert text.endswith("\n")
+    json.loads(text)
+
+
+# --------------------------------------------------------------------------- #
+# doctor — the MCP probe (READ-ONLY, never fails).
+# --------------------------------------------------------------------------- #
+
+
+def _write_minimal_zai_settings(home) -> None:
+    """Write a minimal valid Z.ai settings.json so doctor's chain is healthy."""
+    settings = home / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text(
+        json.dumps(
+            {
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
+                    "ANTHROPIC_AUTH_TOKEN": _KEY,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_doctor_mcp_probe_none_then_installed(_isolate_home, capsys):
+    """The MCP probe reports 'none installed' by default and surfaces installed ids.
+
+    Both verdicts are PASS (opt-in), so an installed OR absent MCP never fails
+    doctor. The HTTP probe is stubbed offline so the run is deterministic.
+    """
+    from zai_python_helper.doctor import ProbeResult, run_doctor
+
+    _write_minimal_zai_settings(_isolate_home)
+    offline = lambda url, headers, body: ProbeResult(  # noqa: E731
+        status=None, error="offline"
+    )
+
+    rc = run_doctor(
+        Paths.from_home(_isolate_home), color=False, environ={}, http_get=offline
+    )
+    assert "preset MCP servers" in capsys.readouterr().out
+    assert rc == 0  # MCP must never fail doctor.
+
+    install_mcp(Tool.CLAUDE_CODE, "zread", _KEY, Region.GLOBAL, home=_isolate_home)
+    rc = run_doctor(
+        Paths.from_home(_isolate_home), color=False, environ={}, http_get=offline
+    )
+    out = capsys.readouterr().out
+    assert "preset MCP servers" in out
+    assert "zread@claude-code" in out
+    assert rc == 0
