@@ -41,6 +41,10 @@ _SECRET_NAME_SUBSTRINGS = ("SECRET", "PASSWORD", "CREDENTIAL", "TOKEN", "API_KEY
 
 _RESTART_NOTICE = "restart recommended for deterministic switching"
 
+# Ownership journal is keyed per-tool. Claude Code is the only tool v1
+# manages, so this is a fixed constant (not a free-form string).
+_OWNERSHIP_TOOL = "claude_code"
+
 
 def _is_secret_key(key: str) -> bool:
     """Heuristic: is ``key`` likely a credential that must be redacted?
@@ -169,6 +173,92 @@ def _print_diff(path: Path, current: str, desired: str, tag: FileTag) -> None:
     print(_redact_text(diff_text), end="")
 
 
+def _build_takeover_records(
+    plan: PatchPlan,
+    *,
+    prior_doc: dict | None,
+    managed_keys: set[str],
+    removed_keys: set[str],
+) -> list[tuple[str, str | None, bool, str | None]]:
+    """Compute ``(key, prior_value, prior_present, set_hash)`` per owned key.
+
+    For each key we are about to SET (in ``managed_keys``): prior comes from
+    the PRE-patch ``prior_doc`` env; ``set_hash`` is the hash of the value the
+    plan writes (from the planned settings delta). For each key we are about
+    to REMOVE (``removed_keys``): ``set_hash`` is ``None`` (ownership taken as
+    a removal — revert restores the prior unconditionally), prior is the
+    pre-patch value/presence.
+
+    A key is skipped when the plan neither sets nor removes it (e.g. a
+    model-mode key the current mode does not contribute). The journal only
+    records keys we actually mutated, so revert never has stale entries for
+    keys we did not touch.
+    """
+    from zai_python_helper.ownership import hash_value
+
+    settings_delta = plan.delta_for(FileTag.SETTINGS)
+    desired_env = settings_delta.content.get("env", {}) if settings_delta else {}
+    prior_env = (prior_doc or {}).get("env") or {}
+
+    records: list[tuple[str, str | None, bool, str | None]] = []
+    for key in sorted(managed_keys):
+        if key not in desired_env:
+            continue  # this mode does not set this key
+        set_hash = hash_value(desired_env[key])
+        prior_present = key in prior_env
+        prior_value = prior_env[key] if prior_present else None
+        records.append((key, prior_value, prior_present, set_hash))
+    for key in sorted(removed_keys):
+        # Ownership of a removal: set_hash None signals "we removed it".
+        prior_present = key in prior_env
+        prior_value = prior_env[key] if prior_present else None
+        records.append((key, prior_value, prior_present, None))
+    return records
+
+
+def _merge_takeover_records(
+    current: dict,
+    records: list[tuple[str, str | None, bool, str | None]],
+) -> dict:
+    """Fold per-key takeover records into the journal dict (pure take_over).
+
+    Applies :func:`~zai_python_helper.ownership.take_over` for each record over
+    the current journal, returning the merged journal to persist.
+    """
+    from zai_python_helper.ownership import take_over
+
+    merged = current
+    for key, prior_value, prior_present, set_hash in records:
+        merged = take_over(
+            merged,
+            _OWNERSHIP_TOOL,
+            key,
+            prior_value,
+            prior_present,
+            set_hash,
+        )
+    return merged
+
+
+def _run_recovery(paths: Paths, recover_fn) -> None:
+    """Roll forward any interrupted prior activation before a new run.
+
+    If a recovery manifest survives (a prior ``use`` was hard-killed mid-way),
+    replay it to completion and report what was recovered. Best-effort and
+    silent when there is nothing to recover.
+    """
+    from zai_python_helper.patchplan import has_pending_recovery
+
+    if not has_pending_recovery(paths):
+        return
+    applied = recover_fn(paths)
+    if applied:
+        print(
+            "warning: recovered from an interrupted prior run "
+            f"(re-applied: {', '.join(applied)})"
+        )
+
+
 def _handle_list(args: argparse.Namespace) -> int:
     """List available Z.ai model presets."""
     from zai_python_helper.constants import (
@@ -277,6 +367,11 @@ def _handle_use_zai(args: argparse.Namespace) -> int:
 
     # Read current parsed state for the planner (pure transform).
     from zai_python_helper.backends import JsonBackend, ShellBackend
+    from zai_python_helper.core.planner.claude_code import (
+        MANAGED_ZAI_KEYS,
+        REMOVED_ON_ZAI_KEYS,
+        _all_managed_model_keys,
+    )
 
     settings_doc = JsonBackend.read(paths.claude_settings)
     claude_json_doc = JsonBackend.read(paths.claude_json)
@@ -300,7 +395,35 @@ def _handle_use_zai(args: argparse.Namespace) -> int:
         _apply_plan(paths, plan, dry_run=True)
         return 0
 
-    written = _apply_plan(paths, plan, dry_run=False)
+    # Ownership journal (ADR-004): for every key we are about to set/remove,
+    # record its PRIOR value/presence + a hash of what we set, so a later
+    # ``use default`` can restore it safely. The prior is read from the
+    # PRE-patch settings_doc (captured above); the set value comes from the
+    # planned (desired) settings doc. The journal write is performed under
+    # the SAME process lock as the file commit (on_locked) so the two stay
+    # consistent — no window where the files reflect activation but the
+    # journal does not (or vice versa).
+    records = _build_takeover_records(
+        plan,
+        prior_doc=settings_doc,
+        managed_keys=set(MANAGED_ZAI_KEYS) | set(_all_managed_model_keys()),
+        removed_keys=set(REMOVED_ON_ZAI_KEYS),
+    )
+
+    from zai_python_helper.ownership import OwnershipJournal
+    from zai_python_helper.patchplan import apply_plan_under_lock, recover
+
+    # Roll forward any interrupted prior run BEFORE we begin a new activation.
+    _run_recovery(paths, recover)
+
+    journal = OwnershipJournal(paths.ownership_json)
+
+    def _persist_journal() -> None:
+        if records:
+            current = journal.read()
+            journal.write(_merge_takeover_records(current, records))
+
+    written = apply_plan_under_lock(paths, plan, on_locked=_persist_journal)
     if not written:
         print("(no changes — already in desired state)")
     else:
@@ -312,15 +435,10 @@ def _handle_use_zai(args: argparse.Namespace) -> int:
     # may carry unrelated secrets like OPENAI_API_KEY). The managed set is
     # derived from the planner so it stays in sync; secrets among them are
     # redacted by name.
-    from zai_python_helper.core.planner.claude_code import (
-        MANAGED_ZAI_KEYS,
-        _all_managed_model_keys,
-    )
-
     settings_delta = plan.delta_for(FileTag.SETTINGS)
     desired_env = settings_delta.content.get("env", {}) if settings_delta else {}
-    managed_keys = set(MANAGED_ZAI_KEYS) | set(_all_managed_model_keys())
-    owned = {k: desired_env[k] for k in desired_env if k in managed_keys}
+    managed_keys_echo = set(MANAGED_ZAI_KEYS) | set(_all_managed_model_keys())
+    owned = {k: desired_env[k] for k in desired_env if k in managed_keys_echo}
     if owned:
         print(f"  base_url: {base_url_for_region(region)}")
         print("  env (managed):")
@@ -331,13 +449,17 @@ def _handle_use_zai(args: argparse.Namespace) -> int:
 
 
 def _handle_use_default(args: argparse.Namespace) -> int:
-    """Revert to the default provider — strip managed env keys, remove block.
+    """Revert to the default provider — restore prior values via ownership journal.
 
-    Inverse of ``use zai`` for ``settings.json`` and ``.zshrc``.
-    ``.claude.json`` is intentionally NOT reverted. Idempotent.
+    Non-destructive inverse of ``use zai`` (ADR-004): for each managed key,
+    consult the ownership journal and restore the prior value (RESTORE), drop
+    our managed value (CLEAR), or leave it untouched with a warning (REFUSE —
+    the key changed externally since activation). ``.zshrc`` removes only the
+    owned block; ``.claude.json`` is intentionally NOT reverted. Idempotent.
     """
     from zai_python_helper.core.domain import ModelMode
-    from zai_python_helper.core.planner import plan_default
+    from zai_python_helper.core.planner import plan_revert
+    from zai_python_helper.core.planner.claude_code import revert_key_set
     from zai_python_helper.errors import ValidationError
 
     # Model mode is irrelevant to removal (the managed set is derived from it),
@@ -358,16 +480,42 @@ def _handle_use_default(args: argparse.Namespace) -> int:
         if used:
             raise ValidationError(f"{', '.join(used)} only apply to --mode custom")
 
-    spec = _build_provider_spec(args, mode, region)
-
     from zai_python_helper.backends import JsonBackend, ShellBackend
+    from zai_python_helper.ownership import OwnershipJournal, revert
+    from zai_python_helper.patchplan import apply_plan_under_lock, recover
+
+    # Roll forward any interrupted prior run first.
+    _run_recovery(paths, recover)
 
     settings_doc = JsonBackend.read(paths.claude_settings)
     zshrc_text = ShellBackend.read(paths.zshrc)
+    journal_records = OwnershipJournal(paths.ownership_json).read()
 
-    plan = plan_default(spec, settings_doc=settings_doc, zshrc_text=zshrc_text)
+    # Compute a per-key revert decision from the journal + the LIVE settings.
+    # RESTORE → put back the prior value; CLEAR → drop the managed value;
+    # REFUSE → the key changed externally, leave it (warn below).
+    current_env = (settings_doc or {}).get("env") or {}
+    decisions = {
+        key: revert(
+            journal_records,
+            _OWNERSHIP_TOOL,
+            key,
+            current_env.get(key) if key in current_env else None,
+        )
+        for key in revert_key_set()
+    }
+
+    plan = plan_revert(
+        decisions, settings_doc=settings_doc, zshrc_text=zshrc_text
+    )
 
     print(f"Reverting to default provider (region: {region.value})")
+
+    # Surface REFUSE decisions as warnings BEFORE writing — the user should
+    # see which keys we declined to touch (and why), regardless of dry-run.
+    refused = [d for d in decisions.values() if d.action.name == "REFUSE"]
+    for d in refused:
+        print(f"  warning: {d.reason}")
 
     if dry_run:
         print("--dry-run: no files written")
@@ -376,7 +524,7 @@ def _handle_use_default(args: argparse.Namespace) -> int:
         _apply_plan(paths, plan, dry_run=True)
         return 0
 
-    written = _apply_plan(paths, plan, dry_run=False)
+    written = apply_plan_under_lock(paths, plan)
     if not written:
         print("(no changes — already at default)")
     else:

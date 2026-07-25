@@ -62,6 +62,12 @@ from zai_python_helper.errors import (
     ValidationError,
     ZaiPythonHelperError,
 )
+from zai_python_helper.ownership import (
+    RevertAction,
+    RevertDecision,
+    revert,
+    take_over,
+)
 from zai_python_helper.paths import Paths
 from zai_python_helper.regions import Region
 from zai_python_helper.status import (
@@ -86,6 +92,11 @@ __all__ = [
     "plan_zai",
     "postconditions",
     "base_url_for_region",
+    # ownership journal (ADR-004, pure ops)
+    "RevertAction",
+    "RevertDecision",
+    "take_over",
+    "revert",
     # infra
     "Paths",
     "JsonBackend",

@@ -191,7 +191,14 @@ class TestUseDefault:
         assert "export PATH=/bin" in text
 
     def test_round_trip_zai_then_default_restores_foreign(self, tmp_path, monkeypatch):
-        """Full round-trip: original foreign state restored after zai→default."""
+        """Full round-trip: ORIGINAL state restored after zai→default (S3).
+
+        S3 changed this from S2's blind deletion: ``use zai`` removes the
+        user's ``ANTHROPIC_API_KEY`` (Z.ai auths via AUTH_TOKEN), but now
+        records that removal in the ownership journal. ``use default`` then
+        RESTORES the original ``ANTHROPIC_API_KEY=sk-old`` rather than
+        discarding it — non-destructive revert. Foreign keys always survive.
+        """
         monkeypatch.setenv("HOME", str(tmp_path))
         original_env = {"FOREIGN": "keep", "ANTHROPIC_API_KEY": "sk-old"}
         _seed(tmp_path, settings={"env": dict(original_env)})
@@ -200,8 +207,9 @@ class TestUseDefault:
         _run(["use", "default", "--mode", "default", "--region", "global"])
 
         settings = json.loads(Paths.from_home(tmp_path).claude_settings.read_text())
-        # Foreign key survives; managed keys + API_KEY both gone.
-        assert settings["env"] == {"FOREIGN": "keep"}
+        # Foreign key survives; the managed ZAI keys are gone; AND the original
+        # ANTHROPIC_API_KEY is RESTORED (not blindly deleted as in S2).
+        assert settings["env"] == {"FOREIGN": "keep", "ANTHROPIC_API_KEY": "sk-old"}
 
     def test_cross_mode_default_strips_stale_model_keys(self, tmp_path, monkeypatch):
         """Regression (Codex finding): ``use zai --mode default`` then a bare
@@ -247,6 +255,150 @@ class TestUseDefault:
         # Our own token is redacted.
         assert TOKEN not in out
         assert "<redacted>" in out
+
+
+# ---------------------------------------------------------------------------
+# S3: ownership journal end-to-end (ADR-004 / ADR-005)
+# ---------------------------------------------------------------------------
+
+
+class TestOwnershipJournalE2E:
+    """End-to-end S3 scenarios through the real CLI handlers.
+
+    These exercise the journal wire-up: ``use zai`` records ownership, and
+    ``use default`` consults it so the revert is non-destructive.
+    """
+
+    def test_use_zai_writes_ownership_json_mode_0600(self, tmp_path, monkeypatch):
+        """``use zai`` creates ownership.json at mode 0600 (issue #4 acceptance)."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        _seed(tmp_path)
+        _run(["use", "zai", "--api-key", TOKEN])
+
+        journal = Paths.from_home(tmp_path).ownership_json
+        assert journal.exists()
+        mode = journal.stat().st_mode & 0o777
+        assert mode == 0o600
+
+    def test_use_default_restores_original_auth_token(self, tmp_path, monkeypatch):
+        """The headline S3 guarantee: original AUTH_TOKEN restored after zai→default."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        original_token = "sk-user-original-token"
+        _seed(
+            tmp_path,
+            settings={"env": {"ANTHROPIC_AUTH_TOKEN": original_token}},
+        )
+        _run(["use", "zai", "--api-key", TOKEN])
+        _run(["use", "default", "--region", "global"])
+
+        env = json.loads(Paths.from_home(tmp_path).claude_settings.read_text()).get(
+            "env", {}
+        )
+        # The user's ORIGINAL token is back — not the Z.ai one, not deleted.
+        assert env.get("ANTHROPIC_AUTH_TOKEN") == original_token
+
+    def test_use_default_refuses_on_external_change(self, tmp_path, monkeypatch, capsys):
+        """If the user edited AUTH_TOKEN after use zai, use default warns + leaves it.
+
+        ADR-004: the key changed externally → REFUSE (do not overwrite). The
+        CLI must surface a warning naming the key and leave the edited value.
+        """
+        monkeypatch.setenv("HOME", str(tmp_path))
+        _seed(tmp_path)
+        _run(["use", "zai", "--api-key", TOKEN])
+        capsys.readouterr()
+
+        # The user manually edits the token to something we never set.
+        settings_path = Paths.from_home(tmp_path).claude_settings
+        doc = json.loads(settings_path.read_text())
+        doc["env"]["ANTHROPIC_AUTH_TOKEN"] = "sk-edited-by-user"
+        settings_path.write_text(json.dumps(doc))
+
+        _run(["use", "default", "--region", "global"])
+
+        env = json.loads(settings_path.read_text()).get("env", {})
+        # The edited value is PRESERVED (not overwritten, not deleted).
+        assert env.get("ANTHROPIC_AUTH_TOKEN") == "sk-edited-by-user"
+        out = capsys.readouterr().out
+        assert "warning" in out.lower()
+        assert "ANTHROPIC_AUTH_TOKEN" in out
+
+    def test_use_default_idempotent_after_revert(self, tmp_path, monkeypatch, capsys):
+        """A second ``use default`` after revert is a no-op (REFUSE/RESTORE settle)."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        _seed(tmp_path, settings={"env": {"ANTHROPIC_API_KEY": "sk-original"}})
+        _run(["use", "zai", "--api-key", TOKEN])
+        _run(["use", "default", "--region", "global"])
+        snapshot = Paths.from_home(tmp_path).claude_settings.read_text()
+        capsys.readouterr()
+
+        _run(["use", "default", "--region", "global"])
+        # State unchanged by the second revert.
+        assert Paths.from_home(tmp_path).claude_settings.read_text() == snapshot
+        assert "no changes" in capsys.readouterr().out.lower()
+
+    def test_use_default_without_prior_activation_is_clear(self, tmp_path, monkeypatch):
+        """``use default`` with no journal (never activated) CLEARs managed keys."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        _seed(
+            tmp_path,
+            settings={
+                "env": {
+                    "FOREIGN": "keep",
+                    "ANTHROPIC_AUTH_TOKEN": "sk-stray",
+                    "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
+                }
+            },
+        )
+        _run(["use", "default", "--region", "global"])
+
+        env = json.loads(Paths.from_home(tmp_path).claude_settings.read_text()).get(
+            "env", {}
+        )
+        # No journal → CLEAR for managed keys; foreign survives.
+        assert "ANTHROPIC_AUTH_TOKEN" not in env
+        assert "ANTHROPIC_BASE_URL" not in env
+        assert env == {"FOREIGN": "keep"}
+
+    def test_use_zai_rolls_forward_after_interrupted_prior_run(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """A surviving recovery manifest is replayed BEFORE a new activation (ADR-005).
+
+        Simulate a hard-killed prior ``use``: a recovery manifest is on disk
+        but the managed files were not (fully) written. The next ``use zai``
+        rolls the manifest forward (re-applies it, warns) and then proceeds
+        with its own activation — leaving a clean state and no manifest.
+        """
+        monkeypatch.setenv("HOME", str(tmp_path))
+        paths = Paths.from_home(tmp_path)
+        # Hand-craft a manifest from a prior interrupted run: settings final
+        # state recorded, but the file itself never landed on disk.
+        paths.recovery_json.parent.mkdir(parents=True, exist_ok=True)
+        manifest = {
+            "entries": [
+                {
+                    "tag": "settings",
+                    "path": str(paths.claude_settings),
+                    "kind": "json",
+                    "content": json.dumps({"env": {"ANTHROPIC_AUTH_TOKEN": "sk-recovered"}}) + "\n",
+                }
+            ]
+        }
+        paths.recovery_json.write_text(json.dumps(manifest))
+        assert not paths.claude_settings.exists()
+
+        _run(["use", "zai", "--api-key", TOKEN])
+
+        out = capsys.readouterr().out
+        # The CLI warned that it recovered from an interrupted prior run.
+        assert "recovered from an interrupted prior run" in out
+        # The manifest is consumed; the new activation completed cleanly.
+        assert not paths.recovery_json.exists()
+        env = json.loads(paths.claude_settings.read_text()).get("env", {})
+        # The NEW activation's token wins (the manifest's settings was the
+        # pre-empted run's intent; the new run replaces it).
+        assert env["ANTHROPIC_AUTH_TOKEN"] == TOKEN
 
 
 # ---------------------------------------------------------------------------

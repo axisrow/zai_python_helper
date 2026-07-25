@@ -70,6 +70,12 @@ indent-style = "space"
 [tool.pytest.ini_options]
 minversion = "8.0"
 testpaths = ["tests"]
+# Resolve the package from THIS worktree's ``src/`` ahead of any editable
+# install. Several worktrees may share one Python environment; without this,
+# pytest would import whichever worktree ``pip install -e`` last pointed at.
+# In CI (single fresh checkout) this is a harmless no-op: ``src`` on the path
+# is the same code ``pip install -e .`` already exposed.
+pythonpath = ["src"]
 markers = [
     "unit: fast isolated tests (pure logic, mocked IO)",
     "integration: tests touching tmp HOME + fake services",
