@@ -645,7 +645,11 @@ Attributes:
 
 *constant — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/tools/__init__.py#L20) (`dict[str, Tool]`)*
 
+<<<<<<< HEAD
 Value: `{ClaudeCodeTool.name: ClaudeCodeTool(), CrushTool.name: CrushTool()}`
+=======
+Value: `{ClaudeCodeTool.name: ClaudeCodeTool(), OpenCodeTool.name: OpenCodeTool()}`
+>>>>>>> b0c2f2e (feat(S6): OpenCode config planner + tool adapter (#7))
 
 *(no docstring)*
 
