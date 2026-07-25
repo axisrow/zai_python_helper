@@ -43,16 +43,23 @@ def plan_model_config(provider_spec: ProviderSpec) -> dict[str, Any]:
 
 def _plan_original_mode(provider_spec: ProviderSpec) -> dict[str, Any]:
     """
-    Plan for ORIGINAL mode — only ANTHROPIC_BASE_URL.
+    Plan for ORIGINAL mode — the env vars the upstream @z_ai/coding-helper sets.
 
-    This is the behavior of the original @z_ai/coding-helper utility.
-    We only set the base URL and let the server decide which model to use.
+    Mirrors the original tool: only the Z.ai base URL, the API timeout, and the
+    non-essential-traffic flag — no model overrides. The server picks the model.
+
+    Note: ``ANTHROPIC_AUTH_TOKEN`` is NOT set here; the planner
+    (:mod:`zai_python_helper.core.planner.claude_code`) adds it on top of this
+    dict. ``ANTHROPIC_BASE_URL`` is also overwritten there with the canonical
+    region URL, so the ``base_url`` on the spec is informational.
 
     Args:
         provider_spec: The provider specification
 
     Returns:
-        Dict with ANTHROPIC_BASE_URL and API key
+        Dict of env keys (ANTHROPIC_BASE_URL, API_TIMEOUT_MS,
+        CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC) for the settings.json env
+        block. No API key.
     """
     return {
         "ANTHROPIC_BASE_URL": provider_spec.base_url,
