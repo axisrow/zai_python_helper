@@ -13,11 +13,15 @@ design). The high-level IO cycle (``use_zai`` / ``use_default``) is added in a
 follow-up (S2.5); until then, callers compose the pure planner with the IO
 backends themselves, e.g.::
 
-    from zai_python_helper import ProviderSpec, ModelMode, Region, plan_zai
-    from zai_python_helper import JsonBackend, ShellBackend, Paths
+    from zai_python_helper import (
+        ProviderSpec, ModelMode, Region, plan_zai,
+        JsonBackend, ShellBackend, Paths, base_url_for_region,
+    )
 
-    spec = ProviderSpec(base_url="https://api.z.ai/api/anthropic",
+    spec = ProviderSpec(base_url=base_url_for_region(Region.GLOBAL),
                         model_mode=ModelMode.ORIGINAL)
+    paths = Paths.default()          # or Paths.from_home(tmp) in tests
+    token = "<your Z.ai auth token>"  # resolve via io.secrets.resolve_key
     plan = plan_zai(spec, Region.GLOBAL,
                     settings_doc=JsonBackend.read(paths.claude_settings),
                     claude_json_doc=JsonBackend.read(paths.claude_json),
