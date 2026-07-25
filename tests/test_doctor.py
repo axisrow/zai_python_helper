@@ -17,7 +17,6 @@ Conventions:
 from __future__ import annotations
 
 import json
-import shutil
 
 from pytest_httpserver import HTTPServer
 
@@ -704,7 +703,6 @@ def test_ancestor_project_settings_override_detected(tmp_path):
 
     # Verify the resolver function exists and has the right structure
     from zai_python_helper.io.settings import _find_project_settings_path
-    import inspect
-    sig = inspect.signature(_find_project_settings_path)
-    assert 'cwd' in sig.parameters, "_find_project_settings_path should accept cwd"
-    assert 'home' in sig.parameters, "_find_project_settings_path should accept home boundary"
+    sig = _find_project_settings_path.__code__.co_consts[0]  # Get signature from code object
+    assert 'cwd' in str(sig), "_find_project_settings_path should accept cwd"
+    assert 'home' in str(sig), "_find_project_settings_path should accept home boundary"
