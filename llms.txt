@@ -1,0 +1,111 @@
+# zai_python_helper
+
+> MIT-licensed, clean-room Python helper that connects **Claude Code** to the
+> **Z.ai GLM Coding Plan** by patching `~/.claude/settings.json`,
+> `~/.claude.json`, and `~/.zshrc` — no background service, no binary. Designed
+> **importable** (use the planning core as a library) and **headless** (every
+> action is a CLI flag, no interactive menu).
+
+## Install
+
+```bash
+pip install zai-python-helper
+```
+
+Or from source (editable, with docs tooling):
+
+```bash
+pip install -e ".[docs]"
+```
+
+## 30-second headless use
+
+Importable pure-planner API — no side effects until you apply the plan via the
+IO backends:
+
+```python
+from zai_python_helper import (
+    ProviderSpec, ModelMode, Region, plan_zai,
+    JsonBackend, ShellBackend, Paths, base_url_for_region,
+)
+
+spec = ProviderSpec(
+    base_url=base_url_for_region(Region.GLOBAL),
+    model_mode=ModelMode.ORIGINAL,
+)
+paths = Paths.default()
+plan = plan_zai(
+    spec,
+    Region.GLOBAL,
+    settings_doc=JsonBackend.read(paths.claude_settings),
+    claude_json_doc=JsonBackend.read(paths.claude_json),
+    zshrc_text=ShellBackend.read(paths.zshrc),
+    auth_token="<your Z.ai auth token>",
+)
+# Apply plan.deltas via JsonBackend / ShellBackend (omitted for brevity).
+```
+
+Headless CLI (every option is a flag — scriptable, no prompts unless a token is
+missing):
+
+```bash
+# Switch Claude Code to Z.ai (model selection mode, region, token, dry-run)
+zai-python-helper use zai --mode original --region global --api-key "$ZAI_API_KEY"
+zai-python-helper use zai --mode select --model glm-4-plus
+zai-python-helper use zai --mode custom --model "my-model" --name "My Model"
+zai-python-helper use zai --dry-run          # preview, write nothing
+
+# Revert to default Anthropic config
+zai-python-helper use default
+
+# Read-only observability + diagnostics
+zai-python-helper status
+zai-python-helper doctor
+zai-python-helper list --format json
+```
+
+## Public API
+
+Auto-generated from `zai_python_helper.__all__` (the versioned contract, issue
+#18). `name → signature → one-line`. Detailed reference:
+[docs/api/zai_python_helper.md](docs/api/zai_python_helper.md).
+
+
+```text
+# name → signature → one-line   (from __all__, n=23)
+- `__version__` = `0.1.0`
+- `ModelMode` (enum): Mode for model selection in Claude Code configuration.
+- `ProviderSpec` (dataclass): Specification for a provider configuration.
+- `Region` (enum): Z.ai deployment region.
+- `DeltaKind` (enum): The kind of mutation a `FileDelta` represents.
+- `FileDelta` (dataclass): A single file's intended mutation, addressed by semantic tag.
+- `FileTag` (enum): Semantic identifier for a managed file (decoupled from its path).
+- `PatchPlan` (dataclass): An ordered list of file deltas describing a complete activation.
+- `plan_default(provider_spec: ProviderSpec, settings_doc: dict[str, Any] | None, zshrc_text: str) -> PatchPlan`: Plan the `use default` reversion for Claude Code.
+- `plan_zai(provider_spec: ProviderSpec, region: Region, settings_doc: dict[str, Any] | None, claude_json_doc: dict[str, Any] | None, zshrc_text: str, auth_token: str) -> PatchPlan`: Plan the `use zai` activation for Claude Code.
+- `postconditions(region: Region, settings_doc: dict[str, Any] | None, zshrc_text: str) -> bool`: True iff `settings.json` + `.zshrc` reflect an active `use zai`.
+- `base_url_for_region(region: Region) -> str`: Return the Z.ai Anthropic-compatible base URL for `region`.
+- `Paths` (dataclass): Frozen bundle of every resolved filesystem path the tool touches.
+- `JsonBackend` (class): Atomic JSON document writer/reader.
+- `ShellBackend` (class): Owned marker-fenced block writer for shell rc files (ADR-003).
+- `ClaudeCodeStatus` (dataclass): Detected state of the Claude Code integration.
+- `StatusReport` (dataclass): The full read-only status of all detected tools.
+- `detect_status(paths: Paths) -> StatusReport`: Read all tool configs and return a `StatusReport`.
+- `render_status(report: StatusReport, stream, use_color: bool | None) -> str`: Render a `StatusReport` to a single string.
+- `ConfigurationError` (class): Error in a configuration file or settings document.
+- `ProviderError` (class): Error in provider configuration or connection.
+- `ValidationError` (class): Error in input or domain validation.
+- `ZaiPythonHelperError` (class): Expected helper error → one-line message + non-zero exit, no traceback.
+```
+
+## Docs
+
+- [docs/api/zai_python_helper.md](docs/api/zai_python_helper.md): full auto-generated API reference (signatures + docstrings).
+- [ARCHITECTURE.md](docs/ARCHITECTURE.md): design, ADRs, and module layout.
+- [README.md](README.md): human-oriented overview and CLI mode reference.
+- [Source](https://github.com/axisrow/zai_python_helper/src/zai_python_helper): browse the implementation.
+
+## Optional
+
+- [llmstxt.org](https://llmstxt.org/): the `llms.txt` format this file follows.
+- [issue #19](https://github.com/axisrow/zai_python_helper/issues/19): how these docs are generated and kept in sync.
