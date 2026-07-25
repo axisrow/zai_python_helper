@@ -3,9 +3,15 @@
 The dispatch contract: each subcommand registers a handler via
 ``set_defaults(func=...)``, and :func:`zai_python_helper.__main__.main` calls
 ``args.func(args)``. Handlers are THIN SHELLS — resolve ``Paths.default()``,
-delegate to the planner + IO backends, return an int. They do NOT
-catch/print/exit: a :class:`ZaiPythonHelperError` propagates to :func:`main`,
-which formats it as one-line stderr + exit 1 (full traceback under ``--debug``).
+look up the target :class:`~zai_python_helper.tools.base.Tool` in
+:data:`~zai_python_helper.tools.REGISTRY`, and delegate the read → plan →
+ownership-capture → commit cycle to it. They do NOT catch/print/exit: a
+:class:`ZaiPythonHelperError` propagates to :func:`main`, which formats it as
+one-line stderr + exit 1 (full traceback under ``--debug``).
+
+The CLI is **tool-agnostic**: it never branches on the tool name. Every
+tool-specific concern (which files, which ownership keys, how to echo) lives
+on the Tool. Adding a tool is "implement ``Tool`` + register" — no CLI edit.
 
 Root flags (``--debug`` / ``--dry-run``) attach via a single shared parent
 parser so they parse BOTH before and after the subcommand (dual-parser
@@ -20,30 +26,20 @@ from pathlib import Path
 from zai_python_helper.core.planner import DeltaKind, FileTag, PatchPlan
 from zai_python_helper.paths import Paths
 from zai_python_helper.regions import Region
-
-# Tag → Paths attribute. Single place that maps a semantic file tag to its
-# resolved path. Keeps the planner path-free and the CLI's apply loop generic.
-_TAG_TO_PATH = {
-    FileTag.SETTINGS: "claude_settings",
-    FileTag.CLAUDE_JSON: "claude_json",
-    FileTag.ZSHRC: "zshrc",
-}
+from zai_python_helper.tools.base import resolve_path
 
 # Keys whose values are secrets and must be redacted in any diff/echo output
-# (ADR: secrets never logged). Used by both --dry-run and the post-run echo.
-# This is a conservative allowlist-by-name: a key is secret if it is one of
-# the explicit names below OR matches a credential-ish suffix/pattern. We
-# redact defensively so a foreign key we don't know about (OPENAI_API_KEY,
-# cloud tokens, etc.) never leaks through a dry-run diff or echo.
+# (ADR: secrets never logged). Used by ``--dry-run`` diff rendering. This is a
+# conservative allowlist-by-name: a key is secret if it is one of the explicit
+# names below OR matches a credential-ish suffix/pattern. We redact defensively
+# so a foreign key we don't know about (OPENAI_API_KEY, cloud tokens, etc.)
+# never leaks through a dry-run diff. (Per-tool echo redaction lives on the
+# Tool itself; this covers the generic diff path.)
 _SECRET_ENV_KEYS = ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY")
 _SECRET_NAME_SUFFIXES = ("_KEY", "_TOKEN", "_SECRET", "_PASSWORD", "_PASSWD")
 _SECRET_NAME_SUBSTRINGS = ("SECRET", "PASSWORD", "CREDENTIAL", "TOKEN", "API_KEY")
 
 _RESTART_NOTICE = "restart recommended for deterministic switching"
-
-# Ownership journal is keyed per-tool. Claude Code is the only tool v1
-# manages, so this is a fixed constant (not a free-form string).
-_OWNERSHIP_TOOL = "claude_code"
 
 
 def _is_secret_key(key: str) -> bool:
@@ -52,7 +48,7 @@ def _is_secret_key(key: str) -> bool:
     Conservative — errs on the side of redacting. Matches the explicit
     managed-secret names plus credential-ish suffixes/substrings so foreign
     secrets (OPENAI_API_KEY, cloud tokens) are caught even though we don't
-    enumerate them.
+    enumerate them. Used by the generic ``--dry-run`` diff renderer.
     """
     upper = key.upper()
     if key in _SECRET_ENV_KEYS:
@@ -62,13 +58,8 @@ def _is_secret_key(key: str) -> bool:
     return any(sub in upper for sub in _SECRET_NAME_SUBSTRINGS)
 
 
-def _resolve_path(paths: Paths, tag: FileTag) -> Path:
-    """Map a semantic :class:`FileTag` to its resolved :class:`Path`."""
-    return getattr(paths, _TAG_TO_PATH[tag])
-
-
 def _redact_text(text: str) -> str:
-    """Redact secret values in rendered text for safe diffing/echo.
+    """Redact secret values in rendered text for safe diffing.
 
     Replaces the value of any credential-looking assignment with
     ``<redacted>``. Covers BOTH syntaxes a managed file may use so a secret
@@ -129,7 +120,7 @@ def _apply_plan(paths: Paths, plan: PatchPlan, *, dry_run: bool) -> list[FileTag
     for delta in plan.deltas:
         if delta.kind == DeltaKind.NOOP:
             continue
-        path = _resolve_path(paths, delta.tag)
+        path = resolve_path(paths, delta.tag)
 
         if delta.kind == DeltaKind.WRITE_JSON:
             current_doc = JsonBackend.read(path)
@@ -173,73 +164,6 @@ def _print_diff(path: Path, current: str, desired: str, tag: FileTag) -> None:
     print(_redact_text(diff_text), end="")
 
 
-def _build_takeover_records(
-    plan: PatchPlan,
-    *,
-    prior_doc: dict | None,
-    managed_keys: set[str],
-    removed_keys: set[str],
-) -> list[tuple[str, str | None, bool, str | None]]:
-    """Compute ``(key, prior_value, prior_present, set_hash)`` per owned key.
-
-    For each key we are about to SET (in ``managed_keys``): prior comes from
-    the PRE-patch ``prior_doc`` env; ``set_hash`` is the hash of the value the
-    plan writes (from the planned settings delta). For each key we are about
-    to REMOVE (``removed_keys``): ``set_hash`` is ``None`` (ownership taken as
-    a removal — revert restores the prior unconditionally), prior is the
-    pre-patch value/presence.
-
-    A key is skipped when the plan neither sets nor removes it (e.g. a
-    model-mode key the current mode does not contribute). The journal only
-    records keys we actually mutated, so revert never has stale entries for
-    keys we did not touch.
-    """
-    from zai_python_helper.ownership import hash_value
-
-    settings_delta = plan.delta_for(FileTag.SETTINGS)
-    desired_env = settings_delta.content.get("env", {}) if settings_delta else {}
-    prior_env = (prior_doc or {}).get("env") or {}
-
-    records: list[tuple[str, str | None, bool, str | None]] = []
-    for key in sorted(managed_keys):
-        if key not in desired_env:
-            continue  # this mode does not set this key
-        set_hash = hash_value(desired_env[key])
-        prior_present = key in prior_env
-        prior_value = prior_env[key] if prior_present else None
-        records.append((key, prior_value, prior_present, set_hash))
-    for key in sorted(removed_keys):
-        # Ownership of a removal: set_hash None signals "we removed it".
-        prior_present = key in prior_env
-        prior_value = prior_env[key] if prior_present else None
-        records.append((key, prior_value, prior_present, None))
-    return records
-
-
-def _merge_takeover_records(
-    current: dict,
-    records: list[tuple[str, str | None, bool, str | None]],
-) -> dict:
-    """Fold per-key takeover records into the journal dict (pure take_over).
-
-    Applies :func:`~zai_python_helper.ownership.take_over` for each record over
-    the current journal, returning the merged journal to persist.
-    """
-    from zai_python_helper.ownership import take_over
-
-    merged = current
-    for key, prior_value, prior_present, set_hash in records:
-        merged = take_over(
-            merged,
-            _OWNERSHIP_TOOL,
-            key,
-            prior_value,
-            prior_present,
-            set_hash,
-        )
-    return merged
-
-
 def _run_recovery(paths: Paths, recover_fn) -> None:
     """Roll forward any interrupted prior activation before a new run.
 
@@ -259,28 +183,26 @@ def _run_recovery(paths: Paths, recover_fn) -> None:
         )
 
 
-def _revert_decisions(journal_records: dict, settings_doc: dict | None) -> dict:
-    """Compute a per-key :class:`RevertDecision` from the journal + live settings.
+def _merge_takeover_records(tool, current: dict, records: list) -> dict:
+    """Fold per-field takeover records into the journal dict (pure take_over).
 
-    Pure over the inputs (the caller reads them under the lock so they are a
-    consistent snapshot). RESTORE → the value is still ours, put back the
-    prior; REFUSE → changed externally or no provenance, leave it (warn);
-    CLEAR is unused in the revert path (no-provenance is REFUSE, not blind
-    deletion).
+    Applies :func:`~zai_python_helper.ownership.take_over` for each record over
+    the current journal, keyed by ``tool.name``, returning the merged journal
+    to persist.
     """
-    from zai_python_helper.core.planner.claude_code import revert_key_set
-    from zai_python_helper.ownership import revert
+    from zai_python_helper.ownership import take_over
 
-    current_env = (settings_doc or {}).get("env") or {}
-    return {
-        key: revert(
-            journal_records,
-            _OWNERSHIP_TOOL,
+    merged = current
+    for key, prior_value, prior_present, set_hash in records:
+        merged = take_over(
+            merged,
+            tool.name,
             key,
-            current_env.get(key) if key in current_env else None,
+            prior_value,
+            prior_present,
+            set_hash,
         )
-        for key in revert_key_set()
-    }
+    return merged
 
 
 def _print_refuse_warnings(decisions: dict) -> None:
@@ -288,6 +210,58 @@ def _print_refuse_warnings(decisions: dict) -> None:
     for d in decisions.values():
         if getattr(d, "action", None) and d.action.name == "REFUSE":
             print(f"  warning: {d.reason}")
+
+
+def _resolve_tool(args: argparse.Namespace):
+    """Look up the target Tool from ``--tool`` (default: claude_code)."""
+    from zai_python_helper.tools import get_tool
+
+    return get_tool(getattr(args, "tool", "claude_code"))
+
+
+def _build_provider_spec(args: argparse.Namespace, mode, region: Region):
+    """Build a ProviderSpec from CLI args. Carries the model mode + selection.
+
+    Only meaningful for tools that consume model-mode (Claude Code). Other
+    tools ignore the spec fields they don't use; the model-mode flags are
+    accepted on the parser for a uniform CLI surface but are inert for them.
+    The ``base_url`` stored on the spec is the region's Z.ai URL.
+    """
+    from zai_python_helper.core.domain import ProviderSpec
+    from zai_python_helper.core.planner.claude_code import base_url_for_region
+
+    return ProviderSpec(
+        base_url=base_url_for_region(region),
+        model_mode=mode,
+        selected_model=getattr(args, "model", None) if mode.value == "select" else None,
+        custom_model_id=getattr(args, "model", None) if mode.value == "custom" else None,
+        custom_model_name=getattr(args, "name", None),
+        custom_model_description=getattr(args, "description", None),
+        custom_capabilities=getattr(args, "capabilities", None),
+    )
+
+
+def _resolve_mode_or_raise(args: argparse.Namespace):
+    """Parse ``--mode`` and reject custom-only flags outside custom mode.
+
+    Returns the resolved :class:`ModelMode`. The model-mode flags are a
+    Claude-Code concern, but validating them here keeps the CLI surface
+    consistent across tools (a typo is caught regardless of tool).
+    """
+    from zai_python_helper.core.domain import ModelMode
+    from zai_python_helper.errors import ValidationError
+
+    mode = ModelMode(getattr(args, "mode", ModelMode.ORIGINAL.value))
+    custom_only = {
+        "--name": getattr(args, "name", None),
+        "--description": getattr(args, "description", None),
+        "--capabilities": getattr(args, "capabilities", None),
+    }
+    if mode != ModelMode.CUSTOM:
+        used = [flag for flag, value in custom_only.items() if value]
+        if used:
+            raise ValidationError(f"{', '.join(used)} only apply to --mode custom")
+    return mode
 
 
 def _handle_list(args: argparse.Namespace) -> int:
@@ -321,59 +295,27 @@ def _handle_list(args: argparse.Namespace) -> int:
     return 0
 
 
-def _build_provider_spec(args: argparse.Namespace, mode, region: Region):
-    """Build a ProviderSpec from CLI args. Carries the model mode + selection.
-
-    The ``base_url`` stored on the spec is the region's Z.ai URL; the planner
-    also reads the canonical URL from ``base_url_for_region(region)`` so this
-    field is informational here (kept consistent for ``status``/echo).
-    """
-    from zai_python_helper.core.domain import ProviderSpec
-    from zai_python_helper.core.planner.claude_code import base_url_for_region
-
-    return ProviderSpec(
-        base_url=base_url_for_region(region),
-        model_mode=mode,
-        selected_model=getattr(args, "model", None) if mode.value == "select" else None,
-        custom_model_id=getattr(args, "model", None) if mode.value == "custom" else None,
-        custom_model_name=getattr(args, "name", None),
-        custom_model_description=getattr(args, "description", None),
-        custom_capabilities=getattr(args, "capabilities", None),
-    )
-
-
 def _handle_use_zai(args: argparse.Namespace) -> int:
-    """Make Z.ai the default provider — patch settings.json/.claude.json/.zshrc.
+    """Make Z.ai the default provider for the selected tool.
 
-    Plans the activation via the PURE planner, then either previews it
-    (``--dry-run`` prints redacted unified_diffs, writes nothing) or applies
-    it via the IO backends. Prints ``restart recommended`` whenever it changes
-    files (ADR-005). Idempotent: a second run with no drift is a no-op.
+    Generic over the tool: looks up ``REGISTRY[args.tool]``, reads its state,
+    plans via ``tool.plan_zai``, captures ownership via
+    ``tool.extract_takeover``, and commits under one held :class:`ProcessLock`
+    (ADR-005). ``--dry-run`` previews redacted unified_diffs and writes
+    nothing. Prints ``restart recommended`` whenever it changes files.
+    Idempotent: a second run with no drift is a no-op.
     """
     from zai_python_helper.constants import get_preset_model
     from zai_python_helper.core.domain import ModelMode
-    from zai_python_helper.core.planner import plan_zai
-    from zai_python_helper.core.planner.claude_code import base_url_for_region
     from zai_python_helper.errors import ValidationError
     from zai_python_helper.io.secrets import resolve_key
 
-    mode = ModelMode(getattr(args, "mode", ModelMode.ORIGINAL.value))
+    tool = _resolve_tool(args)
     region = Region(getattr(args, "region", Region.GLOBAL.value))
     paths = Paths.default()
     dry_run = getattr(args, "dry_run", False)
 
-    # Custom-only flags must be rejected outside custom mode (a typo'd --mode
-    # must not silently drop the user's --name etc.).
-    custom_only = {
-        "--name": getattr(args, "name", None),
-        "--description": getattr(args, "description", None),
-        "--capabilities": getattr(args, "capabilities", None),
-    }
-    if mode != ModelMode.CUSTOM:
-        used = [flag for flag, value in custom_only.items() if value]
-        if used:
-            raise ValidationError(f"{', '.join(used)} only apply to --mode custom")
-
+    mode = _resolve_mode_or_raise(args)
     spec = _build_provider_spec(args, mode, region)
     if not spec.validate():
         if mode == ModelMode.SELECT:
@@ -396,29 +338,15 @@ def _handle_use_zai(args: argparse.Namespace) -> int:
     else:
         auth_token = resolve_key(getattr(args, "api_key", None))
 
-    # Read current parsed state for the planner (pure transform).
-    from zai_python_helper.backends import JsonBackend, ShellBackend
-    from zai_python_helper.core.planner.claude_code import (
-        MANAGED_ZAI_KEYS,
-        REMOVED_ON_ZAI_KEYS,
-        _all_managed_model_keys,
+    print(
+        f"Configuring Z.ai provider (tool: {tool.name}, "
+        f"mode: {mode.value}, region: {region.value})"
     )
-
-    print(f"Configuring Z.ai provider (mode: {mode.value}, region: {region.value})")
 
     if dry_run:
         # Dry-run is read-only: read state, plan, preview. No lock, no write.
-        settings_doc = JsonBackend.read(paths.claude_settings)
-        claude_json_doc = JsonBackend.read(paths.claude_json)
-        zshrc_text = ShellBackend.read(paths.zshrc)
-        plan = plan_zai(
-            spec,
-            region,
-            settings_doc=settings_doc,
-            claude_json_doc=claude_json_doc,
-            zshrc_text=zshrc_text,
-            auth_token=auth_token,
-        )
+        state = tool.read_state(paths)
+        plan = tool.plan_zai(spec, region, state=state, auth_token=auth_token)
         print("--dry-run: no files written")
         if plan.is_empty:
             print("(no changes — already in desired state)")
@@ -442,95 +370,52 @@ def _handle_use_zai(args: argparse.Namespace) -> int:
         # concurrent revert cannot mutate the config between our read and our
         # commit (and so the takeover prior reflects exactly the pre-commit
         # state we are about to overwrite).
-        settings_doc = JsonBackend.read(paths.claude_settings)
-        claude_json_doc = JsonBackend.read(paths.claude_json)
-        zshrc_text = ShellBackend.read(paths.zshrc)
+        state = tool.read_state(paths)
+        plan = tool.plan_zai(spec, region, state=state, auth_token=auth_token)
 
-        plan = plan_zai(
-            spec,
-            region,
-            settings_doc=settings_doc,
-            claude_json_doc=claude_json_doc,
-            zshrc_text=zshrc_text,
-            auth_token=auth_token,
-        )
-
-        # Ownership journal (ADR-004): for every key we are about to
+        # Ownership journal (ADR-004): for every field we are about to
         # set/remove, record its PRIOR value/presence + a hash of what we set.
         # take_over is idempotent w.r.t. the restore point (a repeat
         # activation of the same value preserves the ORIGINAL prior), so a
         # re-activation does not lose the user's first pre-activation value.
-        records = _build_takeover_records(
-            plan,
-            prior_doc=settings_doc,
-            managed_keys=set(MANAGED_ZAI_KEYS) | set(_all_managed_model_keys()),
-            removed_keys=set(REMOVED_ON_ZAI_KEYS),
-        )
+        records = tool.extract_takeover(plan, prior_state=state, spec=spec)
 
         journal = OwnershipJournal(paths.ownership_json)
 
         def _persist_journal() -> None:
             if records:
                 current = journal.read()
-                journal.write(_merge_takeover_records(current, records))
+                journal.write(_merge_takeover_records(tool, current, records))
 
         written = apply_plan_locked(paths, plan, on_locked=_persist_journal)
     if not written:
         print("(no changes — already in desired state)")
     else:
         for tag in written:
-            print(f"  updated: {_resolve_path(paths, tag)}")
+            print(f"  updated: {resolve_path(paths, tag)}")
         print(f"  {_RESTART_NOTICE}")
 
-    # Echo ONLY the tool-owned managed keys (never foreign env values, which
-    # may carry unrelated secrets like OPENAI_API_KEY). The managed set is
-    # derived from the planner so it stays in sync; secrets among them are
-    # redacted by name.
-    settings_delta = plan.delta_for(FileTag.SETTINGS)
-    desired_env = settings_delta.content.get("env", {}) if settings_delta else {}
-    managed_keys_echo = set(MANAGED_ZAI_KEYS) | set(_all_managed_model_keys())
-    owned = {k: desired_env[k] for k in desired_env if k in managed_keys_echo}
-    if owned:
-        print(f"  base_url: {base_url_for_region(region)}")
-        print("  env (managed):")
-        for key in sorted(owned):
-            val = "<redacted>" if _is_secret_key(key) else owned[key]
-            print(f"    {key}={val}")
+    # Echo the tool-owned summary (the Tool masks its own secrets).
+    for line in tool.echo_lines(plan, region):
+        print(line)
     return 0
 
 
 def _handle_use_default(args: argparse.Namespace) -> int:
-    """Revert to the default provider — restore prior values via ownership journal.
+    """Revert to the default provider for the selected tool.
 
-    Non-destructive inverse of ``use zai`` (ADR-004): for each managed key,
-    consult the ownership journal and restore the prior value (RESTORE), drop
-    our managed value (CLEAR), or leave it untouched with a warning (REFUSE —
-    the key changed externally since activation). ``.zshrc`` removes only the
-    owned block; ``.claude.json`` is intentionally NOT reverted. Idempotent.
+    Generic over the tool: non-destructive inverse of ``use zai`` (ADR-004).
+    For each managed field, consult the ownership journal and restore the
+    prior value (RESTORE), drop our managed value (CLEAR), or leave it
+    untouched with a warning (REFUSE — the field changed externally since
+    activation). Idempotent.
     """
-    from zai_python_helper.core.domain import ModelMode
-    from zai_python_helper.core.planner import plan_revert
-    from zai_python_helper.errors import ValidationError
-
-    # Model mode is irrelevant to removal (the managed set is derived from it),
-    # but we accept --mode for symmetry and reject custom-only flags the same
-    # way use zai does so the CLI surface is consistent.
-    mode = ModelMode(getattr(args, "mode", ModelMode.ORIGINAL.value))
+    tool = _resolve_tool(args)
+    _resolve_mode_or_raise(args)  # validate custom-only flags for CLI symmetry
     region = Region(getattr(args, "region", Region.GLOBAL.value))
     paths = Paths.default()
     dry_run = getattr(args, "dry_run", False)
 
-    custom_only = {
-        "--name": getattr(args, "name", None),
-        "--description": getattr(args, "description", None),
-        "--capabilities": getattr(args, "capabilities", None),
-    }
-    if mode != ModelMode.CUSTOM:
-        used = [flag for flag, value in custom_only.items() if value]
-        if used:
-            raise ValidationError(f"{', '.join(used)} only apply to --mode custom")
-
-    from zai_python_helper.backends import JsonBackend, ShellBackend
     from zai_python_helper.ownership import OwnershipJournal
     from zai_python_helper.patchplan import ProcessLock, apply_plan_locked, recover
 
@@ -538,15 +423,14 @@ def _handle_use_default(args: argparse.Namespace) -> int:
     # itself, so it serializes with the commit below).
     _run_recovery(paths, recover)
 
-    print(f"Reverting to default provider (region: {region.value})")
+    print(f"Reverting to default provider (tool: {tool.name}, region: {region.value})")
 
     if dry_run:
         # Read-only preview: no lock, no write.
-        settings_doc = JsonBackend.read(paths.claude_settings)
-        zshrc_text = ShellBackend.read(paths.zshrc)
+        state = tool.read_state(paths)
         journal_records = OwnershipJournal(paths.ownership_json).read()
-        decisions = _revert_decisions(journal_records, settings_doc)
-        plan = plan_revert(decisions, settings_doc=settings_doc, zshrc_text=zshrc_text)
+        decisions = tool.revert_decisions(journal_records, state)
+        plan = tool.plan_revert(state=state, decisions=decisions)
         _print_refuse_warnings(decisions)
         print("--dry-run: no files written")
         if plan.is_empty:
@@ -554,25 +438,22 @@ def _handle_use_default(args: argparse.Namespace) -> int:
         _apply_plan(paths, plan, dry_run=True)
         return 0
 
-    # Read journal + LIVE settings, compute revert decisions, and commit — all
+    # Read journal + LIVE state, compute revert decisions, and commit — all
     # inside ONE held ProcessLock (ADR-005 / S3 finding #6): a concurrent
     # ``use zai`` must not be able to change the config between our decision
     # read and our commit (which would make the decisions stale).
     with ProcessLock(paths.lock_file):
-        settings_doc = JsonBackend.read(paths.claude_settings)
-        zshrc_text = ShellBackend.read(paths.zshrc)
+        state = tool.read_state(paths)
         journal_records = OwnershipJournal(paths.ownership_json).read()
-        decisions = _revert_decisions(journal_records, settings_doc)
-        plan = plan_revert(
-            decisions, settings_doc=settings_doc, zshrc_text=zshrc_text
-        )
+        decisions = tool.revert_decisions(journal_records, state)
+        plan = tool.plan_revert(state=state, decisions=decisions)
         _print_refuse_warnings(decisions)
         written = apply_plan_locked(paths, plan)
     if not written:
         print("(no changes — already at default)")
     else:
         for tag in written:
-            print(f"  updated: {_resolve_path(paths, tag)}")
+            print(f"  updated: {resolve_path(paths, tag)}")
         print(f"  {_RESTART_NOTICE}")
     return 0
 
@@ -586,7 +467,6 @@ def _handle_status(args: argparse.Namespace) -> int:
     compatibility but not used — ``status`` auto-detects the region from
     the configured endpoint.
     """
-    from zai_python_helper.paths import Paths
     from zai_python_helper.status import detect_status, render_status
 
     paths = Paths.default()
@@ -608,10 +488,22 @@ def _handle_doctor(args: argparse.Namespace) -> int:
     return run_doctor(Paths.default())
 
 
-def _add_use_zai_flags(parser: argparse.ArgumentParser) -> None:
-    """Attach the model-selection + region flags to a ``use`` subparser."""
-    from zai_python_helper.core.domain import ModelMode
+def _add_use_flags(parser: argparse.ArgumentParser) -> None:
+    """Attach the tool + model-selection + region flags to a ``use`` subparser.
 
+    ``--tool`` selects the integration (default: claude_code); the model-mode
+    flags are a Claude-Code concern but are accepted uniformly so the CLI
+    surface is consistent (inert for tools that ignore them).
+    """
+    from zai_python_helper.core.domain import ModelMode
+    from zai_python_helper.tools import tool_names
+
+    parser.add_argument(
+        "--tool",
+        choices=tool_names(),
+        default="claude_code",
+        help="coding tool to configure (default: claude-code)",
+    )
     parser.add_argument(
         "--mode",
         choices=[m.value for m in ModelMode],
@@ -735,7 +627,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="make Z.ai the default",
         parents=[sub_flags],
     )
-    _add_use_zai_flags(p_use_zai)
+    _add_use_flags(p_use_zai)
     p_use_zai.set_defaults(func=_handle_use_zai)
 
     p_use_default = use_sub.add_parser(
@@ -743,7 +635,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="revert to default provider",
         parents=[sub_flags],
     )
-    _add_use_zai_flags(p_use_default)
+    _add_use_flags(p_use_default)
     p_use_default.set_defaults(func=_handle_use_default)
 
     # `status` — read-only observability

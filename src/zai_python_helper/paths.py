@@ -39,6 +39,11 @@ class Paths:
     claude_settings: Path
     claude_json: Path
     zshrc: Path
+    # S6 tool config files (issue #7). Addressed by FileTag.{OPENCODE,CRUSH,
+    # FACTORY_DROID}; resolved here so the planner stays path-free.
+    opencode: Path
+    crush: Path
+    factory_droid: Path
     ownership_json: Path
     recovery_json: Path
     lock_file: Path
@@ -64,6 +69,9 @@ class Paths:
         - ``claude_settings``   = ``home / ".claude" / "settings.json"``
         - ``claude_json``       = ``home / ".claude.json"``
         - ``zshrc``             = ``home / ".zshrc"``
+        - ``opencode``          = ``home / ".config" / "opencode" / "opencode.json"``
+        - ``crush``             = ``home / ".config" / "crush" / "crush.json"``
+        - ``factory_droid``     = ``home / ".factory" / "settings.json"``
         - ``ownership_json``   = ``home / ".zai-python-helper" / "ownership.json"``
         - ``recovery_json``    = ``home / ".zai-python-helper" / "recovery.json"``
         - ``lock_file``         = ``home / ".zai-python-helper" / "lock"``
@@ -85,6 +93,9 @@ class Paths:
             claude_settings=h / ".claude" / "settings.json",
             claude_json=h / ".claude.json",
             zshrc=h / ".zshrc",
+            opencode=h / ".config" / "opencode" / "opencode.json",
+            crush=h / ".config" / "crush" / "crush.json",
+            factory_droid=h / ".factory" / "settings.json",
             ownership_json=helper_dir / "ownership.json",
             recovery_json=helper_dir / "recovery.json",
             lock_file=helper_dir / "lock",
