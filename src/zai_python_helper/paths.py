@@ -46,6 +46,9 @@ class Paths:
     # Added for issue #23: credential egress gap fix.
     project_claude_settings: Path
     local_claude_settings: Path
+    # The current working directory at Paths creation (for ancestor discovery).
+    # Added for issue #23 ancestor-aware project settings discovery.
+    cwd: Path
 
     @classmethod
     def from_home(cls, home: str | Path, cwd: str | Path | None = None) -> Paths:
@@ -85,6 +88,7 @@ class Paths:
             state_dir=state_dir,
             project_claude_settings=cwd_path / ".claude" / "settings.json",
             local_claude_settings=cwd_path / ".claude" / "settings.local.json",
+            cwd=cwd_path,
         )
 
     @classmethod

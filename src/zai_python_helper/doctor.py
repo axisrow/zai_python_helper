@@ -310,10 +310,14 @@ def _read_settings_env(paths: Paths) -> dict[str, str] | None:
     READ-ONLY: performs zero writes; only reads through the resolver.
     """
     try:
+        # Extract home from claude_settings (~/home/.claude/settings.json -> ~/home)
+        home = paths.claude_settings.parent.parent.parent
         return resolve_effective_env(
             user_settings_path=paths.claude_settings,
             project_settings_path=paths.project_claude_settings,
             local_settings_path=paths.local_claude_settings,
+            cwd=paths.cwd,
+            home=home,
         )
     except Exception:
         # Fold any read/parse error to None — doctor reports, never raises.
