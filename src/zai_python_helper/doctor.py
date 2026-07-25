@@ -42,10 +42,24 @@ import urllib.request
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Literal
+from urllib.parse import urlparse
 
+from zai_python_helper import regions
 from zai_python_helper.paths import Paths
 
 __all__ = ["CheckResult", "HttpProbe", "ProbeResult", "render_check", "run_doctor"]
+
+
+def _host_of(url: str) -> str:
+    """Extract the lowercase host (network location) of ``url``.
+
+    Used by the postcondition check: compare the configured endpoint's host
+    against the known Z.ai region hosts, ignoring scheme/path. Falls back to
+    the raw string lowercased if parsing fails (the check then simply won't
+    match a known Z.ai host, which is the correct outcome for a bad URL).
+    """
+    return (urlparse(url).hostname or url).lower()
+
 
 #: Hard socket + read timeout (seconds) for the HTTP probe. Offline / slow
 #: upstream must fail FAST and degrade to a WARN, not hang doctor. Splitting
@@ -57,17 +71,23 @@ _HTTP_TIMEOUT = 5.0
 #: non-2xx that is a definitive FAIL (a bad credential is a broken link).
 _AUTH_REJECT_CODES = {401, 403}
 
-#: Known Z.ai region hosts. ``ANTHROPIC_BASE_URL`` pointing at one of these is
-#: a definitive PASS for the postcondition — the Claude Code client is sending
-#: traffic to Z.ai.
-_ZAI_HOSTS: frozenset[str] = frozenset({"api.z.ai", "api.zai.cn"})
+#: Known Z.ai region hosts, DERIVED from the canonical region→endpoint map in
+#: :mod:`zai_python_helper.regions` (single source of truth — the planner and
+#: the CLI read the same map; doctor must not hand-list hosts that can drift).
+#: ``ANTHROPIC_BASE_URL`` pointing at one of these is a definitive PASS for the
+#: postcondition — the Claude Code client is sending traffic to Z.ai.
+_ZAI_HOSTS: frozenset[str] = frozenset(
+    _host_of(url) for url in regions.ZAI_ANTHROPIC_BASE_URL_BY_REGION.values()
+)
 
 #: Hosts that mean the client is still pointed at the REAL Anthropic endpoint
 #: (not Z.ai) — the postcondition FAILs on these. This is the "didn't switch to
-#: Z.ai" failure the issue acceptance criteria name. ``localhost`` and other
-#: unrecognized hosts are NOT here: a custom/staging Z.ai deployment, or a
-#: test httpserver, is a WARN ("unrecognized — verify it is Z.ai"), not a FAIL,
-#: so the HTTP probe still runs and the doctor stays useful.
+#: Z.ai" failure the issue acceptance criteria name. There is no canonical
+#: region map for these (regions.py only owns the Z.ai side), so they are
+#: listed here. ``localhost`` and other unrecognized hosts are NOT here: a
+#: custom/staging Z.ai deployment, or a test httpserver, is a WARN
+#: ("unrecognized — verify it is Z.ai"), not a FAIL, so the HTTP probe still
+#: runs and the doctor stays useful.
 _ANTHROPIC_HOSTS: frozenset[str] = frozenset({"api.anthropic.com", "api.anthropic.cn"})
 
 #: Default environment variable consulted for the API key when the settings
@@ -79,9 +99,9 @@ _KEY_ENV_VAR = "ZAI_API_KEY"
 # ANSI color helpers — manual, no Rich (parity with sibling doctor).
 # --------------------------------------------------------------------------- #
 
-_ANSI_GREEN = "\033[32m"
-_ANSI_YELLOW = "\033[33m"
-_ANSI_RED = "\033[31m"
+#: ANSI escape sequences for the three verdict colors. Plain ASCII markers
+#: (no escape) when color is disabled so logs/captured output stay readable.
+_ANSI_COLOR = {"pass": "\033[32m", "warn": "\033[33m", "fail": "\033[31m"}
 _ANSI_RESET = "\033[0m"
 
 #: The verdict glyphs. Unicode (✓/!/✗) per the issue spec; the ANSI-wrapping
@@ -99,11 +119,7 @@ def _marker(verdict: str, *, color: bool) -> str:
     glyph = _MARKERS[verdict]
     if not color:
         return glyph
-    if verdict == "pass":
-        return f"{_ANSI_GREEN}{glyph}{_ANSI_RESET}"
-    if verdict == "warn":
-        return f"{_ANSI_YELLOW}{glyph}{_ANSI_RESET}"
-    return f"{_ANSI_RED}{glyph}{_ANSI_RESET}"
+    return f"{_ANSI_COLOR[verdict]}{glyph}{_ANSI_RESET}"
 
 
 def render_check(result: CheckResult, *, color: bool | None = None) -> str:
@@ -117,11 +133,8 @@ def render_check(result: CheckResult, *, color: bool | None = None) -> str:
         color: ``True`` forces colored markers; ``False`` forces plain; ``None``
             (default) auto-detects from :func:`sys.stdout.isatty`.
     """
-    if color is None:
-        resolved_color: bool = sys.stdout.isatty()
-    else:
-        resolved_color = color
-    marker = _marker(result.verdict, color=resolved_color)
+    use_color = color if color is not None else sys.stdout.isatty()
+    marker = _marker(result.verdict, color=use_color)
     line = f"{marker} {result.name}: {result.detail}"
     if result.verdict != "pass" and result.hint:
         line += f"\n    Hint: {result.hint}"
@@ -250,37 +263,6 @@ def _read_settings_env(paths: Paths) -> dict[str, str] | None:
     return {str(k): str(v) for k, v in env.items()}
 
 
-def _host_of(url: str) -> str:
-    """Extract the lowercase host (network location) of ``url``.
-
-    Used by the postcondition check: we compare the configured endpoint's host
-    against the known Z.ai region hosts, ignoring scheme/path. Falls back to
-    the raw string lowercased if parsing fails (the check then simply won't
-    match a known Z.ai host → FAIL, which is correct).
-    """
-    try:
-        from urllib.parse import urlparse
-
-        host = urlparse(url).hostname
-        return (host or url).lower()
-    except Exception:  # noqa: BLE001 — defensive: a bad URL fails the check.
-        return url.lower()
-
-
-def _resolve_key(env_block: dict[str, str] | None, environ: Mapping[str, str]) -> str | None:
-    """Resolve the API key for the probe.
-
-    Mirrors how Claude Code itself authenticates: ``ANTHROPIC_AUTH_TOKEN`` in
-    the settings.json env block first, then ``ZAI_API_KEY`` in the environment.
-    Returns ``None`` if neither is set (doctor then WARNs rather than probing).
-    """
-    if env_block:
-        token = env_block.get("ANTHROPIC_AUTH_TOKEN")
-        if token:
-            return token
-    return environ.get(_KEY_ENV_VAR)
-
-
 # --------------------------------------------------------------------------- #
 # The checks — each returns a CheckResult, never raises.
 # --------------------------------------------------------------------------- #
@@ -371,7 +353,11 @@ def _check_key_present(
     than failing.
     """
     name = "API key present"
-    key = _resolve_key(env, environ)
+    # Resolve the probe key exactly as Claude Code authenticates:
+    # ANTHROPIC_AUTH_TOKEN in the settings.json env block first, then
+    # ZAI_API_KEY in the environment. None if neither is set (WARN above).
+    token = env.get("ANTHROPIC_AUTH_TOKEN") if env else None
+    key = token or environ.get(_KEY_ENV_VAR)
     if key:
         return (
             CheckResult(name=name, verdict="pass", detail="present", hint=""),
@@ -430,10 +416,13 @@ def _check_http_probe(
             detail=f"{status} (key rejected)",
             hint="the API key is invalid/expired; set a valid ZAI_API_KEY",
         )
+    # status is guaranteed non-None here: the only path that sets status=None
+    # also sets probe.error, which we returned on above. urllib_get keeps the
+    # two mutually exclusive.
     return CheckResult(
         name=name,
         verdict="pass",
-        detail=f"{status} OK" if status is not None else "responded",
+        detail=f"{status} OK",
         hint="",
     )
 
