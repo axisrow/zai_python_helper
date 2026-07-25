@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import difflib
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -62,6 +63,11 @@ _CONTAINER_PATH = "/usr/local/bin:/usr/bin:/bin"
 # single in-process-equivalent command. 120s is generous headroom over cold image
 # start + npm boot.
 _RUN_TIMEOUT = 120
+
+# Run the container as the host user so files written into the mounted HOME are
+# readable by the (non-root) pytest process on Linux CI. See _docker_run.
+_HOST_UID = str(os.getuid())
+_HOST_GID = str(os.getgid())
 
 
 # --------------------------------------------------------------------------- #
@@ -165,6 +171,12 @@ def _docker_run(home: Path, extra_env: dict[str, str], command: list[str]) -> No
     Asserts exit 0; the last 500 chars of stderr are attached to the failure so a
     misconfigured fixture is debuggable. The token is fake + the fetch-mock
     guarantees no real key ever leaves the container, so stderr is safe to show.
+
+    ``--user $(id -u):$(id -g)`` makes the container run as the HOST user so the
+    files it writes into the mounted HOME are owned by the host pytest process.
+    Without it, on Linux CI the container (running as root) creates root-owned
+    files that the non-root pytest runner then cannot read (PermissionError). On
+    macOS Docker Desktop the UID is mapped either way, so this is a no-op there.
     """
     home_abs = str(home.resolve())
     env_args: list[str] = []
@@ -176,6 +188,8 @@ def _docker_run(home: Path, extra_env: dict[str, str], command: list[str]) -> No
             "docker",
             "run",
             "--rm",
+            "--user",
+            f"{_HOST_UID}:{_HOST_GID}",
             *env_args,
             "-v",
             f"{home_abs}:{home_abs}",
