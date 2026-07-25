@@ -485,6 +485,19 @@ def build_parser() -> argparse.ArgumentParser:
         description="Manage Claude Code ⇄ Z.ai integration without hand-editing config.",
         parents=[sub_flags],
     )
+    # ``-v`` / ``--version`` prints the bare version string, mirroring the
+    # upstream ``@z_ai/coding-helper`` (Commander ``.version(version)``), which
+    # prints just the package version with no program-name prefix. This is a
+    # Phase-1 parity surface (see issue #17): the FORMAT must match the
+    # original even though the version NUMBER differs.
+    from zai_python_helper import __version__
+
+    parser.add_argument(
+        "-v",
+        "--version",
+        action="version",
+        version=__version__,
+    )
     parser.set_defaults(func=lambda args: (parser.print_help(), 0)[1])
 
     subparsers = parser.add_subparsers(

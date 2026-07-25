@@ -27,3 +27,29 @@ jobs:
       - name: Run pytest
         run: |
           pytest -m "not e2e"
+
+  # Minimal parity smoke (issue #17 subset): builds the parity image and asserts
+  # the -v / --version FORMAT matches the upstream @z_ai/coding-helper. Runs as a
+  # separate job so it can use Docker without coupling to the Python matrix.
+  parity-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install package with dev dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Build parity image
+        run: |
+          docker build -f docker/parity/Dockerfile -t zai-parity:smoke .
+      - name: Run parity version-format tests (docker primary)
+        env:
+          # Hint the test runner that docker is available; the auto-detection
+          # also works, but this keeps the job's intent explicit.
+          PARITY_RUNNER: docker
+        run: |
+          pytest tests/parity/ -v
+
