@@ -57,7 +57,11 @@ def _plan_original_mode(provider_spec: ProviderSpec) -> dict[str, Any]:
     return {
         "ANTHROPIC_BASE_URL": provider_spec.base_url,
         "API_TIMEOUT_MS": "3000000",
-        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+        # JSON int (not string) to byte-match the upstream @z_ai/coding-helper
+        # output — parity issue #17. Claude Code injects env vars into the
+        # process environment as strings regardless, so the value is equivalent
+        # at runtime; only the serialized settings.json form differs.
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": 1,
     }
 
 
