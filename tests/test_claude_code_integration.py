@@ -76,7 +76,7 @@ class TestUseZai:
         assert env["ANTHROPIC_AUTH_TOKEN"] == TOKEN
         assert env["ANTHROPIC_BASE_URL"] == GLOBAL_URL
         assert env["API_TIMEOUT_MS"] == "3000000"
-        assert env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
+        assert env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == 1
         assert env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "zai/glm-4-plus"
         assert env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "zai/glm-4.7"
         assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "zai/glm-4-flash"
@@ -154,7 +154,7 @@ class TestUseDefault:
                     "ANTHROPIC_AUTH_TOKEN": TOKEN,
                     "ANTHROPIC_BASE_URL": GLOBAL_URL,
                     "API_TIMEOUT_MS": "3000000",
-                    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+                    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": 1,
                 }
             },
         )
