@@ -118,8 +118,10 @@ class PatchPlan:
 # defines pure functions, so importing it here is safe under ADR-001.
 from zai_python_helper.core.planner.claude_code import (  # noqa: E402
     plan_default,
+    plan_revert,
     plan_zai,
     postconditions,
+    revert_key_set,
 )
 
 __all__ = [
@@ -128,6 +130,8 @@ __all__ = [
     "FileTag",
     "PatchPlan",
     "plan_default",
+    "plan_revert",
     "plan_zai",
     "postconditions",
+    "revert_key_set",
 ]

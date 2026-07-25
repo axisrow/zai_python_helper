@@ -14,6 +14,7 @@ def test_paths_from_home_resolves_all_fields(_isolate_home):
     assert paths.claude_json == home / ".claude.json"
     assert paths.zshrc == home / ".zshrc"
     assert paths.ownership_json == home / ".zai-python-helper" / "ownership.json"
+    assert paths.recovery_json == home / ".zai-python-helper" / "recovery.json"
     assert paths.lock_file == home / ".zai-python-helper" / "lock"
     assert paths.state_dir == home / ".zai-python-helper" / "state"
 

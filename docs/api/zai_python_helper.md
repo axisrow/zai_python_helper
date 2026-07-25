@@ -18,6 +18,10 @@ Machine-readable reference for the **importable public API** (`__all__`, issue #
 - [`plan_zai`](#plan_zai)
 - [`postconditions`](#postconditions)
 - [`base_url_for_region`](#base_url_for_region)
+- [`RevertAction`](#revertaction)
+- [`RevertDecision`](#revertdecision)
+- [`take_over`](#take_over)
+- [`revert`](#revert)
 - [`Paths`](#paths)
 - [`JsonBackend`](#jsonbackend)
 - [`ShellBackend`](#shellbackend)
@@ -218,7 +222,7 @@ Return the delta for `tag`, or `None` if the plan omits it.
 
 ### `plan_default()`
 
-*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/core/planner/claude_code.py#L309)*
+*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/core/planner/claude_code.py#L319)*
 
 ```python
 plan_default(provider_spec: ProviderSpec, settings_doc: dict[str, Any] | None, zshrc_text: str) -> PatchPlan
@@ -235,13 +239,23 @@ PURE inverse of `plan_zai` for the env/zshrc concerns:
 
 Idempotent: a second `use default` on the post-state is all-NOOP.
 
+.. note::
+
+    This is the **blind-inverse** planner (S2). It does NOT consult the
+    ownership journal, so it would clobber a key the user edited after
+    activation. The journal-aware path is `plan_revert` (S3), which
+    the CLI uses for `use default` so the reversion is non-destructive.
+    This function is retained for callers that want the pure inverse
+    (e.g. an external applier that manages ownership itself) and for the
+    regression tests.
+
 ---
 
 <a id="plan_zai"></a>
 
 ### `plan_zai()`
 
-*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/core/planner/claude_code.py#L251)*
+*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/core/planner/claude_code.py#L261)*
 
 ```python
 plan_zai(provider_spec: ProviderSpec, region: Region, settings_doc: dict[str, Any] | None, claude_json_doc: dict[str, Any] | None, zshrc_text: str, auth_token: str) -> PatchPlan
@@ -261,7 +275,7 @@ all-NOOP plan (idempotent).
 
 ### `postconditions()`
 
-*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/core/planner/claude_code.py#L354)*
+*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/core/planner/claude_code.py#L461)*
 
 ```python
 postconditions(region: Region, settings_doc: dict[str, Any] | None, zshrc_text: str) -> bool
@@ -286,7 +300,7 @@ base URL, never the token value (which may be redacted upstream).
 
 ### `base_url_for_region()`
 
-*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/core/planner/claude_code.py#L64)*
+*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/core/planner/claude_code.py#L74)*
 
 ```python
 base_url_for_region(region: Region) -> str
@@ -296,6 +310,112 @@ Return the Z.ai Anthropic-compatible base URL for `region`.
 
 Pure lookup into the static region→URL map. Raises if the region is
 somehow unknown (defensive; the enum makes this unreachable today).
+
+---
+
+<a id="revertaction"></a>
+
+### `RevertAction`
+
+*enum — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/ownership.py#L61)*
+
+What `revert` decided to do with one managed key.
+
+- `RESTORE`: the current value still matches what we set → put back the
+  prior value (and its presence) we journaled.
+- `REFUSE`: the value changed externally since we took ownership → do
+  NOT overwrite; the caller surfaces a warning.
+- `CLEAR`: we have no journal entry for this key → drop our managed
+  value (the honest inverse when we never owned it).
+
+Members:
+
+- `RESTORE` = `'restore'`
+- `REFUSE` = `'refuse'`
+- `CLEAR` = `'clear'`
+
+---
+
+<a id="revertdecision"></a>
+
+### `RevertDecision`
+
+*dataclass — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/ownership.py#L115)*
+
+The outcome of `revert` for one key.
+
+Attributes:
+
+- `action`: `RevertAction`
+- `key`: `str`
+- `prior_value`: `str | None`
+- `prior_present`: `bool`
+- `reason`: `str`
+
+
+---
+
+<a id="take_over"></a>
+
+### `take_over()`
+
+*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/ownership.py#L156)*
+
+```python
+take_over(records: dict[str, Any], tool: str, key: str, prior_value: str | None, prior_present: bool, set_hash: str | None) -> dict[str, Any]
+```
+
+Record that we now own `(tool, key)`; return an updated journal copy.
+
+PURE: takes the current journal `records` (a plain dict) and returns a
+NEW dict with the `(tool, key)` entry set. The input is never mutated.
+The caller persists the result via `OwnershipJournal`.
+
+**Idempotent w.r.t. the restore point (ADR-004).** If `(tool, key)`
+already has a journal entry with the SAME `set_hash` — i.e. we are
+re-activating the exact value we already own (a repeat `use zai` that
+changes nothing) — the EXISTING entry is preserved untouched, so the
+original prior value/presence (the real restore point) is not overwritten
+by the now-current value. Without this, P→Z→Z would record Z as the prior
+on the second activation and a later `use default` would restore Z
+instead of the user's original P. Only when `set_hash` DIFFERS (a genuine
+value change, e.g. a rotated token) do we record the new prior.
+
+---
+
+<a id="revert"></a>
+
+### `revert()`
+
+*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/ownership.py#L244)*
+
+```python
+revert(records: dict[str, Any], tool: str, key: str, current_value: str | None) -> RevertDecision
+```
+
+Decide how to revert one `(tool, key)` given its current value.
+
+PURE decision over the journal dict, following ADR-004's
+**self-invalidating** rule: we only mutate a key whose current state is
+still attributable to us. The cases:
+
+1. **Entry exists, `set_hash` matches `current_value`** → `RESTORE`.
+   The value is still the one we set, so restoring the prior
+   value/presence is safe and correct.
+2. **Entry exists but the value changed externally** → `REFUSE`. The
+   user (or another tool) edited the key since activation; we must not
+   clobber it. The caller warns and leaves the key alone.
+3. **No journal entry** → `REFUSE`. We have no provenance proving we
+   own this key, so we must NOT delete or overwrite a value we cannot
+   attribute to ourselves. (This is the fix for the S3 blind-deletion
+   regression: `use default` with no prior `use zai` must not wipe a
+   key the user configured by hand.)
+
+A `None` `set_hash` records ownership-by-removal (we deleted the key
+on activation, e.g. `ANTHROPIC_API_KEY`). The "value we set" is the
+key's ABSENCE, so revert restores the prior only while the key is STILL
+ABSENT (`current_value is None`); if a value has since appeared (the
+user added a new key), that is an external change → `REFUSE`.
 
 ---
 
@@ -318,6 +438,7 @@ Attributes:
 - `claude_json`: `Path`
 - `zshrc`: `Path`
 - `ownership_json`: `Path`
+- `recovery_json`: `Path`
 - `lock_file`: `Path`
 - `state_dir`: `Path`
 - `project_claude_settings`: `Path`
@@ -342,6 +463,7 @@ The resolved paths:
 - `claude_json`       = `home / ".claude.json"`
 - `zshrc`             = `home / ".zshrc"`
 - `ownership_json`   = `home / ".zai-python-helper" / "ownership.json"`
+- `recovery_json`    = `home / ".zai-python-helper" / "recovery.json"`
 - `lock_file`         = `home / ".zai-python-helper" / "lock"`
 - `state_dir`         = `home / ".zai-python-helper" / "state"`
 - `project_claude_settings` = `cwd / ".claude" / "settings.json"`

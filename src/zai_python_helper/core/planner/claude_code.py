@@ -25,7 +25,7 @@ inverse of ``plan_zai`` — the two never drift.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from zai_python_helper.core.domain import ProviderSpec
 from zai_python_helper.core.planner import DeltaKind, FileDelta, FileTag, PatchPlan
@@ -36,6 +36,16 @@ from zai_python_helper.shell_block import (
     owns_owned_block,
     remove_owned_block,
 )
+
+if TYPE_CHECKING:
+    # RevertDecision is a pure domain type, but it lives next to the IO
+    # OwnershipJournal in zai_python_helper.ownership. To keep core free of a
+    # *runtime* dependency on an IO module (ADR-001), we import it only for
+    # type checking and rely on duck typing at runtime (the function reads
+    # .action / .key / .prior_value / .prior_present).
+    from collections.abc import Mapping
+
+    from zai_python_helper.ownership import RevertDecision
 
 # ---------------------------------------------------------------------------
 # Managed keys
@@ -323,6 +333,16 @@ def plan_default(
 
     Idempotent: a second ``use default`` on the post-state is all-NOOP.
 
+    .. note::
+
+        This is the **blind-inverse** planner (S2). It does NOT consult the
+        ownership journal, so it would clobber a key the user edited after
+        activation. The journal-aware path is :func:`plan_revert` (S3), which
+        the CLI uses for ``use default`` so the reversion is non-destructive.
+        This function is retained for callers that want the pure inverse
+        (e.g. an external applier that manages ownership itself) and for the
+        regression tests.
+
     Args:
         provider_spec: Carries the model mode so the same model-mode keys that
             ``plan_zai`` would set are the ones removed here. The two stay
@@ -346,6 +366,93 @@ def plan_default(
     return PatchPlan(
         deltas=(
             FileDelta(FileTag.SETTINGS, settings_kind, desired_settings),
+            FileDelta(FileTag.ZSHRC, zshrc_kind, desired_zshrc),
+        )
+    )
+
+
+def revert_key_set() -> tuple[str, ...]:
+    """The closed set of env keys ``use default`` must consider for revert (S3).
+
+    This is the UNION of everything ``use zai`` could touch: the always-managed
+    ZAI keys, every model-mode key (so a cross-mode revert is clean), and the
+    ``ANTHROPIC_API_KEY`` we *remove* on activation (its revert RESTORES the
+    prior API key, because ownership of it was taken as a removal). The CLI
+    computes a :class:`~zai_python_helper.ownership.RevertDecision` for each
+    of these against the live journal + settings, then :func:`plan_revert`
+    applies the decisions.
+    """
+    return tuple(
+        sorted(set(MANAGED_ZAI_KEYS) | set(_all_managed_model_keys()) | set(REMOVED_ON_ZAI_KEYS))
+    )
+
+
+def plan_revert(
+    decisions: Mapping[str, RevertDecision],
+    *,
+    settings_doc: dict[str, Any] | None = None,
+    zshrc_text: str = "",
+) -> PatchPlan:
+    """Plan the journal-aware ``use default`` reversion for Claude Code (S3).
+
+    PURE. Unlike :func:`plan_default` (the blind inverse), this honors the
+    ownership journal's per-key :class:`~zai_python_helper.ownership.RevertDecision`
+    so the reversion is **non-destructive**:
+
+    - ``RESTORE``: the key still holds the value we set → put back the prior
+      value we journaled (or re-ABSENT it if ``prior_present`` is False).
+    - ``CLEAR``: we never owned the key → drop it (the honest inverse).
+    - ``REFUSE``: the key changed externally → leave its CURRENT value
+      untouched (copy it through from ``settings_doc``); the caller warns.
+
+    Foreign keys always round-trip untouched. ``.claude.json`` is not touched;
+    ``.zshrc`` removes only the owned block (same as :func:`plan_default`).
+
+    Args:
+        decisions: ``{key: RevertDecision}`` for every key in
+            :func:`revert_key_set`. The CLI computes these from the journal +
+            live settings. Keys absent from the map are left as-is.
+        settings_doc: Parsed ``settings.json`` (or ``None`` if absent).
+        zshrc_text: Raw ``.zshrc`` text (or ``""`` if absent).
+
+    Returns:
+        A :class:`PatchPlan` with deltas for ``settings`` and ``zshrc``.
+    """
+    # Local import keeps core free of a runtime dependency on the IO-bearing
+    # ownership module (ADR-001); only the enum value is needed at runtime.
+    from zai_python_helper.ownership import RevertAction
+
+    doc: dict[str, Any] = dict(settings_doc) if settings_doc else {}
+    env: dict[str, Any] = dict(doc.get("env") or {})
+
+    for key, decision in decisions.items():
+        if decision.action == RevertAction.RESTORE:
+            if decision.prior_present:
+                env[key] = decision.prior_value
+            else:
+                env.pop(key, None)
+        elif decision.action == RevertAction.CLEAR:
+            env.pop(key, None)
+        else:  # REFUSE — leave the current value untouched.
+            # The current value is whatever live settings_doc already holds;
+            # it is already in `env` (copied above), so nothing to do.
+            pass
+
+    new_doc = dict(doc)
+    if env:
+        new_doc["env"] = env
+    else:
+        new_doc.pop("env", None)
+
+    settings_kind = (
+        DeltaKind.NOOP if settings_doc == new_doc else DeltaKind.WRITE_JSON
+    )
+
+    desired_zshrc, zshrc_kind = _plan_zshrc_remove(zshrc_text)
+
+    return PatchPlan(
+        deltas=(
+            FileDelta(FileTag.SETTINGS, settings_kind, new_doc),
             FileDelta(FileTag.ZSHRC, zshrc_kind, desired_zshrc),
         )
     )

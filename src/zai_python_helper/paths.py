@@ -40,6 +40,7 @@ class Paths:
     claude_json: Path
     zshrc: Path
     ownership_json: Path
+    recovery_json: Path
     lock_file: Path
     state_dir: Path
     # Project-scoped Claude settings (relative to CWD, if any).
@@ -64,6 +65,7 @@ class Paths:
         - ``claude_json``       = ``home / ".claude.json"``
         - ``zshrc``             = ``home / ".zshrc"``
         - ``ownership_json``   = ``home / ".zai-python-helper" / "ownership.json"``
+        - ``recovery_json``    = ``home / ".zai-python-helper" / "recovery.json"``
         - ``lock_file``         = ``home / ".zai-python-helper" / "lock"``
         - ``state_dir``         = ``home / ".zai-python-helper" / "state"``
         - ``project_claude_settings`` = ``cwd / ".claude" / "settings.json"``
@@ -84,6 +86,7 @@ class Paths:
             claude_json=h / ".claude.json",
             zshrc=h / ".zshrc",
             ownership_json=helper_dir / "ownership.json",
+            recovery_json=helper_dir / "recovery.json",
             lock_file=helper_dir / "lock",
             state_dir=state_dir,
             project_claude_settings=cwd_path / ".claude" / "settings.json",
