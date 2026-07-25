@@ -62,6 +62,21 @@ from zai_python_helper.errors import (
     ValidationError,
     ZaiPythonHelperError,
 )
+from zai_python_helper.mcp import (
+    PRESET_MCP_SERVICES,
+    McpPreset,
+    Tool,
+    build_mcp_entry,
+    install_into_doc,
+    install_mcp,
+    is_installed,
+    list_installed,
+    preset_by_id,
+    preset_ids,
+    tool_config_path,
+    uninstall_from_doc,
+    uninstall_mcp,
+)
 from zai_python_helper.ownership import (
     RevertAction,
     RevertDecision,
@@ -106,6 +121,20 @@ __all__ = [
     "StatusReport",
     "detect_status",
     "render_status",
+    # preset MCP servers (S7, issue #8) — cross-tool install/uninstall
+    "Tool",
+    "McpPreset",
+    "PRESET_MCP_SERVICES",
+    "preset_by_id",
+    "preset_ids",
+    "build_mcp_entry",
+    "install_into_doc",
+    "uninstall_from_doc",
+    "list_installed",
+    "is_installed",
+    "tool_config_path",
+    "install_mcp",
+    "uninstall_mcp",
     # errors
     "ConfigurationError",
     "ProviderError",

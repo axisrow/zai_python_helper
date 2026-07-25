@@ -72,7 +72,7 @@ Auto-generated from `zai_python_helper.__all__` (the versioned contract, issue
 
 
 ```text
-# name → signature → one-line   (from __all__, n=27)
+# name → signature → one-line   (from __all__, n=40)
 - `__version__` = `0.1.0`
 - `ModelMode` (enum): Mode for model selection in Claude Code configuration.
 - `ProviderSpec` (dataclass): Specification for a provider configuration.
@@ -96,6 +96,19 @@ Auto-generated from `zai_python_helper.__all__` (the versioned contract, issue
 - `StatusReport` (dataclass): The full read-only status of all detected tools.
 - `detect_status(paths: Paths) -> StatusReport`: Read all tool configs and return a `StatusReport`.
 - `render_status(report: StatusReport, stream, use_color: bool | None) -> str`: Render a `StatusReport` to a single string.
+- `Tool` (enum): A coding assistant whose MCP config we can patch.
+- `McpPreset`: (undocumented)
+- `PRESET_MCP_SERVICES`: (undocumented)
+- `preset_by_id(mcp_id: str) -> McpPreset | None`: Return the preset with id `mcp_id`, or `None` if no such preset.
+- `preset_ids() -> list[str]`: Return the ids of all preset MCPs, in declaration order.
+- `build_mcp_entry(tool: Tool, mcp_id: str, key: str | None, region: Region, presets: list[McpPreset] | None) -> dict[str, Any]`: Build ONE tool-specific MCP server entry for preset `mcp_id` (pure).
+- `install_into_doc(doc: dict[str, Any] | None, tool: Tool, mcp_id: str, key: str | None, region: Region, presets: list[McpPreset] | None) -> dict[str, Any]`: Return a NEW config doc with `mcp_id` installed into `tool`'s section.
+- `uninstall_from_doc(doc: dict[str, Any] | None, tool: Tool, mcp_id: str) -> dict[str, Any]`: Return a NEW config doc with `mcp_id` removed from `tool`'s section.
+- `list_installed(doc: dict[str, Any] | None, tool: Tool) -> list[str]`: Return the ids installed in `tool`'s MCP section (pure read).
+- `is_installed(doc: dict[str, Any] | None, tool: Tool, mcp_id: str) -> bool`: True iff `mcp_id` is present in `tool`'s MCP section (pure read).
+- `tool_config_path(tool: Tool, home: str | Path) -> Path`: Resolve the config file path for `tool` under `home` (pure).
+- `install_mcp(tool: Tool | str, mcp_id: str, key: str | None, region: Region, home: str | Path | None, presets: list[McpPreset] | None, reader: ConfigReader, writer: ConfigWriter) -> bool`: Install preset `mcp_id` into `tool`'s MCP config (importable, S7).
+- `uninstall_mcp(tool: Tool | str, mcp_id: str, home: str | Path | None, reader: ConfigReader, writer: ConfigWriter) -> bool`: Remove preset `mcp_id` from `tool`'s MCP config (importable, S7).
 - `ConfigurationError` (class): Error in a configuration file or settings document.
 - `ProviderError` (class): Error in provider configuration or connection.
 - `ValidationError` (class): Error in input or domain validation.
