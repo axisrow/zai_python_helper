@@ -41,10 +41,13 @@ _WRONG_URL = "https://api.anthropic.com"
 def _httpserver_seam(httpserver: HTTPServer):
     """Build a real-socket probe seam pointing at a pytest-httpserver instance.
 
-    Returns ``(seam, base_url)``: the seam POSTs whatever doctor hands it to
-    the live httpserver (a real local socket, no network), and ``base_url`` is
+    Returns ``(seam, base_url, host)``: the seam POSTs whatever doctor hands it
+    to the live httpserver (a real local socket, no network), ``base_url`` is
     the value to write into settings.json so doctor's probe URL
-    (``base + /v1/messages``) lands on the configured handler.
+    (``base + /v1/messages``) lands on the configured handler, and ``host`` is
+    the httpserver host to pass as ``extra_zai_hosts`` so the postcondition
+    PASSes and the credentialed probe actually runs (production trusts only the
+    canonical Z.ai hosts; tests must explicitly vouch for the httpserver host).
 
     The test seam is transport-agnostic (it does not enforce HTTPS — that is
     the production seam's job, tested separately in the ``urllib_post`` block),
@@ -52,6 +55,7 @@ def _httpserver_seam(httpserver: HTTPServer):
     It records every call on ``seam.calls`` so tests can assert headers/body.
     """
     base_url = httpserver.url_for("").rstrip("/")
+    host = httpserver.host  # trusted as a Z.ai origin for this test only
     calls: list[tuple[str, dict[str, str], str]] = []
     import urllib.error
     import urllib.request
@@ -70,7 +74,7 @@ def _httpserver_seam(httpserver: HTTPServer):
             return ProbeResult(status=None, error=f"offline: {e}")
 
     seam.calls = calls  # type: ignore[attr-defined]
-    return seam, base_url
+    return seam, base_url, host
 
 
 # --------------------------------------------------------------------------- #
@@ -190,20 +194,25 @@ def test_settings_without_base_url_fails(tmp_path):
 
 
 def _probe_setup(httpserver, status: int, tmp_path):
-    """Configure httpserver to answer the probe path, return (paths, seam, base)."""
+    """Configure httpserver to answer the probe path.
+
+    Returns ``(paths, run_kwargs)`` where run_kwargs carries the seam and the
+    httpserver host as extra_zai_hosts so the postcondition PASSes and the
+    credentialed probe runs against the real local socket.
+    """
     httpserver.expect_request(_PROBE_PATH, method="POST").respond_with_data(
         "ok", status=status
     )
     paths = Paths.from_home(tmp_path)
-    seam, base = _httpserver_seam(httpserver)
+    seam, base, host = _httpserver_seam(httpserver)
     _write_settings(paths, {"ANTHROPIC_BASE_URL": base})
-    return paths, seam, base
+    return paths, {"http_get": seam, "extra_zai_hosts": frozenset({host})}
 
 
 def test_http_probe_200_ok(httpserver: HTTPServer, tmp_path):
     """A reachable auth-enforcing endpoint returning 2xx → probe PASS, exit 0."""
-    paths, seam, _ = _probe_setup(httpserver, 200, tmp_path)
-    code, out = _run(paths, environ={"ZAI_API_KEY": "good-key"}, http_get=seam)
+    paths, kw = _probe_setup(httpserver, 200, tmp_path)
+    code, out = _run(paths, environ={"ZAI_API_KEY": "good-key"}, **kw)
     assert code == 0
     assert "[✓] HTTP probe" in out
 
@@ -215,8 +224,8 @@ def test_http_probe_401_bad_key(httpserver: HTTPServer, tmp_path):
     even for a bad key, so doctor MUST probe /v1/messages (the only path that
     401s a bad key) to actually catch an invalid credential.
     """
-    paths, seam, _ = _probe_setup(httpserver, 401, tmp_path)
-    code, out = _run(paths, environ={"ZAI_API_KEY": "bad-key"}, http_get=seam)
+    paths, kw = _probe_setup(httpserver, 401, tmp_path)
+    code, out = _run(paths, environ={"ZAI_API_KEY": "bad-key"}, **kw)
     assert code == 1
     assert "[✗] HTTP probe" in out
     assert "key rejected" in out
@@ -224,8 +233,8 @@ def test_http_probe_401_bad_key(httpserver: HTTPServer, tmp_path):
 
 def test_http_probe_403_bad_key(httpserver: HTTPServer, tmp_path):
     """A 403 → probe FAIL (key rejected), exit 1."""
-    paths, seam, _ = _probe_setup(httpserver, 403, tmp_path)
-    code, out = _run(paths, environ={"ZAI_API_KEY": "bad-key"}, http_get=seam)
+    paths, kw = _probe_setup(httpserver, 403, tmp_path)
+    code, out = _run(paths, environ={"ZAI_API_KEY": "bad-key"}, **kw)
     assert code == 1
     assert "[✗] HTTP probe" in out
 
@@ -233,8 +242,8 @@ def test_http_probe_403_bad_key(httpserver: HTTPServer, tmp_path):
 def test_http_probe_429_degraded_is_warn(httpserver: HTTPServer, tmp_path):
     """A 429 → probe WARN (degraded), NOT pass — doctor never claims a
     rate-limited endpoint is healthy; exit 0 (WARN doesn't fail)."""
-    paths, seam, _ = _probe_setup(httpserver, 429, tmp_path)
-    code, out = _run(paths, environ={"ZAI_API_KEY": "k"}, http_get=seam)
+    paths, kw = _probe_setup(httpserver, 429, tmp_path)
+    code, out = _run(paths, environ={"ZAI_API_KEY": "k"}, **kw)
     assert code == 0
     assert "[!] HTTP probe" in out
     assert "degraded" in out
@@ -242,8 +251,8 @@ def test_http_probe_429_degraded_is_warn(httpserver: HTTPServer, tmp_path):
 
 def test_http_probe_500_degraded_is_warn(httpserver: HTTPServer, tmp_path):
     """A 5xx → probe WARN (degraded), NOT pass; exit 0."""
-    paths, seam, _ = _probe_setup(httpserver, 503, tmp_path)
-    code, out = _run(paths, environ={"ZAI_API_KEY": "k"}, http_get=seam)
+    paths, kw = _probe_setup(httpserver, 503, tmp_path)
+    code, out = _run(paths, environ={"ZAI_API_KEY": "k"}, **kw)
     assert code == 0
     assert "[!] HTTP probe" in out
     assert "degraded" in out
@@ -251,8 +260,8 @@ def test_http_probe_500_degraded_is_warn(httpserver: HTTPServer, tmp_path):
 
 def test_http_probe_404_unverified_is_warn(httpserver: HTTPServer, tmp_path):
     """An unexpected 4xx → probe WARN (unverified), NOT pass; exit 0."""
-    paths, seam, _ = _probe_setup(httpserver, 404, tmp_path)
-    code, out = _run(paths, environ={"ZAI_API_KEY": "k"}, http_get=seam)
+    paths, kw = _probe_setup(httpserver, 404, tmp_path)
+    code, out = _run(paths, environ={"ZAI_API_KEY": "k"}, **kw)
     assert code == 0
     assert "[!] HTTP probe" in out
     assert "unverified" in out
@@ -261,12 +270,13 @@ def test_http_probe_404_unverified_is_warn(httpserver: HTTPServer, tmp_path):
 def test_http_probe_sends_key_in_both_headers(httpserver: HTTPServer, tmp_path):
     """The probe sends the resolved key in BOTH auth header conventions and
     targets /v1/messages (the auth-enforcing endpoint, not the base URL)."""
-    paths, seam, base = _probe_setup(httpserver, 200, tmp_path)
-    _run(paths, environ={"ZAI_API_KEY": "the-real-key"}, http_get=seam)
+    paths, kw = _probe_setup(httpserver, 200, tmp_path)
+    seam = kw["http_get"]
+    _run(paths, environ={"ZAI_API_KEY": "the-real-key"}, **kw)
     assert len(seam.calls) == 1
     url, headers, body = seam.calls[0]
     # Probe URL is the auth-enforcing messages endpoint, not the base URL.
-    assert url == base.rstrip("/") + _PROBE_PATH
+    assert url.endswith(_PROBE_PATH)
     assert headers["x-api-key"] == "the-real-key"
     assert headers["authorization"] == "Bearer the-real-key"
     assert "glm-4.5-flash" in body  # the minimal auth-enforcing payload
@@ -274,19 +284,12 @@ def test_http_probe_sends_key_in_both_headers(httpserver: HTTPServer, tmp_path):
 
 def test_http_probe_uses_auth_token_from_settings(httpserver: HTTPServer, tmp_path):
     """ANTHROPIC_AUTH_TOKEN in the env block wins over ZAI_API_KEY env."""
-    httpserver.expect_request(_PROBE_PATH, method="POST").respond_with_data("ok", status=200)
-    paths = Paths.from_home(tmp_path)
-    seam, base = _httpserver_seam(httpserver)
-    _write_settings(
-        paths,
-        {
-            "ANTHROPIC_BASE_URL": base,
-            "ANTHROPIC_AUTH_TOKEN": "from-settings",
-        },
-    )
-    code, out = _run(
-        paths, environ={"ZAI_API_KEY": "from-env"}, http_get=seam
-    )
+    paths, kw = _probe_setup(httpserver, 200, tmp_path)
+    seam = kw["http_get"]
+    # Re-write settings to also carry ANTHROPIC_AUTH_TOKEN (base URL unchanged).
+    base = httpserver.url_for("").rstrip("/")
+    _write_settings(paths, {"ANTHROPIC_BASE_URL": base, "ANTHROPIC_AUTH_TOKEN": "from-settings"})
+    code, out = _run(paths, environ={"ZAI_API_KEY": "from-env"}, **kw)
     assert code == 0
     assert "[✓] API key present" in out
     assert seam.calls[0][1]["x-api-key"] == "from-settings"
@@ -313,7 +316,7 @@ def test_probe_skipped_when_endpoint_fails_no_key_sent(tmp_path):
     assert code == 1  # the endpoint FAIL fails the run
     assert "[!] HTTP probe" in out
     assert "skipped" in out
-    assert "unsafe" in out
+    assert "not verified as Z.ai" in out
 
 
 def test_probe_skipped_when_no_base_url_no_key_sent(tmp_path):
@@ -329,6 +332,127 @@ def test_probe_skipped_when_no_base_url_no_key_sent(tmp_path):
     )
     assert code == 1
     assert "skipped" in out
+
+
+def test_probe_skipped_for_unrecognized_host_no_key_sent(tmp_path):
+    """An UNRECOGNIZED host (WARN endpoint, e.g. attacker.example) → probe
+    SKIPPED, key NEVER sent. Regression for the round-2 Codex finding: the
+    gate must be PASS-only, not just "not FAIL", or an attacker controlling
+    ANTHROPIC_BASE_URL harvests the API key."""
+    paths = Paths.from_home(tmp_path)
+    _write_settings(paths, {"ANTHROPIC_BASE_URL": "https://attacker.example/api/anthropic"})
+
+    def seam_must_not_be_called(_url, _headers, _body):
+        raise AssertionError("probe must NOT run for an unrecognized host")
+
+    code, out = _run(
+        paths, environ={"ZAI_API_KEY": "secret"}, http_get=seam_must_not_be_called
+    )
+    # Unrecognized host is a WARN, not a FAIL — the run exits 0, but the probe
+    # was still skipped (no key sent).
+    assert code == 0
+    assert "[!] Z.ai endpoint" in out
+    assert "[!] HTTP probe" in out
+    assert "skipped" in out
+
+
+# --------------------------------------------------------------------------- #
+# Production-seam redirect rejection — a 3xx must NOT be followed (Codex round-2).
+# --------------------------------------------------------------------------- #
+
+
+def test_no_redirect_handler_blocks_redirects():
+    """The redirect-rejecting opener must NOT follow a 3xx.
+
+    The production seam installs ``_NoRedirectHandler`` (subclass overriding
+    ``redirect_request`` to return None) because ``build_opener`` always adds
+    the default ``HTTPRedirectHandler`` otherwise. With the override, a 3xx is
+    NOT followed: urllib raises ``HTTPError(302)`` (caught by the production
+    seam and surfaced as ``ProbeResult(status=302)`` → WARN), so the credential
+    headers never reach the redirect target. This test registers the handler on
+    a real opener against a local httpserver that 302-redirects to /capture and
+    asserts the capture route never receives a request.
+    """
+    import urllib.error
+    import urllib.request
+
+    from pytest_httpserver import HTTPServer
+
+    from zai_python_helper.doctor import _NoRedirectHandler
+
+    httpserver = HTTPServer()
+    httpserver.start()
+    try:
+        captured: list = []
+        base = httpserver.url_for("").rstrip("/")
+        httpserver.expect_request("/redirect", method="POST").respond_with_data(
+            "", status=302, headers={"Location": base + "/capture"}
+        )
+
+        def captor(req):
+            captured.append(req.headers.get("x-api-key"))
+            from werkzeug.wrappers import Response
+
+            return Response("captured", status=200)
+
+        httpserver.expect_request("/capture", method="POST").respond_with_handler(captor)
+
+        opener = urllib.request.build_opener(_NoRedirectHandler)
+        req = urllib.request.Request(base + "/redirect", data=b"{}", method="POST")
+        # The handler returns None → urllib raises HTTPError(302) instead of
+        # following. (A default opener would follow to /capture, hit the captor,
+        # and return 200 — which would fail the HTTPError assertion.)
+        try:
+            opener.open(req, timeout=5)
+            raised = False
+        except urllib.error.HTTPError as e:
+            raised = e.code == 302
+        assert raised, "expected HTTPError(302) — redirect was followed instead"
+        assert captured == [], "redirect was followed — credential would leak!"
+    finally:
+        httpserver.clear()
+        httpserver.stop()
+
+
+def test_default_opener_DOES_follow_redirects_guard():
+    """Guard proving the fix is necessary: a DEFAULT opener (no
+    ``_NoRedirectHandler``) DOES follow a 302 — which is exactly the credential
+    exfil path the production seam must avoid. If this test ever fails (default
+    opener stops following), the ``_NoRedirectHandler`` override may be dead."""
+    import urllib.request
+
+    from pytest_httpserver import HTTPServer
+
+    httpserver = HTTPServer()
+    httpserver.start()
+    try:
+        captured: list = []
+        base = httpserver.url_for("").rstrip("/")
+        httpserver.expect_request("/redirect", method="POST").respond_with_data(
+            "", status=302, headers={"Location": base + "/capture"}
+        )
+
+        def captor(req):
+            captured.append(req.headers.get("x-api-key"))
+            from werkzeug.wrappers import Response
+
+            return Response("captured", status=200)
+
+        # Match ANY method on /capture: urllib's default opener converts a 302
+        # POST → GET (another exfil vector), so the followed request arrives as
+        # GET, not POST.
+        httpserver.expect_request("/capture").respond_with_handler(captor)
+        # The DEFAULT opener follows the redirect → /capture receives the
+        # request (credential would leak). This is the baseline the fix removes.
+        resp = urllib.request.urlopen(
+            urllib.request.Request(base + "/redirect", data=b"{}", method="POST"),
+            timeout=5,
+        )
+        assert resp.status == 200
+        assert captured, "default opener did NOT follow — _NoRedirectHandler guard is stale"
+    finally:
+        httpserver.clear()
+        httpserver.stop()
 
 
 # --------------------------------------------------------------------------- #

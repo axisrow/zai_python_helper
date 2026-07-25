@@ -93,6 +93,24 @@ _DEGRADED_CODES = {429, 500, 502, 503, 504}
 _PROBE_PATH = "/v1/messages"
 _PROBE_PAYLOAD = '{"model":"glm-4.5-flash","max_tokens":1,"messages":[{"role":"user","content":"ping"}]}'
 
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Redirect-rejecting handler: a 3xx must NOT be followed.
+
+    ``urllib.request.build_opener`` ALWAYS installs the default
+    :class:`HTTPRedirectHandler` even when other handlers are passed, so simply
+    omitting it does not disable redirect following (verified live). Subclassing
+    it and returning ``None`` from :meth:`redirect_request` makes the opener
+    surface a 3xx as the response status instead of following it — so a
+    redirect cannot carry the credential-bearing headers across origins or
+    downgrade HTTPS → HTTP. Installed via ``build_opener(_NoRedirectHandler)``;
+    the subclass OVERRIDES the default because build_opener keeps at most one
+    handler per type.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override]
+        return None
+
 #: Known Z.ai region hosts, DERIVED from the canonical region→endpoint map in
 #: :mod:`zai_python_helper.regions` (single source of truth — the planner and
 #: the CLI read the same map; doctor must not hand-list hosts that can drift).
@@ -247,9 +265,11 @@ def urllib_post(url: str, headers: dict[str, str], body: str) -> ProbeResult:
         req = urllib.request.Request(
             url, data=body.encode("utf-8"), headers=headers, method="POST"
         )
-        # No HTTPRedirectHandler: a redirect must NOT carry the credential
-        # headers to a different origin or downgrade to HTTP.
-        opener = urllib.request.build_opener(urllib.request.HTTPSHandler())
+        # _NoRedirectHandler overrides the default HTTPRedirectHandler that
+        # build_opener would otherwise install: a 3xx must NOT be followed, so
+        # the credential-bearing headers cannot be carried across origins or
+        # downgraded HTTPS → HTTP.
+        opener = urllib.request.build_opener(_NoRedirectHandler)
         with opener.open(req, timeout=_HTTP_TIMEOUT) as resp:
             return ProbeResult(status=resp.status, error=None)
     except urllib.error.HTTPError as e:
@@ -345,7 +365,9 @@ def _check_settings_env(paths: Paths) -> tuple[CheckResult, dict[str, str] | Non
     )
 
 
-def _check_zai_endpoint(env: dict[str, str] | None) -> CheckResult:
+def _check_zai_endpoint(
+    env: dict[str, str] | None, extra_hosts: frozenset[str] | None = None
+) -> CheckResult:
     """ANTHROPIC_BASE_URL points at a Z.ai endpoint (the postcondition).
 
     This is the postcondition check named in the issue. Three outcomes:
@@ -354,16 +376,26 @@ def _check_zai_endpoint(env: dict[str, str] | None) -> CheckResult:
     - the real Anthropic host (``api.anthropic.com`` / ``.cn``) → FAIL — the
       client never switched to Z.ai (the acceptance criterion: "catches a
       wrong endpoint");
-    - any other host (custom/staging deployment, a test httpserver, a typo) →
-      WARN. doctor cannot prove it is Z.ai, but it is not provably the wrong
-      target either, so the HTTP probe still runs and stays useful.
+    - any other host (custom/staging deployment, a typo, a test httpserver) →
+      WARN. doctor cannot prove it is Z.ai, so the credentialed probe is NOT
+      run against it (see :func:`_check_http_probe`'s PASS-only gate). The
+      caller may pass ``extra_hosts`` to treat additional user-confirmed Z.ai
+      origins (e.g. a staging deployment) as PASS — production does not, so an
+      unrecognized host never silently receives the key.
+
+    Args:
+        env: the parsed settings.json env block (``None`` if unreadable).
+        extra_hosts: optional extra hosts the caller vouches are Z.ai (PASS).
+            Used by tests to point the probe at a local httpserver; production
+            passes ``None`` so only the canonical region hosts PASS.
     """
     name = "Z.ai endpoint"
     if env is None:
         return CheckResult(name=name, verdict="fail", detail="no base URL", hint="")
     base_url = env.get("ANTHROPIC_BASE_URL", "")
     host = _host_of(base_url)
-    if host in _ZAI_HOSTS:
+    trusted = _ZAI_HOSTS | (extra_hosts or frozenset())
+    if host in trusted:
         return CheckResult(name=name, verdict="pass", detail=f"{base_url}", hint="")
     if host in _ANTHROPIC_HOSTS:
         return CheckResult(
@@ -420,11 +452,12 @@ def _check_http_probe(
 ) -> CheckResult:
     """HTTP probe: POST the auth-enforcing endpoint with the resolved key.
 
-    Credential-egress gate: the probe is SKIPPED when ``endpoint_verdict`` is
-    ``"fail"`` — the endpoint is provably wrong (e.g. still pointed at the real
-    Anthropic, or no base URL), so doctor must NOT send the API key there. This
-    is the fix for the credential-disclosure finding: a failed postcondition
-    never triggers a credentialed request.
+    Credential-egress gate: the API key is sent ONLY when ``endpoint_verdict``
+    is ``"pass"`` (a canonical Z.ai origin). A ``"fail"`` (provably wrong target
+    — e.g. still pointed at the real Anthropic, or no base URL) AND a ``"warn"``
+    (unrecognized host — e.g. a typo'd or attacker-controlled domain) both SKIP
+    the probe. This is the root fix for credential disclosure: doctor never
+    attaches stored credentials to a URL it has not verified as Z.ai.
 
     Status mapping:
 
@@ -437,15 +470,22 @@ def _check_http_probe(
       can't interpret as success or auth failure.
     - offline / timeout / non-https → WARN (graceful — offline is never a FAIL).
 
-    No key, no base URL, or a FAILED endpoint → WARN (skipped), not a request.
+    No key, no base URL, or a non-PASS endpoint → WARN (skipped), not a request.
     """
     name = "HTTP probe"
-    if endpoint_verdict == "fail":
+    # Credential-egress gate: the API key is sent ONLY to an endpoint the
+    # postcondition PASSed (a canonical Z.ai origin). A FAIL (provably wrong
+    # target — e.g. still pointed at Anthropic) OR a WARN (unrecognized host —
+    # e.g. a typo'd attacker domain) both SKIP the probe: doctor must never
+    # attach stored credentials to a URL it has not verified as Z.ai. This is
+    # the root fix for the credential-disclosure finding — gating on PASS
+    # alone, not "not FAIL", closes the unrecognized-host exfil path.
+    if endpoint_verdict != "pass":
         return CheckResult(
             name=name,
             verdict="warn",
-            detail="skipped (endpoint check failed — key not sent to an unsafe URL)",
-            hint="fix the Z.ai endpoint check first; doctor never probes a wrong target",
+            detail="skipped (endpoint not verified as Z.ai — key not sent)",
+            hint="fix the Z.ai endpoint check first; doctor only probes a verified Z.ai origin",
         )
     if not base_url or not key:
         return CheckResult(
@@ -549,6 +589,7 @@ def run_doctor(
     http_get: HttpProbe = urllib_post,
     environ: Mapping[str, str] | None = None,
     color: bool | None = None,
+    extra_zai_hosts: frozenset[str] | None = None,
 ) -> int:
     """Run the doctor diagnostic pipeline and print verdicts.
 
@@ -572,6 +613,11 @@ def run_doctor(
             ``os.environ`` (production); tests inject a controlled dict.
         color: force colored (``True``) / plain (``False``) markers; ``None``
             auto-detects from :func:`sys.stdout.isatty`.
+        extra_zai_hosts: optional extra hosts the caller vouches are Z.ai
+            origins, treated as a PASS for the postcondition (and so eligible
+            for the credentialed probe). Production passes ``None`` — only the
+            canonical region hosts are trusted, so an unrecognized host never
+            silently receives the API key. Tests pass the httpserver host.
 
     Returns:
         ``0`` if no check has verdict ``"fail"``; ``1`` otherwise. WARNs do
@@ -593,8 +639,8 @@ def run_doctor(
     _emit(settings_result)
 
     # 2. Z.ai endpoint postcondition. Capture its verdict: the HTTP probe is
-    # GATED on it (a FAILED endpoint must never receive the credentialed probe).
-    endpoint_result = _check_zai_endpoint(settings_env)
+    # GATED on it (a non-PASS endpoint never receives the credentialed probe).
+    endpoint_result = _check_zai_endpoint(settings_env, extra_zai_hosts)
     _emit(endpoint_result)
 
     # 3. API key present (also resolves the key for the probe).
