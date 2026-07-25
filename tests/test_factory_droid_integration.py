@@ -122,6 +122,43 @@ class TestApplyAndRevert:
         assert all(m["apiKey"] == "user-rotated" for m in ours)
         assert len(ours) == 2
 
+    def test_use_default_preserves_foreign_field_in_our_entry(self, tool, tmp_path):
+        """Regression (cycle-review #39): a foreign field the user added into
+        one of OUR customModels entries must survive revert (analogous to the
+        Crush #38 collapse fix). The entry is de-marked (our fields stripped)
+        but the user's field is kept, not clobbered."""
+        paths = Paths.from_home(tmp_path)
+        spec = _spec()
+        journal = OwnershipJournal(paths.ownership_json)
+
+        with ProcessLock(paths.lock_file):
+            state = tool.read_state(paths)
+            plan = tool.plan_zai(spec, Region.GLOBAL, state=state, auth_token=TOKEN)
+            records = tool.extract_takeover(plan, prior_state=state, spec=spec)
+            journal.write(_merge(tool, journal.read(), records))
+            apply_plan_locked(paths, plan)
+
+        # User adds a foreign field into the anthropic entry.
+        doc = _read(paths)
+        for m in doc["customModels"]:
+            if fd._is_our_entry(m) and fd._protocol_of(m) == fd.PROVIDER_ANTHROPIC:
+                m["extra"] = "keep-me"
+        JsonBackend.write(paths.factory_droid, doc)
+
+        with ProcessLock(paths.lock_file):
+            state = tool.read_state(paths)
+            decisions = tool.revert_decisions(journal.read(), state)
+            plan = tool.plan_revert(state=state, decisions=decisions)
+            apply_plan_locked(paths, plan)
+
+        doc = _read(paths)
+        models = doc["customModels"]
+        # The anthropic entry is gone as "ours", but the foreign field survives
+        # as a de-marked entry; the openai entry is fully removed (no foreign).
+        flat = [item for m in models for item in m.items()]
+        assert ("extra", "keep-me") in flat
+        assert not any(fd._is_our_entry(m) for m in models)
+
     def test_independent_of_other_tools(self, tool, tmp_path):
         paths = Paths.from_home(tmp_path)
         JsonBackend.write(paths.crush, {"providers": {"openai": {"api_key": "x"}}})

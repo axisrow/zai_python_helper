@@ -258,6 +258,27 @@ def apply_revert_decisions(
     """
     from zai_python_helper.ownership import RevertAction
 
+    # The complete set of fields Factory Droid writes into one of its entries.
+    # Used by the collapse logic to tell a foreign field the user added (which
+    # must survive revert) from one of our own (safe to drop).
+    our_entry_fields = {"displayName", "provider", "model", "maxOutputTokens", "baseUrl", "apiKey"}
+
+    def _remove_our_entry(proto_idx: int) -> None:
+        """Remove our entry for a protocol, preserving any foreign field.
+
+        If the entry has a foreign field the user added, strip only OUR fields
+        and keep the (now-de-marked) entry so the user's field is not clobbered
+        (ADR-004). Otherwise drop the entry entirely.
+        """
+        entry = models[proto_idx]
+        foreign = {k: v for k, v in entry.items() if k not in our_entry_fields}
+        if foreign:
+            # Keep the entry but reduced to the user's foreign fields (drop our
+            # managed + marker fields so it is no longer detected as "ours").
+            models[proto_idx] = dict(foreign)
+        else:
+            models.pop(proto_idx)
+
     new_doc: dict[str, Any] = dict(doc) if doc else {}
     models: list[dict[str, Any]] = list(new_doc.get("customModels") or [])
 
@@ -281,12 +302,13 @@ def apply_revert_decisions(
                     continue
                 models[idx]["apiKey"] = decision.prior_value
             else:
-                # Prior was absent → remove our entry for this protocol.
+                # Prior was absent → remove our entry for this protocol
+                # (preserving any foreign field the user added).
                 if idx is not None:
-                    models.pop(idx)
+                    _remove_our_entry(idx)
         elif decision.action == RevertAction.CLEAR:
             if idx is not None:
-                models.pop(idx)
+                _remove_our_entry(idx)
         # REFUSE: leave the current entry/apiKey untouched.
 
     if models:
