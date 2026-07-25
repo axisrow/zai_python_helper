@@ -114,6 +114,73 @@ class TestApplyAndRevert:
         doc = _read(paths)
         assert doc["providers"]["zai"]["api_key"] == "user-rotated"
 
+    def test_use_default_preserves_external_base_url_edit(self, tool, tmp_path):
+        """Regression (cycle-review #38): if the user edits base_url externally
+        while api_key is still ours, ``use default`` must REFUSE on base_url
+        (keep the edit) and NOT collapse the entry — even though api_key is
+        RESTORE'd to absent. The entry survives with the user's base_url."""
+        paths = Paths.from_home(tmp_path)
+        spec = _spec()
+        journal = OwnershipJournal(paths.ownership_json)
+
+        with ProcessLock(paths.lock_file):
+            state = tool.read_state(paths)
+            plan = tool.plan_zai(spec, Region.GLOBAL, state=state, auth_token=TOKEN)
+            records = tool.extract_takeover(plan, prior_state=state, spec=spec)
+            journal.write(_merge(tool, journal.read(), records))
+            apply_plan_locked(paths, plan)
+
+        # External edit: only base_url changes; api_key still ours.
+        doc = _read(paths)
+        doc["providers"]["zai"]["base_url"] = "https://user.custom/v4"
+        JsonBackend.write(paths.crush, doc)
+
+        with ProcessLock(paths.lock_file):
+            state = tool.read_state(paths)
+            decisions = tool.revert_decisions(journal.read(), state)
+            plan = tool.plan_revert(state=state, decisions=decisions)
+            apply_plan_locked(paths, plan)
+
+        doc = _read(paths)
+        # base_url REFUSE'd → preserved; api_key RESTORE'd-to-absent → gone;
+        # entry KEPT (has the value-carrying base_url), not collapsed.
+        entry = doc["providers"]["zai"]
+        assert entry["base_url"] == "https://user.custom/v4"
+        assert "api_key" not in entry
+
+    def test_use_default_preserves_foreign_field_in_zai_entry(self, tool, tmp_path):
+        """Regression (cycle-review #38): a foreign field the user added into
+        ``providers.zai`` must survive revert even when both managed fields are
+        RESTORE'd to absent."""
+        paths = Paths.from_home(tmp_path)
+        spec = _spec()
+        journal = OwnershipJournal(paths.ownership_json)
+
+        with ProcessLock(paths.lock_file):
+            state = tool.read_state(paths)
+            plan = tool.plan_zai(spec, Region.GLOBAL, state=state, auth_token=TOKEN)
+            records = tool.extract_takeover(plan, prior_state=state, spec=spec)
+            journal.write(_merge(tool, journal.read(), records))
+            apply_plan_locked(paths, plan)
+
+        # User adds a foreign field into the zai entry.
+        doc = _read(paths)
+        doc["providers"]["zai"]["custom"] = "keep-me"
+        JsonBackend.write(paths.crush, doc)
+
+        with ProcessLock(paths.lock_file):
+            state = tool.read_state(paths)
+            decisions = tool.revert_decisions(journal.read(), state)
+            plan = tool.plan_revert(state=state, decisions=decisions)
+            apply_plan_locked(paths, plan)
+
+        doc = _read(paths)
+        # Entry survives with the foreign field; managed fields gone.
+        entry = doc["providers"]["zai"]
+        assert entry["custom"] == "keep-me"
+        assert "api_key" not in entry
+        assert "base_url" not in entry
+
     def test_independent_of_opencode_and_claude_code(self, tool, tmp_path):
         paths = Paths.from_home(tmp_path)
         JsonBackend.write(paths.opencode, {"$schema": "keep", "provider": {}})

@@ -185,9 +185,12 @@ def apply_revert_decisions(
     """Apply per-field :class:`RevertDecision` to a Crush doc (PURE).
 
     RESTORE → put back the prior value (or re-absent it); CLEAR → drop the
-    field; REFUSE → leave the current value. When ``providers.zai`` loses both
-    managed fields and has no other keys, the entry (and ``providers`` if
-    empty) is collapsed. Foreign providers/keys always round-trip untouched.
+    field; REFUSE → leave the current value. The ``providers.zai`` entry is
+    collapsed (and ``providers`` dropped if empty) ONLY when it would be left
+    as an inert stub — i.e. it has neither ``api_key`` nor ``base_url`` AND
+    every remaining field is one we own (id/name). A REFUSE'd ``base_url`` (a
+    user's external edit) or any foreign field the user added into the entry
+    is preserved (ADR-004: never clobber an externally-changed value).
     """
     from zai_python_helper.ownership import RevertAction
 
@@ -212,13 +215,16 @@ def apply_revert_decisions(
     if baseurl_decision is not None:
         _set_field("base_url", baseurl_decision)
 
-    # Collapse: the ENTIRE ``providers.zai`` entry is our artifact — we create
-    # it whole in ``_provider_entry`` (id/name/base_url/api_key). The api_key is
-    # the primary marker of an active Z.ai provider, so when it is absent after
-    # applying the decisions (RESTORE-to-absent or CLEAR), the whole entry is
-    # inert and must be removed (leaving a stub ``{id, name}`` with no key/url
-    # would be a broken half-entry). Drop providers if it becomes empty.
-    if entry.get("api_key"):
+    # Collapse: the ``providers.zai`` entry is our artifact (we create it whole
+    # in ``_provider_entry``: id/name/base_url/api_key). After applying the
+    # decisions, drop the entry ONLY if it is an inert stub — no value-carrying
+    # field (api_key/base_url) remains AND every leftover field is one of our
+    # stub markers (id/name). This preserves a REFUSE'd base_url (external user
+    # edit) and any foreign field the user added into the entry (ADR-004).
+    our_fields = {"id", "name", "base_url", "api_key"}
+    has_value_field = "api_key" in entry or "base_url" in entry
+    has_foreign_field = any(k not in our_fields for k in entry)
+    if has_value_field or has_foreign_field:
         providers[PROVIDER_KEY] = entry
     else:
         providers.pop(PROVIDER_KEY, None)
