@@ -52,10 +52,13 @@ _API_KEY_VARS = ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY")
 # Z.ai endpoint hosts by region. Kept here (not in regions.py) because
 # regions.py owns the *canonical* endpoints, while status needs to match
 # arbitrary user-entered URLs (with path/port/protocol variants) to a
-# region — a matching concern, distinct from endpoint lookup.
+# region — a matching concern, distinct from endpoint lookup. Covers every
+# host the canonical endpoints use (regions.ZAI_ANTHROPIC_BASE_URL_BY_REGION
+# + the paas/anthropic variants) so an endpoint written by ``use zai`` is
+# always recognized.
 _ZAI_HOSTS = {
     Region.GLOBAL: ("z.ai",),
-    Region.CHINA: ("z.cn",),
+    Region.CHINA: ("z.cn", "zai.cn"),
 }
 
 # ANSI codes used by the renderer. Applied ONLY on a tty.
@@ -389,9 +392,17 @@ def render_status(
         use_color = bool(getattr(stream, "isatty", lambda: False)())
 
     blocks: list[str] = []
-    if report.claude_code is not None:
+
+    # Machine-readable summary line first (stable, grep-able). Tools and
+    # wiring tests assert on this rather than the human-readable block, so
+    # its exact wording is part of the status contract.
+    cc = report.claude_code
+    active = bool(cc and cc.zai_active)
+    blocks.append(f"zai_active: {active}")
+
+    if cc is not None:
         blocks.append(
-            "\n".join(_render_claude_code(report.claude_code, use_color=use_color))
+            "\n".join(_render_claude_code(cc, use_color=use_color))
         )
 
     if not blocks:
