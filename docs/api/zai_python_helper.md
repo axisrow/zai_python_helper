@@ -320,11 +320,14 @@ Attributes:
 - `ownership_json`: `Path`
 - `lock_file`: `Path`
 - `state_dir`: `Path`
+- `project_claude_settings`: `Path`
+- `local_claude_settings`: `Path`
+- `cwd`: `Path`
 
 #### `from_home()`
 
 ```python
-from_home(cls, home: str | Path) -> Paths
+from_home(cls, home: str | Path, cwd: str | Path | None) -> Paths
 ```
 
 Resolve all paths off `home` via pure arithmetic (no IO).
@@ -341,6 +344,8 @@ The resolved paths:
 - `ownership_json`   = `home / ".zai-python-helper" / "ownership.json"`
 - `lock_file`         = `home / ".zai-python-helper" / "lock"`
 - `state_dir`         = `home / ".zai-python-helper" / "state"`
+- `project_claude_settings` = `cwd / ".claude" / "settings.json"`
+- `local_claude_settings` = `cwd / ".claude" / "settings.local.json"`
 
 #### `default()`
 
