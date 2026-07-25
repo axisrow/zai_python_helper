@@ -138,13 +138,19 @@ class RevertDecision:
 # ---------------------------------------------------------------------------
 
 
-def hash_value(value: str) -> str:
+def hash_value(value: Any) -> str:
     """Return the SHA-256 hex digest of ``value`` (pure).
 
     Used to record ``set_hash`` — a fingerprint of the value we set so revert
     can detect an external change without storing the set value in cleartext.
+
+    Coerces to ``str`` first: settings.json ``env`` values may be non-string
+    (e.g. ``CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: 1`` as an int after the
+    #28 parity fix). Both the recorded ``set_hash`` and the revert-time
+    ``hash_value(current_value)`` go through the same coercion, so an unchanged
+    int value still matches its recorded hash.
     """
-    return hashlib.new(_HASH_ALGO, value.encode("utf-8")).hexdigest()
+    return hashlib.new(_HASH_ALGO, str(value).encode("utf-8")).hexdigest()
 
 
 def take_over(

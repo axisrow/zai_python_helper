@@ -1,0 +1,18 @@
+#!/usr/bin/env sh
+# Fake `claude` binary for the parity image ONLY (issue #17).
+#
+# The upstream `chelper auth reload claude` probes for a `claude` (Claude Code)
+# binary on PATH; without one the reload reports the tool as missing. We do not
+# want to pull the real (large, unnecessary) Claude Code package into the parity
+# image, so this no-op shim satisfies the presence probe. It answers --version
+# (in case any path does a version check) and exits 0 otherwise.
+#
+# NEVER shipped in a production image — this is a parity-test fixture.
+case "$1" in
+  --version | -v)
+    echo "0.0.0-parity-shim"
+    ;;
+  *)
+    exit 0
+    ;;
+esac

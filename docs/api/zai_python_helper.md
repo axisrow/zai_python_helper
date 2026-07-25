@@ -359,7 +359,7 @@ Attributes:
 
 ### `take_over()`
 
-*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/ownership.py#L150)*
+*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/ownership.py#L156)*
 
 ```python
 take_over(records: dict[str, Any], tool: str, key: str, prior_value: str | None, prior_present: bool, set_hash: str | None) -> dict[str, Any]
@@ -387,7 +387,7 @@ value change, e.g. a rotated token) do we record the new prior.
 
 ### `revert()`
 
-*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/ownership.py#L211)*
+*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/ownership.py#L217)*
 
 ```python
 revert(records: dict[str, Any], tool: str, key: str, current_value: str | None) -> RevertDecision
