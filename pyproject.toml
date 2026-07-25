@@ -42,6 +42,12 @@ dev = [
     "hatchling>=1.21",
     "ruff>=0.6",
 ]
+# #19 — auto-generated, machine-readable docs (FastAPI-style: code = source of
+# truth). griffe is the parser both docs/api/*.md and llms.txt derive from.
+# Installed via ``pip -e ".[docs]"`` (and by CI's docs-sync job).
+docs = [
+    "griffe>=0.49",
+]
 
 [project.urls]
 Homepage = "https://github.com/axisrow/zai_python_helper"
