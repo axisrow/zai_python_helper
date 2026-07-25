@@ -42,9 +42,13 @@ class Paths:
     ownership_json: Path
     lock_file: Path
     state_dir: Path
+    # Project-scoped Claude settings (relative to CWD, if any).
+    # Added for issue #23: credential egress gap fix.
+    project_claude_settings: Path
+    local_claude_settings: Path
 
     @classmethod
-    def from_home(cls, home: str | Path) -> Paths:
+    def from_home(cls, home: str | Path, cwd: str | Path | None = None) -> Paths:
         """Resolve all paths off ``home`` via pure arithmetic (no IO).
 
         Accepts ``str | Path`` and coerces to ``pathlib.Path``. Does NOT
@@ -59,10 +63,19 @@ class Paths:
         - ``ownership_json``   = ``home / ".zai-python-helper" / "ownership.json"``
         - ``lock_file``         = ``home / ".zai-python-helper" / "lock"``
         - ``state_dir``         = ``home / ".zai-python-helper" / "state"``
+        - ``project_claude_settings`` = ``cwd / ".claude" / "settings.json"``
+        - ``local_claude_settings`` = ``cwd / ".claude" / "settings.local.json"``
+
+        Args:
+            home: The user home directory.
+            cwd: Current working directory for project/local settings. Defaults to
+                ``Path.cwd()`` if not provided (for production use). Tests inject
+                a specific path to simulate running from a project directory.
         """
         h = Path(home)
         state_dir = h / ".zai-python-helper" / "state"
         helper_dir = h / ".zai-python-helper"
+        cwd_path = Path(cwd) if cwd is not None else Path.cwd()
         return cls(
             claude_settings=h / ".claude" / "settings.json",
             claude_json=h / ".claude.json",
@@ -70,6 +83,8 @@ class Paths:
             ownership_json=helper_dir / "ownership.json",
             lock_file=helper_dir / "lock",
             state_dir=state_dir,
+            project_claude_settings=cwd_path / ".claude" / "settings.json",
+            local_claude_settings=cwd_path / ".claude" / "settings.local.json",
         )
 
     @classmethod
@@ -80,4 +95,4 @@ class Paths:
         Tests never call this — they inject ``tmp_path`` via :meth:`from_home`
         directly; that naming split is what makes test isolation provable.
         """
-        return cls.from_home(Path.home())
+        return cls.from_home(Path.home(), cwd=Path.cwd())

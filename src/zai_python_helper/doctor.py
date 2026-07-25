@@ -40,7 +40,6 @@ pytest-httpserver: production uses :mod:`urllib` from the stdlib — no
 
 from __future__ import annotations
 
-import json
 import os
 import sys
 import urllib.error
@@ -51,6 +50,7 @@ from typing import Literal
 from urllib.parse import urlparse
 
 from zai_python_helper import regions
+from zai_python_helper.io.settings import resolve_effective_env
 from zai_python_helper.paths import Paths
 
 __all__ = ["CheckResult", "HttpProbe", "ProbeResult", "render_check", "run_doctor"]
@@ -293,32 +293,31 @@ def urllib_post(url: str, headers: dict[str, str], body: str) -> ProbeResult:
 
 
 def _read_settings_env(paths: Paths) -> dict[str, str] | None:
-    """READ-ONLY: read the ``"env"`` block from ``~/.claude/settings.json``.
+    """READ-ONLY: resolve the EFFECTIVE env block from all Claude settings.
 
-    Returns the env dict if the file exists and parses and carries an ``env``
-    mapping; returns ``None`` if the file is absent or the env block is
-    missing/not a mapping. The two "absent" cases are deliberately conflated:
-    doctor's first check reports "no env block" either way, and downstream
-    checks key off ``None``.
+    Uses the precedence resolver (issue #23) to merge env blocks across
+    managed > local > project > user scopes. Returns the effective env dict
+    if any settings file exists and has an env block; returns None otherwise.
 
-    Any read/parse error is also folded to ``None`` — doctor treats an
-    unreadable settings.json the same as a missing one at this layer (the
-    check result will surface the reason).
+    The two "absent" cases are deliberately conflated: doctor's first check
+    reports "no env block" either way, and downstream checks key off None.
 
-    Does NOT use a backend (S2 owns those); reads ``settings.json`` directly
-    through the injected :class:`Paths`, per the task constraint.
+    Any read/parse error is folded to None — doctor treats an unreadable
+    settings.json the same as a missing one at this layer (the check result
+    will surface the reason). Uses JsonBackend through the resolver (S2 layer),
+    per the security fix requirement.
+
+    READ-ONLY: performs zero writes; only reads through the resolver.
     """
     try:
-        with paths.claude_settings.open() as fh:
-            doc = json.load(fh)
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return resolve_effective_env(
+            user_settings_path=paths.claude_settings,
+            project_settings_path=paths.project_claude_settings,
+            local_settings_path=paths.local_claude_settings,
+        )
+    except Exception:
+        # Fold any read/parse error to None — doctor reports, never raises.
         return None
-    env = doc.get("env") if isinstance(doc, dict) else None
-    if not isinstance(env, dict):
-        return None
-    # Coerce to str values; settings.json env values are strings, but defend
-    # against a malformed block without failing the whole read.
-    return {str(k): str(v) for k, v in env.items()}
 
 
 # --------------------------------------------------------------------------- #
