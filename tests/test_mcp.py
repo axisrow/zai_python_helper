@@ -467,3 +467,29 @@ def test_cli_mcp_install_unknown_preset_errors(_isolate_home):
     assert rc != 0
     assert "Unknown MCP preset" in err
 
+
+def test_cli_mcp_uninstall_dry_run_does_not_mutate(_isolate_home):
+    """`mcp uninstall --dry-run` must be read-only (cycle-review regression).
+
+    Dry-run is a preview contract across the whole CLI (`use zai`/`use default`
+    dry-run never write). The uninstall handler used to ignore ``--dry-run`` and
+    delete the entry for real — this guards that it shows a preview and leaves
+    the config byte-for-byte unchanged.
+    """
+    # Install first so there is something to preview removing.
+    _run_cli(["mcp", "install", "zread", "--tool", "claude-code", "--api-key", _KEY])
+    path = tool_config_path(Tool.CLAUDE_CODE, _isolate_home)
+    before = path.read_text(encoding="utf-8")
+    assert "zread" in before
+
+    rc, out, _ = _run_cli(
+        ["mcp", "uninstall", "zread", "--tool", "claude-code", "--dry-run"]
+    )
+    assert rc == 0
+    # The config must be byte-for-byte unchanged after a dry-run.
+    assert path.read_text(encoding="utf-8") == before
+    # And the preview must NOT claim it was removed.
+    assert "removed" not in out
+    assert "would remove" in out or "dry-run" in out.lower()
+
+

@@ -664,12 +664,31 @@ def _handle_mcp_uninstall(args: argparse.Namespace) -> int:
     """Remove a preset MCP server from a tool's MCP config (headless, opt-in).
 
     Delegates to :func:`zai_python_helper.mcp.uninstall_mcp`. Idempotent: an
-    absent id writes nothing and reports "not installed".
+    absent id writes nothing and reports "not installed". ``--dry-run`` is
+    read-only (the same contract as ``use zai``/``use default`` dry-run): it
+    reports whether the id WOULD be removed, without touching the config.
     """
-    from zai_python_helper.mcp import uninstall_mcp
+    from zai_python_helper.mcp import (
+        is_installed,
+        read_config,
+        tool_config_path,
+        uninstall_mcp,
+    )
 
     tool = _resolve_mcp_tool(args.tool)
     mcp_id = args.mcp_id
+    dry_run = getattr(args, "dry_run", False)
+
+    if dry_run:
+        # Read-only preview: never call the mutator. Resolve the live config
+        # (Path.home(), the same place the real uninstall targets) and report
+        # whether the id is present — without writing anything.
+        doc = read_config(tool_config_path(tool, Path.home()))
+        present = is_installed(doc, tool, mcp_id)
+        label = "would remove" if present else "not installed (no change)"
+        print(f"--dry-run: {mcp_id}: {label} from {tool.value}")
+        return 0
+
     changed = uninstall_mcp(tool, mcp_id)
     label = "removed" if changed else "not installed (no change)"
     print(f"  {mcp_id}: {label} from {tool.value}")
