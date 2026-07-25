@@ -387,34 +387,20 @@ def _handle_use_default(args: argparse.Namespace) -> int:
 
 
 def _handle_status(args: argparse.Namespace) -> int:
-    """Print current status and whether Z.ai is active."""
-    from zai_python_helper import __version__
-    from zai_python_helper.backends import JsonBackend, ShellBackend
-    from zai_python_helper.core.planner.claude_code import postconditions
+    """Print the current Claude Code ⇄ Z.ai integration state.
 
-    region = Region(getattr(args, "region", Region.GLOBAL.value))
+    Delegates to :mod:`zai_python_helper.status` (read-only detect + render).
+    Detection is read-only: no writes, no network. The ``--region`` flag
+    (added by S2 for the postconditions-based stub) is accepted for CLI
+    compatibility but not used — ``status`` auto-detects the region from
+    the configured endpoint.
+    """
+    from zai_python_helper.paths import Paths
+    from zai_python_helper.status import detect_status, render_status
+
     paths = Paths.default()
-
-    settings_doc = JsonBackend.read(paths.claude_settings)
-    zshrc_text = ShellBackend.read(paths.zshrc)
-    active = postconditions(
-        region, settings_doc=settings_doc, zshrc_text=zshrc_text
-    )
-
-    lines = [
-        "Status:",
-        f"  version: {__version__}",
-        f"  region: {region.value}",
-        f"  zai_active: {active}",
-        f"  state_dir: {paths.state_dir}",
-        "",
-        "Config paths:",
-        f"  claude_settings: {paths.claude_settings}",
-        f"  claude_json: {paths.claude_json}",
-        f"  zshrc: {paths.zshrc}",
-        f"  ownership_json: {paths.ownership_json}",
-    ]
-    print("\n".join(lines))
+    report = detect_status(paths)
+    print(render_status(report))
     return 0
 
 
