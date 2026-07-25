@@ -259,6 +259,37 @@ def _run_recovery(paths: Paths, recover_fn) -> None:
         )
 
 
+def _revert_decisions(journal_records: dict, settings_doc: dict | None) -> dict:
+    """Compute a per-key :class:`RevertDecision` from the journal + live settings.
+
+    Pure over the inputs (the caller reads them under the lock so they are a
+    consistent snapshot). RESTORE → the value is still ours, put back the
+    prior; REFUSE → changed externally or no provenance, leave it (warn);
+    CLEAR is unused in the revert path (no-provenance is REFUSE, not blind
+    deletion).
+    """
+    from zai_python_helper.core.planner.claude_code import revert_key_set
+    from zai_python_helper.ownership import revert
+
+    current_env = (settings_doc or {}).get("env") or {}
+    return {
+        key: revert(
+            journal_records,
+            _OWNERSHIP_TOOL,
+            key,
+            current_env.get(key) if key in current_env else None,
+        )
+        for key in revert_key_set()
+    }
+
+
+def _print_refuse_warnings(decisions: dict) -> None:
+    """Surface REFUSE decisions as warnings (the user must see what we skipped)."""
+    for d in decisions.values():
+        if getattr(d, "action", None) and d.action.name == "REFUSE":
+            print(f"  warning: {d.reason}")
+
+
 def _handle_list(args: argparse.Namespace) -> int:
     """List available Z.ai model presets."""
     from zai_python_helper.constants import (
@@ -373,57 +404,77 @@ def _handle_use_zai(args: argparse.Namespace) -> int:
         _all_managed_model_keys,
     )
 
-    settings_doc = JsonBackend.read(paths.claude_settings)
-    claude_json_doc = JsonBackend.read(paths.claude_json)
-    zshrc_text = ShellBackend.read(paths.zshrc)
-
-    plan = plan_zai(
-        spec,
-        region,
-        settings_doc=settings_doc,
-        claude_json_doc=claude_json_doc,
-        zshrc_text=zshrc_text,
-        auth_token=auth_token,
-    )
-
     print(f"Configuring Z.ai provider (mode: {mode.value}, region: {region.value})")
 
     if dry_run:
+        # Dry-run is read-only: read state, plan, preview. No lock, no write.
+        settings_doc = JsonBackend.read(paths.claude_settings)
+        claude_json_doc = JsonBackend.read(paths.claude_json)
+        zshrc_text = ShellBackend.read(paths.zshrc)
+        plan = plan_zai(
+            spec,
+            region,
+            settings_doc=settings_doc,
+            claude_json_doc=claude_json_doc,
+            zshrc_text=zshrc_text,
+            auth_token=auth_token,
+        )
         print("--dry-run: no files written")
         if plan.is_empty:
             print("(no changes — already in desired state)")
         _apply_plan(paths, plan, dry_run=True)
         return 0
 
-    # Ownership journal (ADR-004): for every key we are about to set/remove,
-    # record its PRIOR value/presence + a hash of what we set, so a later
-    # ``use default`` can restore it safely. The prior is read from the
-    # PRE-patch settings_doc (captured above); the set value comes from the
-    # planned (desired) settings doc. The journal write is performed under
-    # the SAME process lock as the file commit (on_locked) so the two stay
-    # consistent — no window where the files reflect activation but the
-    # journal does not (or vice versa).
-    records = _build_takeover_records(
-        plan,
-        prior_doc=settings_doc,
-        managed_keys=set(MANAGED_ZAI_KEYS) | set(_all_managed_model_keys()),
-        removed_keys=set(REMOVED_ON_ZAI_KEYS),
-    )
-
+    # Real activation: the ENTIRE read → plan → ownership-capture → commit
+    # happens inside ONE held ProcessLock (ADR-005 / S3 finding #6). The lock
+    # must serialize the state used to PLAN, not only the writes — otherwise a
+    # concurrent ``use default`` could restore the prior between our read and
+    # our commit, and we would journal the (now-stale) value we read as the
+    # prior. Recovery also runs under this lock (it takes the lock itself, so
+    # it serializes with us) before we read any state.
     from zai_python_helper.ownership import OwnershipJournal
-    from zai_python_helper.patchplan import apply_plan_under_lock, recover
+    from zai_python_helper.patchplan import ProcessLock, apply_plan_locked, recover
 
-    # Roll forward any interrupted prior run BEFORE we begin a new activation.
     _run_recovery(paths, recover)
 
-    journal = OwnershipJournal(paths.ownership_json)
+    with ProcessLock(paths.lock_file):
+        # Read state, plan, and capture ownership — all inside the lock so a
+        # concurrent revert cannot mutate the config between our read and our
+        # commit (and so the takeover prior reflects exactly the pre-commit
+        # state we are about to overwrite).
+        settings_doc = JsonBackend.read(paths.claude_settings)
+        claude_json_doc = JsonBackend.read(paths.claude_json)
+        zshrc_text = ShellBackend.read(paths.zshrc)
 
-    def _persist_journal() -> None:
-        if records:
-            current = journal.read()
-            journal.write(_merge_takeover_records(current, records))
+        plan = plan_zai(
+            spec,
+            region,
+            settings_doc=settings_doc,
+            claude_json_doc=claude_json_doc,
+            zshrc_text=zshrc_text,
+            auth_token=auth_token,
+        )
 
-    written = apply_plan_under_lock(paths, plan, on_locked=_persist_journal)
+        # Ownership journal (ADR-004): for every key we are about to
+        # set/remove, record its PRIOR value/presence + a hash of what we set.
+        # take_over is idempotent w.r.t. the restore point (a repeat
+        # activation of the same value preserves the ORIGINAL prior), so a
+        # re-activation does not lose the user's first pre-activation value.
+        records = _build_takeover_records(
+            plan,
+            prior_doc=settings_doc,
+            managed_keys=set(MANAGED_ZAI_KEYS) | set(_all_managed_model_keys()),
+            removed_keys=set(REMOVED_ON_ZAI_KEYS),
+        )
+
+        journal = OwnershipJournal(paths.ownership_json)
+
+        def _persist_journal() -> None:
+            if records:
+                current = journal.read()
+                journal.write(_merge_takeover_records(current, records))
+
+        written = apply_plan_locked(paths, plan, on_locked=_persist_journal)
     if not written:
         print("(no changes — already in desired state)")
     else:
@@ -459,7 +510,6 @@ def _handle_use_default(args: argparse.Namespace) -> int:
     """
     from zai_python_helper.core.domain import ModelMode
     from zai_python_helper.core.planner import plan_revert
-    from zai_python_helper.core.planner.claude_code import revert_key_set
     from zai_python_helper.errors import ValidationError
 
     # Model mode is irrelevant to removal (the managed set is derived from it),
@@ -481,50 +531,43 @@ def _handle_use_default(args: argparse.Namespace) -> int:
             raise ValidationError(f"{', '.join(used)} only apply to --mode custom")
 
     from zai_python_helper.backends import JsonBackend, ShellBackend
-    from zai_python_helper.ownership import OwnershipJournal, revert
-    from zai_python_helper.patchplan import apply_plan_under_lock, recover
+    from zai_python_helper.ownership import OwnershipJournal
+    from zai_python_helper.patchplan import ProcessLock, apply_plan_locked, recover
 
-    # Roll forward any interrupted prior run first.
+    # Roll forward any interrupted prior run first (recover takes the lock
+    # itself, so it serializes with the commit below).
     _run_recovery(paths, recover)
-
-    settings_doc = JsonBackend.read(paths.claude_settings)
-    zshrc_text = ShellBackend.read(paths.zshrc)
-    journal_records = OwnershipJournal(paths.ownership_json).read()
-
-    # Compute a per-key revert decision from the journal + the LIVE settings.
-    # RESTORE → put back the prior value; CLEAR → drop the managed value;
-    # REFUSE → the key changed externally, leave it (warn below).
-    current_env = (settings_doc or {}).get("env") or {}
-    decisions = {
-        key: revert(
-            journal_records,
-            _OWNERSHIP_TOOL,
-            key,
-            current_env.get(key) if key in current_env else None,
-        )
-        for key in revert_key_set()
-    }
-
-    plan = plan_revert(
-        decisions, settings_doc=settings_doc, zshrc_text=zshrc_text
-    )
 
     print(f"Reverting to default provider (region: {region.value})")
 
-    # Surface REFUSE decisions as warnings BEFORE writing — the user should
-    # see which keys we declined to touch (and why), regardless of dry-run.
-    refused = [d for d in decisions.values() if d.action.name == "REFUSE"]
-    for d in refused:
-        print(f"  warning: {d.reason}")
-
     if dry_run:
+        # Read-only preview: no lock, no write.
+        settings_doc = JsonBackend.read(paths.claude_settings)
+        zshrc_text = ShellBackend.read(paths.zshrc)
+        journal_records = OwnershipJournal(paths.ownership_json).read()
+        decisions = _revert_decisions(journal_records, settings_doc)
+        plan = plan_revert(decisions, settings_doc=settings_doc, zshrc_text=zshrc_text)
+        _print_refuse_warnings(decisions)
         print("--dry-run: no files written")
         if plan.is_empty:
             print("(no changes — already at default)")
         _apply_plan(paths, plan, dry_run=True)
         return 0
 
-    written = apply_plan_under_lock(paths, plan)
+    # Read journal + LIVE settings, compute revert decisions, and commit — all
+    # inside ONE held ProcessLock (ADR-005 / S3 finding #6): a concurrent
+    # ``use zai`` must not be able to change the config between our decision
+    # read and our commit (which would make the decisions stale).
+    with ProcessLock(paths.lock_file):
+        settings_doc = JsonBackend.read(paths.claude_settings)
+        zshrc_text = ShellBackend.read(paths.zshrc)
+        journal_records = OwnershipJournal(paths.ownership_json).read()
+        decisions = _revert_decisions(journal_records, settings_doc)
+        plan = plan_revert(
+            decisions, settings_doc=settings_doc, zshrc_text=zshrc_text
+        )
+        _print_refuse_warnings(decisions)
+        written = apply_plan_locked(paths, plan)
     if not written:
         print("(no changes — already at default)")
     else:

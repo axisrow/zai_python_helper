@@ -411,3 +411,49 @@ class TestApplyPlanUnderLock:
         written = apply_plan_under_lock(paths, plan, on_locked=on_locked)
         assert written == []  # no file writes
         assert called["v"] is True  # but the side-effect ran under the lock
+
+    def test_partial_write_failure_retains_manifest_for_rollforward(
+        self, tmp_path, monkeypatch
+    ):
+        """A write that fails mid-commit LEAVES the manifest (S3 regression, #4).
+
+        If the 2nd file write raises after the 1st committed, the manifest must
+        survive so the next invocation's recover() rolls forward. Deleting it
+        in a finally would strand mixed state with no recovery path — defeating
+        ADR-005 for the only case that produces recoverable mixed state.
+        """
+        import zai_python_helper.patchplan as pp
+
+        paths = _paths(tmp_path)
+        plan = _plan(
+            _write_json_delta(FileTag.SETTINGS, {"env": {"A": "1"}}),
+            _write_json_delta(FileTag.CLAUDE_JSON, {"B": "2"}),
+        )
+
+        real_apply = pp._apply_entry
+        call = {"n": 0}
+
+        def failing_apply(entry):
+            call["n"] += 1
+            if call["n"] == 2:
+                raise OSError("simulated mid-commit write failure")
+            real_apply(entry)
+
+        monkeypatch.setattr(pp, "_apply_entry", failing_apply)
+
+        with pytest.raises(OSError):
+            apply_plan_under_lock(paths, plan)
+
+        # File 1 committed; file 2 did not — mixed state on disk.
+        assert json.loads(paths.claude_settings.read_text())["env"]["A"] == "1"
+        assert not paths.claude_json.exists()
+        # The manifest SURVIVES so the next run can roll forward.
+        assert paths.recovery_json.exists()
+
+        # And recover() (now lock-owning) completes the roll-forward: both
+        # files end at the manifest's final state, manifest consumed.
+        monkeypatch.undo()
+        applied = recover(paths)
+        assert applied == ["settings", "claude_json"]
+        assert json.loads(paths.claude_json.read_text())["B"] == "2"
+        assert not paths.recovery_json.exists()

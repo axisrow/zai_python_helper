@@ -161,6 +161,16 @@ def take_over(
     NEW dict with the ``(tool, key)`` entry set. The input is never mutated.
     The caller persists the result via :class:`OwnershipJournal`.
 
+    **Idempotent w.r.t. the restore point (ADR-004).** If ``(tool, key)``
+    already has a journal entry with the SAME ``set_hash`` — i.e. we are
+    re-activating the exact value we already own (a repeat ``use zai`` that
+    changes nothing) — the EXISTING entry is preserved untouched, so the
+    original prior value/presence (the real restore point) is not overwritten
+    by the now-current value. Without this, P→Z→Z would record Z as the prior
+    on the second activation and a later ``use default`` would restore Z
+    instead of the user's original P. Only when ``set_hash`` DIFFERS (a genuine
+    value change, e.g. a rotated token) do we record the new prior.
+
     Args:
         records: The current journal (top-level ``{tool: {key: record}}``).
         tool: The tool name (e.g. ``"claude_code"``).
@@ -175,13 +185,24 @@ def take_over(
     Returns:
         A new journal dict with the updated entry.
     """
+    new_records: dict[str, Any] = {k: dict(v) for k, v in records.items()}
+    tool_bucket = dict(new_records.get(tool, {}))
+
+    existing = tool_bucket.get(key)
+    if isinstance(existing, dict):
+        existing_record = OwnershipRecord.from_dict(existing)
+        # Re-activating the SAME value we already own: keep the ORIGINAL
+        # restore point (do not let a repeat activation overwrite the prior
+        # with the now-current value). Only a genuine value change (different
+        # set_hash) records a new prior.
+        if existing_record.set_hash == set_hash:
+            return new_records  # entry unchanged — original prior preserved
+
     record = OwnershipRecord(
         prior_value=prior_value,
         prior_present=prior_present,
         set_hash=set_hash,
     )
-    new_records: dict[str, Any] = {k: dict(v) for k, v in records.items()}
-    tool_bucket = dict(new_records.get(tool, {}))
     tool_bucket[key] = record.to_dict()
     new_records[tool] = tool_bucket
     return new_records
@@ -195,20 +216,27 @@ def revert(
 ) -> RevertDecision:
     """Decide how to revert one ``(tool, key)`` given its current value.
 
-    PURE decision over the journal dict. The three cases (ADR-004):
+    PURE decision over the journal dict, following ADR-004's
+    **self-invalidating** rule: we only mutate a key whose current state is
+    still attributable to us. The cases:
 
-    1. **No journal entry** → ``CLEAR``. We never owned this key, so the
-       honest inverse is to drop our managed value (caller removes it).
-    2. **Entry exists and ``set_hash`` matches ``current_value``** →
-       ``RESTORE``. The value is still the one we set, so restoring the
-       prior value/presence is safe and correct.
-    3. **Entry exists but the value changed externally** → ``REFUSE``. The
+    1. **Entry exists, ``set_hash`` matches ``current_value``** → ``RESTORE``.
+       The value is still the one we set, so restoring the prior
+       value/presence is safe and correct.
+    2. **Entry exists but the value changed externally** → ``REFUSE``. The
        user (or another tool) edited the key since activation; we must not
        clobber it. The caller warns and leaves the key alone.
+    3. **No journal entry** → ``REFUSE``. We have no provenance proving we
+       own this key, so we must NOT delete or overwrite a value we cannot
+       attribute to ourselves. (This is the fix for the S3 blind-deletion
+       regression: ``use default`` with no prior ``use zai`` must not wipe a
+       key the user configured by hand.)
 
-    A ``None`` ``set_hash`` (we took ownership by removing the key) skips the
-    match check and restores the prior unconditionally — there is no set
-    value to have drifted from.
+    A ``None`` ``set_hash`` records ownership-by-removal (we deleted the key
+    on activation, e.g. ``ANTHROPIC_API_KEY``). The "value we set" is the
+    key's ABSENCE, so revert restores the prior only while the key is STILL
+    ABSENT (``current_value is None``); if a value has since appeared (the
+    user added a new key), that is an external change → ``REFUSE``.
 
     Args:
         records: The current journal dict.
@@ -223,25 +251,43 @@ def revert(
     tool_bucket = records.get(tool) or {}
     raw = tool_bucket.get(key)
     if raw is None:
+        # No provenance: we cannot prove we own this key → refuse to touch it
+        # (never blindly delete a value we cannot attribute to ourselves).
         return RevertDecision(
-            action=RevertAction.CLEAR,
+            action=RevertAction.REFUSE,
             key=key,
             prior_value=None,
             prior_present=False,
-            reason=f"no journal entry for {tool}/{key} — clearing managed value",
+            reason=(
+                f"no journal entry for {tool}/{key} — cannot prove ownership, "
+                "not touching"
+            ),
         )
 
     record = OwnershipRecord.from_dict(raw if isinstance(raw, dict) else {})
 
-    # We took ownership by removing the key — nothing to validate against;
-    # restore the prior value/presence unconditionally.
+    # We took ownership by REMOVING the key. The "value we set" is absence:
+    # restore the prior only while the key is still absent. If a value has
+    # since appeared (the user added a new key), that is an external change →
+    # refuse to overwrite it.
     if record.set_hash is None:
+        if current_value is None:
+            return RevertDecision(
+                action=RevertAction.RESTORE,
+                key=key,
+                prior_value=record.prior_value,
+                prior_present=record.prior_present,
+                reason=f"{tool}/{key}: still absent since our removal, restoring prior",
+            )
         return RevertDecision(
-            action=RevertAction.RESTORE,
+            action=RevertAction.REFUSE,
             key=key,
             prior_value=record.prior_value,
             prior_present=record.prior_present,
-            reason=f"{tool}/{key}: ownership was a removal, restoring prior",
+            reason=(
+                f"{tool}/{key} reappeared after our removal "
+                "— not overwriting the new value"
+            ),
         )
 
     # We set a value; only restore if the current value is still ours.

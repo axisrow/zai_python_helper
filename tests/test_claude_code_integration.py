@@ -145,25 +145,26 @@ class TestIdempotency:
 
 class TestUseDefault:
     def test_default_removes_four_managed_keys(self, tmp_path, monkeypatch):
+        """S3: managed keys are removed via OWNERSHIP (RESTORE of an absent prior).
+
+        Previously (S2) ``use default`` blindly deleted managed keys even with no
+        provenance. S3 changed that to non-destructive revert (ADR-004): the
+        four managed ZAI keys are removed because they were absent before
+        activation and ``use zai`` recorded that absence — so ``revert``
+        RESTORES the (absent) prior. Foreign keys survive. The keys are NOT
+        touched without a prior ``use zai`` (see
+        test_use_default_without_prior_activation_refuses).
+        """
         monkeypatch.setenv("HOME", str(tmp_path))
-        _seed(
-            tmp_path,
-            settings={
-                "env": {
-                    "SOME_FOREIGN_KEY": "keep",
-                    "ANTHROPIC_AUTH_TOKEN": TOKEN,
-                    "ANTHROPIC_BASE_URL": GLOBAL_URL,
-                    "API_TIMEOUT_MS": "3000000",
-                    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
-                }
-            },
-        )
+        _seed(tmp_path, settings={"env": {"SOME_FOREIGN_KEY": "keep"}})
+        # Activate (the managed keys were ABSENT before — journaled as such).
+        _run(["use", "zai", "--mode", "default", "--region", "global", "--api-key", TOKEN])
         rc = _run(["use", "default", "--mode", "default", "--region", "global"])
         assert rc == 0
 
         settings = json.loads(Paths.from_home(tmp_path).claude_settings.read_text())
         env = settings["env"]
-        # The four always-managed keys gone.
+        # The four always-managed keys gone (restored to their absent prior).
         for key in (
             "ANTHROPIC_AUTH_TOKEN",
             "ANTHROPIC_BASE_URL",
@@ -280,6 +281,74 @@ class TestOwnershipJournalE2E:
         mode = journal.stat().st_mode & 0o777
         assert mode == 0o600
 
+    def test_repeat_activation_preserves_original_restore_point(
+        self, tmp_path, monkeypatch
+    ):
+        """P→Z→Z→default restores the ORIGINAL P, not the re-activated Z.
+
+        S3 regression (Codex finding #1): a repeat ``use zai`` (incl. an
+        all-NOOP one) must NOT overwrite the journal's prior with the
+        now-current value. The original pre-activation value is the restore
+        point; re-activating the same value preserves it. Includes the
+        ANTHROPIC_API_KEY (which ``use zai`` removes): a repeat activation
+        must still restore the user's original API key on revert.
+        """
+        monkeypatch.setenv("HOME", str(tmp_path))
+        original_token = "sk-user-original-P"
+        original_apikey = "sk-user-apikey-P"
+        _seed(
+            tmp_path,
+            settings={
+                "env": {
+                    "ANTHROPIC_AUTH_TOKEN": original_token,
+                    "ANTHROPIC_API_KEY": original_apikey,
+                }
+            },
+        )
+        # Activate Z, then re-activate Z (same value → idempotent).
+        _run(["use", "zai", "--api-key", TOKEN])
+        _run(["use", "zai", "--api-key", TOKEN])  # repeat — must not clobber prior
+        _run(["use", "default", "--region", "global"])
+
+        env = json.loads(Paths.from_home(tmp_path).claude_settings.read_text()).get(
+            "env", {}
+        )
+        # ORIGINAL values restored, not the Z.ai token.
+        assert env.get("ANTHROPIC_AUTH_TOKEN") == original_token
+        # The API key we removed on activation is restored to the original.
+        assert env.get("ANTHROPIC_API_KEY") == original_apikey
+
+    def test_use_default_refuses_when_user_readded_api_key(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """If the user re-added ANTHROPIC_API_KEY after use zai removed it,
+        use default REFUSES (does not clobber the new key).
+
+        S3 regression (Codex finding #2): ownership-by-removal must restore the
+        prior ONLY while the key is still absent. A reappeared value is an
+        external change → REFUSE + warn.
+        """
+        monkeypatch.setenv("HOME", str(tmp_path))
+        _seed(
+            tmp_path,
+            settings={"env": {"ANTHROPIC_API_KEY": "sk-old-removed-on-activation"}},
+        )
+        _run(["use", "zai", "--api-key", TOKEN])  # removes the old API key
+        capsys.readouterr()
+
+        # User manually adds a NEW API key after activation.
+        settings_path = Paths.from_home(tmp_path).claude_settings
+        doc = json.loads(settings_path.read_text())
+        doc.setdefault("env", {})["ANTHROPIC_API_KEY"] = "sk-user-new-after-zai"
+        settings_path.write_text(json.dumps(doc))
+
+        _run(["use", "default", "--region", "global"])
+
+        env = json.loads(settings_path.read_text()).get("env", {})
+        # The user's NEW key is preserved (not replaced by the stale old one).
+        assert env.get("ANTHROPIC_API_KEY") == "sk-user-new-after-zai"
+        assert "reappeared" in capsys.readouterr().out
+
     def test_use_default_restores_original_auth_token(self, tmp_path, monkeypatch):
         """The headline S3 guarantee: original AUTH_TOKEN restored after zai→default."""
         monkeypatch.setenv("HOME", str(tmp_path))
@@ -337,8 +406,16 @@ class TestOwnershipJournalE2E:
         assert Paths.from_home(tmp_path).claude_settings.read_text() == snapshot
         assert "no changes" in capsys.readouterr().out.lower()
 
-    def test_use_default_without_prior_activation_is_clear(self, tmp_path, monkeypatch):
-        """``use default`` with no journal (never activated) CLEARs managed keys."""
+    def test_use_default_without_prior_activation_refuses(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """S3: ``use default`` with NO journal REFUSES to touch unproven keys.
+
+        Non-destructive invariant (ADR-004 / Codex finding #3): without a
+        prior ``use zai`` there is no provenance, so the tool must NOT delete
+        managed-name keys the user may have configured by hand. The CLI warns
+        and leaves everything; only the owned .zshrc block (if any) is removed.
+        """
         monkeypatch.setenv("HOME", str(tmp_path))
         _seed(
             tmp_path,
@@ -355,10 +432,12 @@ class TestOwnershipJournalE2E:
         env = json.loads(Paths.from_home(tmp_path).claude_settings.read_text()).get(
             "env", {}
         )
-        # No journal → CLEAR for managed keys; foreign survives.
-        assert "ANTHROPIC_AUTH_TOKEN" not in env
-        assert "ANTHROPIC_BASE_URL" not in env
-        assert env == {"FOREIGN": "keep"}
+        # No provenance → keys left untouched (NOT blindly deleted).
+        assert env.get("ANTHROPIC_AUTH_TOKEN") == "sk-stray"
+        assert env.get("ANTHROPIC_BASE_URL") == "https://api.z.ai/api/anthropic"
+        assert env.get("FOREIGN") == "keep"
+        out = capsys.readouterr().out
+        assert "cannot prove ownership" in out
 
     def test_use_zai_rolls_forward_after_interrupted_prior_run(
         self, tmp_path, monkeypatch, capsys

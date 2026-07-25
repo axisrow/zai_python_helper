@@ -87,8 +87,12 @@ def test_take_over_preserves_other_keys_and_tools():
     assert out2["opencode"]["X"]["set_hash"] == hash_value("v")
 
 
-def test_take_over_overwrites_same_key_on_re_activation():
-    """A second take_over of the same key refreshes the entry (re-activation)."""
+def test_take_over_refreshes_on_genuine_value_change():
+    """A take_over with a DIFFERENT set_hash records the new prior (rotation).
+
+    Distinct from the repeat-activation idempotency case: this is a real value
+    change (e.g. a rotated token), so the new prior is the value present now.
+    """
     records = take_over({}, TOOL, "K", "old", True, hash_value("first"))
     records = take_over(records, TOOL, "K", "second", True, hash_value("renewed"))
     assert records[TOOL]["K"]["prior_value"] == "second"
@@ -141,26 +145,35 @@ def test_revert_refuse_when_key_now_absent_but_we_set_it():
     assert decision.action == RevertAction.REFUSE
 
 
-def test_revert_clear_when_no_entry():
-    """No journal entry → CLEAR the managed value (honest inverse)."""
+def test_revert_refuses_when_no_entry():
+    """No journal entry → REFUSE (we cannot prove ownership; do not delete).
+
+    S3 regression fix (Codex finding #3): missing provenance must NOT fall
+    back to blind deletion. ``use default`` with no prior ``use zai`` must
+    not wipe a key the user configured by hand. The honest inverse when we
+    have no provenance is to leave the value untouched + warn.
+    """
     decision = revert({}, TOOL, "K", current_value="whatever")
-    assert decision.action == RevertAction.CLEAR
+    assert decision.action == RevertAction.REFUSE
     assert decision.prior_present is False
+    assert "cannot prove ownership" in decision.reason
 
 
-def test_revert_clear_for_unrelated_tool():
-    """An entry under another tool does not count for this tool → CLEAR."""
+def test_revert_refuses_for_unrelated_tool():
+    """An entry under another tool does not count for this tool → REFUSE."""
     records = {"opencode": {"K": {"prior_value": "x", "prior_present": True, "set_hash": "h"}}}
     decision = revert(records, TOOL, "K", current_value="x")
-    assert decision.action == RevertAction.CLEAR
+    assert decision.action == RevertAction.REFUSE
 
 
-def test_revert_ownership_by_removal_restores_unconditionally():
-    """set_hash None (we took ownership by REMOVING the key) → RESTORE prior.
+def test_revert_ownership_by_removal_restores_while_absent():
+    """set_hash None (we took ownership by REMOVING the key) → RESTORE prior,
+    but ONLY while the key is still absent.
 
-    Used for ANTHROPIC_API_KEY: use zai removes it, so revert restores the
-    user's original key regardless of the current value (there's no set value
-    to have drifted from).
+    Used for ANTHROPIC_API_KEY: ``use zai`` removes it, so revert restores the
+    user's original key — but only if the key is still absent. If a value has
+    since appeared (the user added a new key), that is an external change and
+    we REFUSE rather than clobber it (S3 regression fix, Codex finding #2).
     """
     records = take_over({}, TOOL, "ANTHROPIC_API_KEY", prior_value="sk-original",
                         prior_present=True, set_hash=None)
@@ -169,6 +182,45 @@ def test_revert_ownership_by_removal_restores_unconditionally():
     assert decision.action == RevertAction.RESTORE
     assert decision.prior_value == "sk-original"
     assert decision.prior_present is True
+
+
+def test_revert_ownership_by_removal_refuses_when_value_reappeared():
+    """If a value reappeared after our removal, REFUSE — do not clobber it.
+
+    S3 regression fix (Codex finding #2): ``use zai`` removes an old API key;
+    the user later adds a NEW one. ``use default`` must NOT silently replace
+    the new key with the stale prior — the appearance of a value is an
+    external change.
+    """
+    records = take_over({}, TOOL, "ANTHROPIC_API_KEY", prior_value="sk-old",
+                        prior_present=True, set_hash=None)
+    decision = revert(records, TOOL, "ANTHROPIC_API_KEY", current_value="sk-user-added-new")
+    assert decision.action == RevertAction.REFUSE
+    assert "reappeared" in decision.reason
+
+
+def test_take_over_preserves_restore_point_on_repeat_activation():
+    """Re-activating the SAME value keeps the ORIGINAL prior (idempotent).
+
+    S3 regression fix (Codex finding #1): P→Z→Z must not overwrite the
+    journal's prior=P on the second activation. Only a genuine value change
+    (different set_hash) records a new prior.
+    """
+    zai_hash = hash_value("sk-zai")
+    # First activation: prior was the user's original P.
+    records = take_over({}, TOOL, "K", prior_value="P", prior_present=True,
+                        set_hash=zai_hash)
+    # Second activation of the SAME value: prior would now be the current
+    # value "Z" if we blindly rewrote — but we must keep the original "P".
+    records = take_over(records, TOOL, "K", prior_value="Z", prior_present=True,
+                        set_hash=zai_hash)
+    assert records[TOOL]["K"]["prior_value"] == "P"  # original restore point kept
+
+    # A genuine value change (rotated token) DOES record the new prior.
+    records = take_over(records, TOOL, "K", prior_value="Z", prior_present=True,
+                        set_hash=hash_value("sk-zai-rotated"))
+    assert records[TOOL]["K"]["prior_value"] == "Z"
+    assert records[TOOL]["K"]["set_hash"] == hash_value("sk-zai-rotated")
 
 
 def test_revert_decision_is_frozen():

@@ -308,22 +308,84 @@ def recover(paths: Paths) -> list[str]:
     a fully-applied manifest is harmless, and replaying a half-applied one
     finishes the job. The manifest is deleted once replayed.
 
+    **Held under the same :class:`ProcessLock` as a commit** (ADR-005): an
+    in-flight transaction's manifest must not be mistaken for crash residue
+    by a concurrent invocation. By taking the lock here, a second process
+    cannot replay/unlink a manifest that belongs to an active commit. A
+    manifest that exists while the lock is free genuinely belongs to a
+    crashed prior run and is safe to roll forward.
+
     Returns:
         The list of tags (e.g. ``["settings", "zshrc"]``) that recovery
         wrote, in manifest order. Empty if no manifest existed.
     """
-    entries = _read_manifest(paths.recovery_json)
-    if not entries:
-        # An absent/empty manifest means nothing to recover. Ensure no stale
-        # (e.g. zero-byte) manifest lingers.
+    with ProcessLock(paths.lock_file):
+        entries = _read_manifest(paths.recovery_json)
+        if not entries:
+            # An absent/empty manifest means nothing to recover. Ensure no
+            # stale (e.g. zero-byte) manifest lingers.
+            _remove_manifest(paths.recovery_json)
+            return []
+        applied = []
+        for entry in entries:
+            _apply_entry(entry)
+            applied.append(entry.tag)
         _remove_manifest(paths.recovery_json)
-        return []
-    applied = []
+        return applied
+
+
+def apply_plan_locked(
+    paths: Paths,
+    plan: PatchPlan,
+    *,
+    on_locked: Any = None,
+) -> list[FileTag]:
+    """Commit ``plan`` assuming the caller already holds :class:`ProcessLock`.
+
+    The lock-scoped core of :func:`apply_plan_under_lock`, factored out so the
+    CLI can read config, plan, and capture ownership **all inside one held
+    lock** (ADR-005 / S3 finding #6: the lock must serialize the state used to
+    plan, not only the writes). The caller is responsible for acquiring the
+    process lock (and for running :func:`recover` first, also under that lock).
+
+    Contract inside the held lock:
+    1. Invoke ``on_locked()`` (if given) — BEFORE the manifest is written. The
+       CLI uses this to persist the ownership journal under the same lock.
+    2. Write the recovery manifest (so an interrupted run can roll forward).
+    3. Write each file via its atomic primitive (the actual commit).
+    4. Delete the manifest ONLY after every write succeeds. On a partial
+       failure, LEAVE it so the next :func:`recover` rolls forward.
+
+    Returns the tags actually written, in plan order. An all-NOOP plan still
+    runs ``on_locked`` (e.g. an idempotent activation that refreshes the
+    journal) and returns ``[]``.
+    """
+    entries: list[_RecoveryEntry] = []
+    written: list[FileTag] = []
+    for delta in plan.deltas:
+        entry = _delta_to_entry(delta, paths)
+        if entry is not None:
+            entries.append(entry)
+            written.append(delta.tag)
+
+    if on_locked is not None:
+        on_locked()
+    if not entries:
+        # No file writes, but a side-effect may have run under the lock (e.g.
+        # an idempotent activation that still refreshed the journal).
+        return written
+    # Persist the manifest BEFORE any managed-file write so a crash at any
+    # later point is recoverable. The manifest holds final content, so
+    # recovery is a pure replay (no re-read of live state).
+    _write_manifest(paths.recovery_json, entries)
+    # Commit every file. On FULL success, drop the manifest (commit complete).
+    # On a PARTIAL failure, LEAVE the manifest so the next invocation rolls
+    # forward — deleting it here would strand mixed state with no recovery
+    # path (S3 regression fix, Codex finding #4).
     for entry in entries:
         _apply_entry(entry)
-        applied.append(entry.tag)
     _remove_manifest(paths.recovery_json)
-    return applied
+    return written
 
 
 def apply_plan_under_lock(
@@ -334,71 +396,16 @@ def apply_plan_under_lock(
 ) -> list[FileTag]:
     """Apply ``plan`` as a locked, recoverable multi-file transaction.
 
-    Contract (ADR-005):
+    Convenience wrapper: acquire :class:`ProcessLock`, then call
+    :func:`apply_plan_locked`. Use this when the caller does NOT need to read
+    config / capture ownership inside the lock. When the planning inputs MUST
+    be lock-scoped (the CLI's ``use zai`` — see S3 finding #6), the caller
+    acquires ``ProcessLock`` itself and calls :func:`apply_plan_locked`
+    directly so config-read → plan → ownership-capture → commit are one
+    atomic transaction.
 
-    1. Build recovery entries for every non-NOOP delta (the FINAL content).
-    2. If there is nothing to write, short-circuit (no manifest, no lock) —
-       UNLESS ``on_locked`` is given, in which case the lock is still taken
-       so the side-effect (e.g. writing the ownership journal) is serialized.
-    3. Acquire the process lock (serializes concurrent activations).
-    4. Invoke ``on_locked()`` (if given) — under the lock, BEFORE the manifest
-       is written. Used by the CLI to persist the ownership journal so the
-       journal and the file commit are consistent under one lock.
-    5. Write the recovery manifest (so an interrupted run can roll forward).
-    6. Write each file via its atomic primitive (the actual commit).
-    7. Delete the manifest — commit complete.
-
-    Args:
-        paths: Resolved paths (lock file + recovery manifest location).
-        plan: The fully-validated PatchPlan to commit.
-        on_locked: Optional zero-arg callable invoked while the lock is held
-            and before any file write. If it raises, the lock is released and
-            no manifest is written (the transaction aborts cleanly).
-
-    Returns the tags actually written, in plan order. ``--dry-run`` callers
-    do NOT call this (they preview only); this function always writes.
-
-    The lock is held for the whole on_locked→manifest→write→un-manifest
-    window, so two concurrent ``use`` calls cannot interleave their commits
-    or leave a manifest from one run to be replayed against the other's
-    partial state.
+    ``on_locked`` (if given) is invoked while the lock is held and before any
+    file write; if it raises, the lock is released and no manifest is written.
     """
-    entries: list[_RecoveryEntry] = []
-    written: list[FileTag] = []
-    for delta in plan.deltas:
-        entry = _delta_to_entry(delta, paths)
-        if entry is not None:
-            entries.append(entry)
-            written.append(delta.tag)
-
-    if not entries and on_locked is None:
-        # All-NOOP plan with no side-effect to serialize: nothing to commit.
-        return []
-
     with ProcessLock(paths.lock_file):
-        if on_locked is not None:
-            on_locked()
-        if not entries:
-            # No file writes, but a side-effect ran under the lock (e.g. an
-            # idempotent activation that still refreshed the journal).
-            return []
-        # Persist the manifest BEFORE any managed-file write so a crash at
-        # any later point is recoverable. The manifest holds final content,
-        # so recovery is a pure replay (no re-read of live state).
-        _write_manifest(paths.recovery_json, entries)
-        try:
-            for entry in entries:
-                _apply_entry(entry)
-        finally:
-            # Whether the writes fully succeeded or partially failed, the
-            # manifest has served its purpose for THIS run: either commit is
-            # complete (delete it) or a partial failure left mixed state that
-            # the next invocation's recover() will roll forward. In both
-            # cases the manifest should not survive a clean exit.
-            #
-            # NOTE: on a hard crash (SIGKILL) the `finally` does not run, so
-            # the manifest survives and the next invocation replays it —
-            # exactly the roll-forward guarantee ADR-005 requires.
-            _remove_manifest(paths.recovery_json)
-
-    return written
+        return apply_plan_locked(paths, plan, on_locked=on_locked)
