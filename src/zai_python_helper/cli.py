@@ -118,10 +118,20 @@ def _redact_shell_text(text: str) -> str:
     ``"a-\\"b"``, ANSI-C ``$'...'``, concatenation, trailing ``#`` comments)
     and leaked suffixes. Replacing the whole RHS is conservative (it may also
     redact a trailing comment on a secret line) but cannot leak a credential.
+
+    The leading declaration builtin is matched broadly: plain ``export``;
+    ``export -g`` (set a global from a function); and ``typeset``/``declare``
+    with a ``g`` (global) flag, e.g. ``typeset -gx`` (the canonical oh-my-zsh /
+    prezto global-export form). These are exactly the forms an ``ANTHROPIC_*``
+    override in a user's ``.zshrc`` realistically takes.
     """
-    # Match an assignment line: optional `export`, a key, `=`, then the rest
-    # of the line (the RHS we will redact wholesale for secret keys).
-    _shell_pat = re.compile(r'(?m)^(\s*export\s+)?([A-Za-z_][A-Za-z0-9_-]*)=(.*)$')
+    # Match an assignment line: a declaration prefix (export / export -g /
+    # typeset|declare with a `g` flag), a key, `=`, then the rest of the line
+    # (the RHS we will redact wholesale for secret keys).
+    _shell_pat = re.compile(
+        r'(?m)^(\s*(?:export(?:\s+-\w*)?|(?:typeset|declare)\s+-\w*g\w*)\s+)?'
+        r'([A-Za-z_][A-Za-z0-9_-]*)=(.*)$'
+    )
 
     def _replace_shell(match: re.Match[str]) -> str:
         prefix = match.group(1) or ""

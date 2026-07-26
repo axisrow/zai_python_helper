@@ -149,6 +149,23 @@ class TestRedactText:
         assert "sk-secret" not in out
         assert "<redacted>" in out
 
+    def test_shell_typeset_gx_prefix_redacted(self):
+        """Regression (Codex cycle-2): zsh ``typeset -gx KEY=SECRET`` (the
+        canonical oh-my-zsh/prezto global-export form) must redact the RHS.
+        The old prefix alternation only accepted a plain ``export``."""
+        text = 'typeset -gx ANTHROPIC_API_KEY="sk-typeset-secret"\n'
+        out = _redact_text(text)
+        assert "sk-typeset-secret" not in out
+        assert "<redacted>" in out
+
+    def test_shell_export_g_flag_redacted(self):
+        """Regression (Codex cycle-2): ``export -g KEY=SECRET`` (the bash/zsh
+        way to set a global from a function) must redact the RHS."""
+        text = "export -g OPENAI_API_KEY=sk-export-g-secret\n"
+        out = _redact_text(text)
+        assert "sk-export-g-secret" not in out
+        assert "<redacted>" in out
+
     def test_non_secret_shell_value_preserved(self):
         """A non-secret assignment is NOT redacted (fail-closed only on secrets)."""
         text = 'export PATH="/usr/local/bin:$PATH"\n'
