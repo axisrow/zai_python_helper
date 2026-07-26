@@ -300,7 +300,17 @@ def apply_revert_decisions(
             models.pop(proto_idx)
 
     new_doc: dict[str, Any] = dict(doc) if doc else {}
-    models: list[dict[str, Any]] = list(new_doc.get("customModels") or [])
+    # Deep-copy each entry dict: the RESTORE branch below writes
+    # ``models[idx]["apiKey"] = ...``, and a shallow list copy would share the
+    # entry dicts with ``doc`` — mutating the planner's input in place. That
+    # breaks ADR-001 (pure / no input mutation) AND makes ``plan_revert``'s
+    # ``factory_doc == desired`` comparison see the already-mutated input,
+    # emitting a false NOOP (the CLI then reports ``use default`` applied while
+    # the on-disk Z.ai keys remain). Copying each dict keeps the input pristine.
+    models: list[dict[str, Any]] = [
+        dict(m) if isinstance(m, dict) else m
+        for m in (new_doc.get("customModels") or [])
+    ]
 
     for key, decision in decisions.items():
         proto = _protocol_for_journal_key(key)

@@ -144,6 +144,71 @@ class TestPlanDefault:
         assert fd.plan_default(factory_doc=post).is_empty
 
 
+class TestPlanRevert:
+    def _restore(self, key, prior):
+        from zai_python_helper.ownership import RevertAction, RevertDecision
+
+        return RevertDecision(
+            action=RevertAction.RESTORE,
+            key=key,
+            prior_value=prior,
+            prior_present=True,
+            reason="restore",
+        )
+
+    def test_restore_does_not_mutate_input_and_emits_write(self):
+        """RESTORE on pre-existing entries must (a) NOT mutate the input doc
+        in place (planner input immutability, ADR-001) and (b) emit a real
+        WRITE_JSON delta when the apiKey actually changes — not a false NOOP.
+
+        Regression: ``apply_revert_decisions`` did a shallow list copy, so the
+        entry dicts stayed shared with the input; setting ``apiKey`` mutated
+        the input, and ``plan_revert`` then compared the (already-mutated)
+        input against ``desired`` and emitted NOOP — the CLI reported ``use
+        default`` applied while the on-disk Z.ai keys remained."""
+        decisions = {
+            fd.JOURNAL_KEY_ANTHROPIC_APIKEY: self._restore(
+                fd.JOURNAL_KEY_ANTHROPIC_APIKEY, "PRIOR-ANTHROPIC"
+            ),
+            fd.JOURNAL_KEY_OPENAI_APIKEY: self._restore(
+                fd.JOURNAL_KEY_OPENAI_APIKEY, "PRIOR-OPENAI"
+            ),
+        }
+        # Entries currently hold HELPER keys; RESTORE must write PRIOR keys.
+        doc = {
+            "customModels": [
+                {
+                    "displayName": "Z.ai GLM Coding Plan (Anthropic)",
+                    "provider": "anthropic",
+                    "model": "glm-4.7",
+                    "maxOutputTokens": 131072,
+                    "baseUrl": GLOBAL_ANTHROPIC,
+                    "apiKey": "HELPER-ANTHROPIC",
+                },
+                {
+                    "displayName": "Z.ai GLM Coding Plan (OpenAI)",
+                    "provider": "openai",
+                    "model": "glm-4.7",
+                    "maxOutputTokens": 131072,
+                    "baseUrl": GLOBAL_PAAS,
+                    "apiKey": "HELPER-OPENAI",
+                },
+            ]
+        }
+        import copy
+
+        doc_before = copy.deepcopy(doc)
+        plan = fd.plan_revert(decisions, factory_doc=doc)
+        delta = plan.delta_for(FileTag.FACTORY_DROID)
+        # (a) input immutability
+        assert doc == doc_before, "plan_revert mutated its input doc in place"
+        # (b) real write — the apiKeys genuinely changed
+        assert delta.kind == DeltaKind.WRITE_JSON, "plan_revert emitted a false NOOP"
+        restored = delta.content["customModels"]
+        assert _entry_for("anthropic", restored)["apiKey"] == "PRIOR-ANTHROPIC"
+        assert _entry_for("openai", restored)["apiKey"] == "PRIOR-OPENAI"
+
+
 class TestPostconditions:
     def test_active_when_both_entries_match_region(self):
         doc = {
