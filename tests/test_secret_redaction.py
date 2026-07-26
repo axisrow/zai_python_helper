@@ -65,6 +65,55 @@ class TestRedactText:
         assert "sk-sentinel-secret-xyz" not in out
         assert "<redacted>" in out
 
+    def test_json_kebab_api_key_redacted_by_renderer(self):
+        """Regression: a kebab-case JSON key (api-key) is redacted by the
+        RENDERER, not just the classifier. The old regex key class
+        [A-Za-z0-9_] rejected the hyphen, so the classifier was never called
+        and the value leaked. Structural JSON redaction closes this."""
+        text = '{"api-key": "sk-sentinel-secret-xyz"}'
+        out = _redact_text(text)
+        assert "sk-sentinel-secret-xyz" not in out
+        assert "<redacted>" in out
+
+    def test_json_x_api_key_redacted(self):
+        text = '{"x-api-key": "sk-sentinel-secret-xyz"}'
+        out = _redact_text(text)
+        assert "sk-sentinel-secret-xyz" not in out
+        assert "<redacted>" in out
+
+    def test_json_escaped_quote_in_value_redacted_fully(self):
+        """Regression: a value containing an escaped quote must redact the
+        WHOLE secret, not just a prefix. The old regex value capture split on
+        the inner quote and printed the suffix."""
+        text = '{"apiKey": "sk-\\"suffix-secret"}'
+        out = _redact_text(text)
+        assert "sk-" not in out
+        assert "suffix-secret" not in out
+        assert "<redacted>" in out
+
+    def test_json_nested_secret_redacted(self):
+        """Structural redaction reaches nested objects."""
+        text = '{"provider": {"options": {"apiKey": "sk-deep-secret"}}}'
+        out = _redact_text(text)
+        assert "sk-deep-secret" not in out
+        assert "<redacted>" in out
+
+    def test_shell_single_quoted_secret_redacted(self):
+        """Regression: single-quoted shell assignment (export KEY='...') must
+        redact — the old shell pattern accepted only double-quoted/unquoted."""
+        text = "export OPENAI_API_KEY='sk-sentinel-secret-xyz'\n"
+        out = _redact_text(text)
+        assert "sk-sentinel-secret-xyz" not in out
+        assert "<redacted>" in out
+
+    def test_shell_kebab_key_redacted(self):
+        """A kebab-case shell key (api-key=...) is also secret (key class now
+        accepts hyphens)."""
+        text = "api-key=sk-sentinel-secret-xyz\n"
+        out = _redact_text(text)
+        assert "sk-sentinel-secret-xyz" not in out
+        assert "<redacted>" in out
+
     def test_non_secret_json_value_preserved(self):
         text = '{"model": "glm-4.6", "displayName": "Z.ai Plan"}'
         out = _redact_text(text)

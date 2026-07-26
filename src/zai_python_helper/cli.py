@@ -22,6 +22,7 @@ import argparse
 import difflib
 import re
 from pathlib import Path
+from typing import Any
 
 from zai_python_helper.core.planner import DeltaKind, FileTag, PatchPlan
 from zai_python_helper.paths import Paths
@@ -81,36 +82,38 @@ def _is_secret_key(key: str) -> bool:
     return any(name in normalized for name in _SECRET_NAME_NORMALIZED)
 
 
-def _redact_text(text: str) -> str:
-    """Redact secret values in rendered text for safe diffing.
+def _redact_json_doc(doc: Any) -> Any:
+    """Return a copy of parsed JSON ``doc`` with every secret-key value redacted.
 
-    Replaces the value of any credential-looking assignment with
-    ``<redacted>``. Covers BOTH syntaxes a managed file may use so a secret
-    never leaks through a ``--dry-run`` diff's context lines:
-
-    - JSON (``settings.json`` / ``.claude.json``): ``"KEY": "value"``
-    - shell (``.zshrc``): ``export KEY="value"``, ``export KEY=value``,
-      and bare ``KEY=value`` assignments.
-
-    A key is "secret" by :func:`_is_secret_key` (name heuristic), so foreign
-    credentials we don't manage (OPENAI_API_KEY, cloud tokens) are caught in
-    either file type. A secret value never reaches stdout/stderr.
+    STRUCTURAL: recurses through dicts/lists, replacing the value under any
+    secret key (any nesting, any key characters incl. ``api-key``/``x-api-key``,
+    any value type or escaping) with the string ``"<redacted>"``. Robust where
+    a regex over the rendered string is not — regex key classes miss hyphens,
+    and regex value captures split on escaped quotes, leaking secret suffixes.
+    Applied to the parsed doc BEFORE it is rendered into a ``--dry-run`` diff,
+    so the diff text itself never carries a secret.
     """
-    # JSON: ``"KEY": "value"`` → ``"KEY": "<redacted>"``.
-    def _replace_json(match: re.Match[str]) -> str:
-        key = match.group(1)
-        if _is_secret_key(key):
-            return f'"{key}": "<redacted>"'
-        return match.group(0)
+    if isinstance(doc, dict):
+        return {
+            k: ("<redacted>" if _is_secret_key(k) else _redact_json_doc(v))
+            for k, v in doc.items()
+        }
+    if isinstance(doc, list):
+        return [_redact_json_doc(item) for item in doc]
+    return doc
 
-    text = re.sub(r'"([A-Za-z0-9_]+)"\s*:\s*"([^"]*)"', _replace_json, text)
 
-    # Shell: ``[export ]KEY="value"`` (quoted) or ``[export ]KEY=value``
-    # (unquoted, value = run of non-whitespace). One alternation handles both
-    # so a line is matched at most once. Keep ``export`` + key + quotes,
-    # redact only the value for secret keys.
+def _redact_shell_text(text: str) -> str:
+    """Redact secret values in shell text (``.zshrc``) for safe diffing.
+
+    Handles ``[export ]KEY="value"`` (double-quoted), ``'value'`` (single-
+    quoted), and bare ``value`` assignments; the key class accepts hyphens
+    (``api-key=...``). A key is "secret" by :func:`_is_secret_key`. Applied to
+    the shell source BEFORE it is rendered into a ``--dry-run`` diff.
+    """
     _shell_pat = re.compile(
-        r'(?m)^(\s*export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(?:"([^"\n]*)"|([^\s"\'#]+))'
+        r'(?m)^(\s*export\s+)?([A-Za-z_][A-Za-z0-9_-]*)='
+        r'(?:"([^"\n]*)"|\'([^\'\n]*)\'|([^\s"\'#]+))'
     )
 
     def _replace_shell(match: re.Match[str]) -> str:
@@ -118,12 +121,37 @@ def _redact_text(text: str) -> str:
         key = match.group(2)
         if not _is_secret_key(key):
             return match.group(0)
-        # group(3) = quoted value, group(4) = unquoted value.
+        # group(3) = double-quoted, group(4) = single-quoted, group(5) = bare.
         if match.group(3) is not None:
             return f'{prefix}{key}="<redacted>"'
+        if match.group(4) is not None:
+            return f"{prefix}{key}='<redacted>'"
         return f"{prefix}{key}=<redacted>"
 
     return _shell_pat.sub(_replace_shell, text)
+
+
+def _redact_text(text: str) -> str:
+    """Redact secret values in rendered text for safe diffing.
+
+    Heuristic dispatcher used when only the rendered text is available (not the
+    parsed source): structural JSON redaction when the text parses as JSON,
+    otherwise shell-assignment redaction. The ``--dry-run`` path redacts at the
+    SOURCE (see :func:`_print_diff`) and only falls back to this for stray
+    text. A key is "secret" by :func:`_is_secret_key`; a secret value never
+    reaches stdout/stderr.
+    """
+    import json
+
+    stripped = text.lstrip()
+    if stripped and stripped[0] in "{[":
+        try:
+            doc = json.loads(text)
+        except (json.JSONDecodeError, ValueError):
+            pass
+        else:
+            return json.dumps(_redact_json_doc(doc), indent=2, ensure_ascii=False) + "\n"
+    return _redact_shell_text(text)
 
 
 def _apply_plan(paths: Paths, plan: PatchPlan, *, dry_run: bool) -> list[FileTag]:
@@ -145,18 +173,22 @@ def _apply_plan(paths: Paths, plan: PatchPlan, *, dry_run: bool) -> list[FileTag
             continue
         path = resolve_path(paths, delta.tag)
 
-        if delta.kind == DeltaKind.WRITE_JSON:
-            current_doc = JsonBackend.read(path)
-            current_text = (
-                JsonBackend.render(current_doc) if current_doc is not None else ""
-            )
-            desired_text = JsonBackend.render(delta.content)
-        else:  # WRITE_TEXT
-            current_text = ShellBackend.read(path)
-            desired_text = delta.content
-
         if dry_run:
-            _print_diff(path, current_text, desired_text, delta.tag)
+            # Redact at the SOURCE so the rendered diff never carries a secret.
+            # JSON: structural redaction on the parsed doc (robust to any key
+            # chars / value escaping). Shell: regex redaction on the text.
+            if delta.kind == DeltaKind.WRITE_JSON:
+                cur_doc = JsonBackend.read(path)
+                cur_text = (
+                    JsonBackend.render(_redact_json_doc(cur_doc))
+                    if cur_doc is not None
+                    else ""
+                )
+                des_text = JsonBackend.render(_redact_json_doc(delta.content))
+            else:  # WRITE_TEXT
+                cur_text = _redact_shell_text(ShellBackend.read(path))
+                des_text = _redact_shell_text(delta.content)
+            _print_diff(path, cur_text, des_text, delta.tag)
             continue
 
         if delta.kind == DeltaKind.WRITE_JSON:
@@ -164,13 +196,18 @@ def _apply_plan(paths: Paths, plan: PatchPlan, *, dry_run: bool) -> list[FileTag
         else:
             from zai_python_helper.backends import atomic_write_bytes
 
-            atomic_write_bytes(path, desired_text.encode("utf-8"))
+            atomic_write_bytes(path, delta.content.encode("utf-8"))
         written.append(delta.tag)
     return written
 
 
 def _print_diff(path: Path, current: str, desired: str, tag: FileTag) -> None:
-    """Print a redacted unified_diff for one file under ``--dry-run``."""
+    """Print a unified_diff for one file under ``--dry-run``.
+
+    ``current`` and ``desired`` are ALREADY redacted at the source by the
+    caller (structural JSON or shell regex), so the diff text is safe to print
+    verbatim — no post-hoc redaction needed.
+    """
     label = f"{path} ({tag.value})"
     cur_lines = current.splitlines(keepends=True)
     des_lines = desired.splitlines(keepends=True)
@@ -184,7 +221,7 @@ def _print_diff(path: Path, current: str, desired: str, tag: FileTag) -> None:
     if not diff_text:
         # No textual diff — nothing would change for this file.
         return
-    print(_redact_text(diff_text), end="")
+    print(diff_text, end="")
 
 
 def _run_recovery(paths: Paths, recover_fn) -> None:
