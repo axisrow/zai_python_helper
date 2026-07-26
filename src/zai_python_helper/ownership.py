@@ -197,31 +197,28 @@ def take_over(
     existing = tool_bucket.get(key)
     if isinstance(existing, dict):
         existing_record = OwnershipRecord.from_dict(existing)
-        # Re-activating the SAME value we already own: keep the ORIGINAL
-        # restore point (do not let a repeat activation overwrite the prior
-        # with the now-current value).
-        if existing_record.set_hash == set_hash:
-            return new_records  # entry unchanged — original prior preserved
 
-        # VALUE ROTATION (different set_hash), but only safe to preserve the
-        # original restore point when the live value has NOT drifted from what
-        # we last set. If the value present now (``prior_value``) still hashes
-        # to the existing ``set_hash``, it is still our value (e.g. P→Z1→Z2:
-        # after Z1 the live value is Z1, which is what we set) — so we keep the
-        # ORIGINAL prior (P) and only advance ``set_hash`` to the new value.
-        # Without this, a token rotation would record the PREVIOUS Z.ai token
-        # (Z1) as the prior, and ``use default`` would restore a stale Z.ai
-        # credential against the default endpoint.
-        # Only when the live value has drifted externally (hash ≠ existing
-        # set_hash) do we treat the current value as a genuinely new starting
-        # point and record a fresh prior.
+        # Preserve the ORIGINAL restore point only while the live value is
+        # still ours (no external drift). This covers:
+        #   - re-activating the SAME value (equal set_hash) while it is still
+        #     present (P→Z→Z idempotent), AND
+        #   - a value ROTATION (P→Z1→Z2) where the live value is still our Z1,
+        #     AND
+        #   - re-removing a key we own-by-removal (set_hash is None) while it is
+        #     still ABSENT (the prior absence is still our state).
+        # In the set-value cases the live value hashes to the recorded
+        # ``set_hash``; in the removal case the live value is still absent. In
+        # all of them keeping the original prior is correct.
+        is_our_removal_still_absent = (
+            existing_record.set_hash is None and not prior_present
+        )
         no_external_drift = (
             existing_record.set_hash is not None
             and prior_present
             and prior_value is not None
             and hash_value(prior_value) == existing_record.set_hash
         )
-        if no_external_drift:
+        if is_our_removal_still_absent or no_external_drift:
             preserved = OwnershipRecord(
                 prior_value=existing_record.prior_value,
                 prior_present=existing_record.prior_present,
@@ -230,6 +227,14 @@ def take_over(
             tool_bucket[key] = preserved.to_dict()
             new_records[tool] = tool_bucket
             return new_records
+
+        # The live value has DRIFTED from what we last set — even if the new
+        # set_hash equals the old one (e.g. P1→Z→default→user=P2→activate the
+        # SAME Z again: set_hash matches but the live value is now P2, not our
+        # Z). The current value is a genuine new starting point, so record a
+        # FRESH restore point. Without this, the second revert would restore
+        # the stale P1 and silently destroy the user's P2 (Bug 5, cycle-review
+        # on #41).
 
     record = OwnershipRecord(
         prior_value=prior_value,
