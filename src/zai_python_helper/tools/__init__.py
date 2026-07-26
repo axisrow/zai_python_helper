@@ -13,11 +13,13 @@ from __future__ import annotations
 
 from zai_python_helper.tools.base import Tool
 from zai_python_helper.tools.claude_code import ClaudeCodeTool
+from zai_python_helper.tools.crush import CrushTool
 
 #: ``{tool_name: Tool}``. The CLI dispatches on this. Add a tool by
 #: registering an instance here (its ``name`` MUST match the key).
 REGISTRY: dict[str, Tool] = {
     ClaudeCodeTool.name: ClaudeCodeTool(),
+    CrushTool.name: CrushTool(),
 }
 
 

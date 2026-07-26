@@ -631,9 +631,9 @@ Attributes:
 
 ### `REGISTRY`
 
-*constant — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/tools/__init__.py#L19) (`dict[str, Tool]`)*
+*constant — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/tools/__init__.py#L20) (`dict[str, Tool]`)*
 
-Value: `{ClaudeCodeTool.name: ClaudeCodeTool()}`
+Value: `{ClaudeCodeTool.name: ClaudeCodeTool(), CrushTool.name: CrushTool()}`
 
 *(no docstring)*
 
@@ -643,7 +643,7 @@ Value: `{ClaudeCodeTool.name: ClaudeCodeTool()}`
 
 ### `get_tool()`
 
-*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/tools/__init__.py#L24)*
+*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/tools/__init__.py#L26)*
 
 ```python
 get_tool(name: str) -> Tool
@@ -662,7 +662,7 @@ a clear error.
 
 ### `tool_names()`
 
-*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/tools/__init__.py#L38)*
+*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/tools/__init__.py#L40)*
 
 ```python
 tool_names() -> list[str]
