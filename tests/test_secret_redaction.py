@@ -114,6 +114,48 @@ class TestRedactText:
         assert "sk-sentinel-secret-xyz" not in out
         assert "<redacted>" in out
 
+    def test_shell_escaped_double_quote_suffix_redacted(self):
+        """Regression (Codex cycle-2): a value with an embedded escaped quote
+        must redact the WHOLE RHS — the old regex consumed only the first
+        quoted segment and printed the suffix."""
+        text = 'export OPENAI_API_KEY="prefix-\\"SECRET-SUFFIX"\n'
+        out = _redact_text(text)
+        assert "SECRET-SUFFIX" not in out
+        assert "prefix-" not in out
+        assert "<redacted>" in out
+
+    def test_shell_ansi_c_quoting_redacted(self):
+        """Regression (Codex cycle-2): zsh ANSI-C quoting ($'...') must
+        redact the whole token."""
+        text = "export OPENAI_API_KEY=$'SECRET-WHOLE'\n"
+        out = _redact_text(text)
+        assert "SECRET-WHOLE" not in out
+        assert "<redacted>" in out
+
+    def test_shell_concatenated_quotes_redacted(self):
+        """Regression (Codex cycle-2): concatenated quoting ('a'"b") must
+        redact the whole RHS, not just the first segment."""
+        text = 'export ANTHROPIC_API_KEY=\'"SECRET-A"\'"SECRET-B"\n'
+        out = _redact_text(text)
+        assert "SECRET-A" not in out
+        assert "SECRET-B" not in out
+        assert "<redacted>" in out
+
+    def test_shell_unquoted_hash_suffix_redacted(self):
+        """Regression (Codex cycle-2): an unquoted value with a trailing
+        comment must redact the whole RHS (incl. the suffix)."""
+        text = "export OPENAI_API_KEY=sk-secret # my key\n"
+        out = _redact_text(text)
+        assert "sk-secret" not in out
+        assert "<redacted>" in out
+
+    def test_non_secret_shell_value_preserved(self):
+        """A non-secret assignment is NOT redacted (fail-closed only on secrets)."""
+        text = 'export PATH="/usr/local/bin:$PATH"\n'
+        out = _redact_text(text)
+        assert "/usr/local/bin" in out
+        assert "<redacted>" not in out
+
     def test_non_secret_json_value_preserved(self):
         text = '{"model": "glm-4.6", "displayName": "Z.ai Plan"}'
         out = _redact_text(text)

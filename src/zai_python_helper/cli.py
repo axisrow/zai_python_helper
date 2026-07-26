@@ -110,22 +110,24 @@ def _redact_shell_text(text: str) -> str:
     quoted), and bare ``value`` assignments; the key class accepts hyphens
     (``api-key=...``). A key is "secret" by :func:`_is_secret_key`. Applied to
     the shell source BEFORE it is rendered into a ``--dry-run`` diff.
+
+    FAIL-CLOSED: any line that assigns a secret key has its ENTIRE RHS
+    (everything after ``=`` to end-of-line) replaced with ``<redacted>``,
+    regardless of quoting. Trying to match only the quoted/bare value segment
+    with a regex cannot cover every zsh quoting form (escaped double quotes
+    ``"a-\\"b"``, ANSI-C ``$'...'``, concatenation, trailing ``#`` comments)
+    and leaked suffixes. Replacing the whole RHS is conservative (it may also
+    redact a trailing comment on a secret line) but cannot leak a credential.
     """
-    _shell_pat = re.compile(
-        r'(?m)^(\s*export\s+)?([A-Za-z_][A-Za-z0-9_-]*)='
-        r'(?:"([^"\n]*)"|\'([^\'\n]*)\'|([^\s"\'#]+))'
-    )
+    # Match an assignment line: optional `export`, a key, `=`, then the rest
+    # of the line (the RHS we will redact wholesale for secret keys).
+    _shell_pat = re.compile(r'(?m)^(\s*export\s+)?([A-Za-z_][A-Za-z0-9_-]*)=(.*)$')
 
     def _replace_shell(match: re.Match[str]) -> str:
         prefix = match.group(1) or ""
         key = match.group(2)
         if not _is_secret_key(key):
             return match.group(0)
-        # group(3) = double-quoted, group(4) = single-quoted, group(5) = bare.
-        if match.group(3) is not None:
-            return f'{prefix}{key}="<redacted>"'
-        if match.group(4) is not None:
-            return f"{prefix}{key}='<redacted>'"
         return f"{prefix}{key}=<redacted>"
 
     return _shell_pat.sub(_replace_shell, text)
