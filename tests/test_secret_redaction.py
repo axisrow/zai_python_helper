@@ -5,11 +5,27 @@ Regression coverage for the camelCase credential-key leak: the generic
 form (``apiKey`` / ``api_key`` / ``apikey`` / ``API-KEY``), not only the
 UPPER_CASE ``API_KEY`` form. A secret value must never reach stdout/stderr via
 a dry-run diff or the post-run echo.
+
+Issue #44 (fail-closed) adds the inverse layer: a finite denylist is provably
+incomplete, so the JSON redactor must HIDE any scalar whose key is not on an
+explicit safe allowlist (``privateKey`` / ``Authorization`` / ``clientSecret``
+…), and the shell dry-run must NOT print foreign ``.zshrc`` content at all
+(zsh assignment-word quoting ``export $'KEY=VAL'`` defeats any regex). See
+:class:`TestJsonFailClosedAllowlist` and :class:`TestShellForeignSuppression`.
 """
 
 from __future__ import annotations
 
-from zai_python_helper.cli import _is_secret_key, _redact_text
+from zai_python_helper.cli import (
+    _apply_plan,
+    _is_secret_key,
+    _redact_json_doc,
+    _redact_text,
+    _shell_managed_preview,
+)
+from zai_python_helper.core.planner import DeltaKind, FileDelta, FileTag, PatchPlan
+from zai_python_helper.paths import Paths
+from zai_python_helper.shell_block import install_owned_block
 
 
 class TestIsSecretKey:
@@ -200,3 +216,200 @@ class TestRedactText:
         out = _redact_text(text)
         assert "glm-4.6" in out
         assert "Z.ai Plan" in out
+
+
+# ---------------------------------------------------------------------------
+# Issue #44 — JSON fail-closed allowlist (denylist is provably incomplete)
+# ---------------------------------------------------------------------------
+
+
+class TestJsonFailClosedAllowlist:
+    """A scalar under an UNCLASSIFIED key is redacted, never shown.
+
+    The denylist (:func:`_is_secret_key`) only matches keys we enumerated. A
+    credential field whose name we did NOT list (``privateKey``,
+    ``Authorization``, ``clientSecret``) is unclassified → the fail-closed
+    layer hides it. These are exactly the gaps the #43 cycle-review flagged
+    (Codex cycle-3, confidence 0.98).
+    """
+
+    def test_private_key_field_redacted(self):
+        """``privateKey`` is not in the denylist — fail-closed hides it."""
+        out = _redact_text('{"privateKey": "-----BEGIN SENTINEL PEM-----"}')
+        assert "SENTINEL PEM" not in out
+        assert "<redacted>" in out
+
+    def test_authorization_header_redacted(self):
+        """``Authorization`` (Bearer token) is unclassified → redacted."""
+        out = _redact_text('{"headers": {"Authorization": "Bearer SENTINEL"}}')
+        assert "SENTINEL" not in out
+        assert "Bearer SENTINEL" not in out
+
+    def test_client_secret_field_redacted(self):
+        out = _redact_text('{"clientSecret": "SENTINEL-SECRET"}')
+        assert "SENTINEL-SECRET" not in out
+        assert "<redacted>" in out
+
+    def test_unknown_nested_scalar_redacted(self):
+        """Any arbitrary foreign scalar is hidden, at any depth."""
+        out = _redact_text(
+            '{"providers": {"foreign": {"someToken": "SENTINEL-NESTED"}}}'
+        )
+        assert "SENTINEL-NESTED" not in out
+
+    def test_value_with_escaped_quotes_redacted_wholly(self):
+        """Escaped quotes / newlines in an unclassified value do not leak a
+        suffix — structural redaction replaces the whole scalar."""
+        out = _redact_text('{"privateKey": "SENTINEL-\\"suffix\\nmore"}')
+        assert "SENTINEL" not in out
+        assert "suffix" not in out
+        assert "<redacted>" in out
+
+    def test_safe_values_still_visible(self):
+        """Fail-closed must not make the diff useless: known non-secret values
+        (base URL, model id, timeout) are shown so the user sees what changes."""
+        text = (
+            '{"env": {"ANTHROPIC_BASE_URL": "https://api.z.ai", '
+            '"ANTHROPIC_DEFAULT_SONNET_MODEL": "zai/glm-4.7", '
+            '"ANTHROPIC_AUTH_TOKEN": "sk-SENTINEL"}}'
+        )
+        out = _redact_text(text)
+        assert "sk-SENTINEL" not in out  # secret hidden
+        assert "https://api.z.ai" in out  # safe shown
+        assert "zai/glm-4.7" in out  # safe shown
+
+    def test_safe_container_hides_secret_child(self):
+        """A safe container (``env``) still hides a secret CHILD by its own
+        key — fail-closed is per-scalar, not per-container."""
+        text = (
+            '{"env": {"ANTHROPIC_BASE_URL": "https://api.z.ai", '
+            '"OPENAI_API_KEY": "sk-SENTINEL"}}'
+        )
+        out = _redact_text(text)
+        assert "sk-SENTINEL" not in out
+        assert "https://api.z.ai" in out
+
+    def test_safe_list_of_scalars_visible(self):
+        """A list of scalars under a SAFE key (``args``) is shown; the command
+        tokens are not credentials. Over-redacting here would hide the diff."""
+        text = '{"command": "npx", "args": ["-y", "@z_ai/mcp-server"]}'
+        out = _redact_text(text)
+        assert '"-y"' in out
+        assert "@z_ai/mcp-server" in out
+        assert "<redacted>" not in out
+
+    def test_unclassified_list_of_scalars_redacted(self):
+        """A list of scalars under an UNCLASSIFIED key has each element
+        redacted (a bare list element under a secret-ish field carries no key
+        to vouch for it)."""
+        text = '{"tokens": ["SENTINEL-A", "SENTINEL-B"]}'
+        out = _redact_text(text)
+        assert "SENTINEL-A" not in out
+        assert "SENTINEL-B" not in out
+
+    def test_regression_camelcase_still_redacted(self):
+        """#43 forms stay closed after the fail-closed refactor."""
+        out = _redact_text('{"apiKey": "sk-SENTINEL"}')
+        assert "sk-SENTINEL" not in out
+        out = _redact_text('{"api-key": "sk-SENTINEL"}')
+        assert "sk-SENTINEL" not in out
+
+    def test_structural_doc_helper_directly(self):
+        """The structural helper (used at the SOURCE by ``_apply_plan``) hides
+        an unclassified scalar; the denylist fast path hides a secret one."""
+        redacted = _redact_json_doc(
+            {
+                "privateKey": "SENTINEL-UNCLASSIFIED",
+                "apiKey": "SENTINEL-DENYLIST",
+                "ANTHROPIC_BASE_URL": "https://api.z.ai",
+            }
+        )
+        assert redacted["privateKey"] == "<redacted>"
+        assert redacted["apiKey"] == "<redacted>"
+        assert redacted["ANTHROPIC_BASE_URL"] == "https://api.z.ai"
+
+
+# ---------------------------------------------------------------------------
+# Issue #44 — shell foreign .zshrc suppression in dry-run
+# ---------------------------------------------------------------------------
+
+
+class TestShellForeignSuppression:
+    """Foreign ``.zshrc`` content is NEVER printed in ``--dry-run``.
+
+    zsh lets you quote the assignment WORD itself
+    (``export $'OPENAI_API_KEY=SENTINEL'``, ``export "OPENAI_API_KEY=SENTINEL'``),
+    which sets+exports the credential but is not matched by any line-anchored
+    regex (Codex cycle-3, confidence 0.99). The only provably-safe choice is to
+    not echo foreign content: the diff shows ONLY the managed block plus a
+    count of hidden foreign lines.
+    """
+
+    def _foreign_with_zsh_gap(self) -> str:
+        """A foreign .zshrc whose tail carries the zsh assignment-word GAP."""
+        return (
+            "# my shell config\n"
+            "export PATH=/usr/local/bin:$PATH\n"
+            "alias ll='ls -la'\n"
+            # The two known-gap forms #43's regex cannot catch:
+            "export $'OPENAI_API_KEY=SENTINEL-ZSH-DOLLAR'\n"
+            'export "OPENAI_API_KEY=SENTINEL-ZSH-QUOTE"\n'
+        )
+
+    def test_foreign_content_never_in_preview(self):
+        """No foreign line (incl. the zsh-quoting gap) reaches the preview."""
+        preview = _shell_managed_preview(self._foreign_with_zsh_gap())
+        assert "SENTINEL-ZSH-DOLLAR" not in preview
+        assert "SENTINEL-ZSH-QUOTE" not in preview
+        assert "alias ll" not in preview
+        assert "export PATH" not in preview
+
+    def test_foreign_summary_reports_count(self):
+        """The summary line reports how many foreign lines were hidden (so the
+        user knows their content exists without seeing it)."""
+        preview = _shell_managed_preview(self._foreign_with_zsh_gap())
+        assert "foreign line" in preview
+        # 5 non-blank foreign lines in the fixture.
+        assert "5 foreign lines hidden" in preview
+
+    def test_managed_block_shown_after_install(self):
+        """After installing the block, the preview shows the managed fences —
+        that is the whole point of the diff (block added)."""
+        desired = install_owned_block(self._foreign_with_zsh_gap())
+        preview = _shell_managed_preview(desired)
+        assert ">>> zai-python-helper managed >>>" in preview
+        assert "<<< zai-python-helper managed <<<" in preview
+        # And still no secret:
+        assert "SENTINEL" not in preview
+
+    def test_no_managed_block_summarizes_all_foreign(self):
+        """A .zshrc with NO managed block: everything is foreign, nothing
+        structural is shown beyond the summary."""
+        preview = _shell_managed_preview("# plain comment\nexport FOO=bar\n")
+        assert "export FOO=bar" not in preview
+        assert "foreign line" in preview
+
+    def test_apply_plan_dry_run_no_zsh_leak(self, tmp_path, monkeypatch, capsys):
+        """END-TO-END: ``_apply_plan(dry_run=True)`` on a .zshrc carrying the
+        zsh-quoting gap prints a diff with NO sentinel, only the managed block.
+
+        Issue #44 acceptance: a sentinel at the file tail must not reach stdout.
+        """
+        monkeypatch.setenv("HOME", str(tmp_path))
+        paths = Paths.from_home(tmp_path)
+        foreign = self._foreign_with_zsh_gap()
+        paths.zshrc.write_text(foreign)
+
+        desired = install_owned_block(foreign)
+        plan = PatchPlan(
+            deltas=(FileDelta(FileTag.ZSHRC, DeltaKind.WRITE_TEXT, desired),)
+        )
+        _apply_plan(paths, plan, dry_run=True)
+
+        out = capsys.readouterr().out
+        assert "SENTINEL-ZSH-DOLLAR" not in out
+        assert "SENTINEL-ZSH-QUOTE" not in out
+        # The managed block IS shown (that is the change being previewed):
+        assert "zai-python-helper managed" in out
+        # And the foreign summary is present:
+        assert "foreign line" in out

@@ -50,6 +50,76 @@ _SECRET_NAME_SUBSTRINGS = ("SECRET", "PASSWORD", "CREDENTIAL", "TOKEN", "API_KEY
 # ``API_KEY``). See cycle-review finding (dry-run secret leak).
 _SECRET_NAME_NORMALIZED = ("APIKEY", "AUTHTOKEN", "ACCESSTOKEN")
 
+# FAIL-CLOSED JSON allowlist (issue #44). A regex/secret-denylist redactor is
+# provably incomplete: a credential field whose name we did NOT enumerate
+# (``privateKey``, ``Authorization``, ``clientSecret``, a future tool's token)
+# leaks verbatim through ``--dry-run``. The inverse layer below closes that: a
+# scalar value is shown ONLY if its key is on this explicit SAFE allowlist
+# (known non-secret config we write); every OTHER scalar is replaced with
+# ``<redacted>``. Structure (dict keys, list shape) is always preserved, so the
+# diff stays useful (you see WHICH field changed) while an unknown value can
+# never reach stdout.
+#
+# The allowlist is keyed by the field NAMES the tools write (case-insensitive),
+# regardless of nesting depth — the same structural recurse walks every level.
+# A key is added here only when we are CERTAIN its value is never a credential.
+# When in doubt, leave it OUT: over-redaction degrades the diff, an unlisted
+# secret leaks it — we accept the former. The denylist (:func:`_is_secret_key`)
+# stays as a redundant fast path so an allowlist gap never re-exposes a key we
+# already KNOW is secret.
+_SAFE_JSON_KEY_NAMES: frozenset[str] = frozenset(
+    {
+        # settings.json env (Claude Code): non-secret managed vars. AUTH_TOKEN
+        # / API_KEY are secret (denylist) and intentionally absent here.
+        "ANTHROPIC_BASE_URL",
+        "API_TIMEOUT_MS",
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        "ANTHROPIC_DEFAULT_FABLE_MODEL",
+        "ANTHROPIC_CUSTOM_MODEL_OPTION",
+        "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME",
+        "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION",
+        "ANTHROPIC_CUSTOM_MODEL_OPTION_SUPPORTED_CAPABILITIES",
+        # .claude.json: the only key we manage.
+        "hasCompletedOnboarding",
+        # crush.json provider entry shape (api_key is secret — denylist).
+        "id",
+        "name",
+        "base_url",
+        # MCP entries: the field names the per-tool managers write. ``env`` /
+        # ``headers`` / ``environment`` are CONTAINERS — recursed, and their
+        # scalar children fall under the same allowlist (so Z_AI_API_KEY /
+        # Authorization, NOT listed, are redacted).
+        "type",
+        "command",
+        "args",
+        "urlTemplate",
+        "url",
+        "protocol",
+        "requiresAuth",
+        "envTemplate",
+        "local",
+        # Container keys — present so the STRUCTURE is walked/preserved; their
+        # scalar children are still gated by the allowlist (fail-closed).
+        "env",
+        "headers",
+        "environment",
+        "providers",
+        "mcpServers",
+        "mcp",
+        "options",
+        # Known non-secret MCP env vars (the region selector; the API key is
+        # secret and NOT listed here, so it is redacted by its own name).
+        "Z_AI_MODE",
+        # Generic structural markers tools nest under.
+        "model",
+        "displayName",
+        "provider",
+    }
+)
+
 _RESTART_NOTICE = "restart recommended for deterministic switching"
 
 
@@ -85,25 +155,73 @@ def _is_secret_key(key: str) -> bool:
     return any(name in normalized for name in _SECRET_NAME_NORMALIZED)
 
 
-def _redact_json_doc(doc: Any) -> Any:
-    """Return a copy of parsed JSON ``doc`` with every secret-key value redacted.
+def _is_safe_json_key(key: str) -> bool:
+    """True iff a JSON scalar under ``key`` is known non-secret (issue #44).
 
-    STRUCTURAL: recurses through dicts/lists, replacing the value under any
-    secret key (any nesting, any key characters incl. ``api-key``/``x-api-key``,
-    any value type or escaping) with the string ``"<redacted>"``. Robust where
-    a regex over the rendered string is not — regex key classes miss hyphens,
-    and regex value captures split on escaped quotes, leaking secret suffixes.
-    Applied to the parsed doc BEFORE it is rendered into a ``--dry-run`` diff,
-    so the diff text itself never carries a secret.
+    FAIL-CLOSED: defaults to False for any key we did not explicitly allowlist.
+    Membership is matched case-insensitively against
+    :data:`_SAFE_JSON_KEY_NAMES` so a tool's casing variant (``Url`` vs ``url``)
+    still resolves. Used by :func:`_redact_json_doc` to gate scalar visibility.
+    """
+    return key.lower() in {k.lower() for k in _SAFE_JSON_KEY_NAMES}
+
+
+def _redact_json_doc(doc: Any, *, parent_key: str | None = None) -> Any:
+    """Return a copy of parsed JSON ``doc`` safe for a ``--dry-run`` diff.
+
+    FAIL-CLOSED (issue #44). Two layers, applied structurally (dict/list
+    recurse so structure is always preserved):
+
+    1. Denylist fast path: a value under a key :func:`_is_secret_key` flags is
+       replaced with ``"<redacted>"`` outright — redundant defense so an
+       allowlist gap never re-exposes a key we already KNOW is a credential
+       (``ANTHROPIC_AUTH_TOKEN``, ``apiKey``, …).
+    2. Allowlist gate (the inverse layer): any OTHER scalar value is shown only
+       if its key is :func:`_is_safe_json_key`; otherwise it is also
+       ``"<redacted>"``. This is what closes the leak a finite denylist cannot:
+       a credential field whose name we never enumerated (``privateKey``,
+       ``Authorization``, ``clientSecret``) is unclassified → redacted.
+
+    Containers are always recursed so their KEYS and shape are shown (the diff
+    stays useful: you see WHICH field changed). The classification rules:
+
+    - A nested DICT classifies each child by ITS OWN key (``headers`` →
+      ``Authorization`` is secret by its own name, not by ``headers``). So a
+      safe container can still hide a secret child.
+    - A LIST of SCALARS inherits the parent key's classification: ``args``
+      (a safe key) shows its command tokens; an unclassified key's list has
+      each scalar redacted. (No managed config carries a secret as a bare list
+      element, so a scalar with no own key is shown only under a known-safe
+      parent.)
+    - A LIST of DICTS recurses each element (its children classify by key).
+
+    ``parent_key`` is the key this value sits under (None at the document root
+    and for list-of-dict elements, which have no own key). Applied to the
+    parsed doc BEFORE it is rendered into a ``--dry-run`` diff, so the diff
+    text itself never carries a secret.
     """
     if isinstance(doc, dict):
-        return {
-            k: ("<redacted>" if _is_secret_key(k) else _redact_json_doc(v))
-            for k, v in doc.items()
-        }
+        out: dict[str, Any] = {}
+        for k, v in doc.items():
+            out[k] = _redact_json_doc(v, parent_key=k)
+        return out
     if isinstance(doc, list):
-        return [_redact_json_doc(item) for item in doc]
-    return doc
+        return [_redact_json_doc(item, parent_key=parent_key) for item in doc]
+    # A scalar value. Decide visibility from the enclosing key:
+    # - secret by name  → always redacted (denylist fast path).
+    # - safe by name    → shown.
+    # - bare scalar under a SAFE parent key (a list element like ``args``) → shown.
+    # - anything else   → redacted (fail-closed).
+    if parent_key is not None:
+        if _is_secret_key(parent_key):
+            return "<redacted>"
+        if _is_safe_json_key(parent_key):
+            return doc
+        return "<redacted>"
+    # No enclosing key (document root scalar / list-of-dict element with no
+    # own key): a value with no key carries no hint it is non-secret, so
+    # fail-closed. (No managed config is a bare scalar at root.)
+    return "<redacted>"
 
 
 def _redact_shell_text(text: str) -> str:
@@ -159,12 +277,13 @@ def _redact_shell_text(text: str) -> str:
 def _redact_text(text: str) -> str:
     """Redact secret values in rendered text for safe diffing.
 
-    Heuristic dispatcher used when only the rendered text is available (not the
-    parsed source): structural JSON redaction when the text parses as JSON,
-    otherwise shell-assignment redaction. The ``--dry-run`` path redacts at the
-    SOURCE (see :func:`_print_diff`) and only falls back to this for stray
-    text. A key is "secret" by :func:`_is_secret_key`; a secret value never
-    reaches stdout/stderr.
+    Dispatcher used when only the rendered text is available (not the parsed
+    source): structural JSON redaction (fail-closed allowlist — see
+    :func:`_redact_json_doc`) when the text parses as JSON, otherwise
+    shell-assignment redaction. The ``--dry-run`` path redacts at the SOURCE
+    (see :func:`_apply_plan` for the JSON / :func:`_print_diff` for shell) and
+    only falls back to this for stray text (e.g. the MCP ``--dry-run`` echo).
+    A secret value never reaches stdout/stderr.
     """
     import json
 
@@ -177,6 +296,71 @@ def _redact_text(text: str) -> str:
         else:
             return json.dumps(_redact_json_doc(doc), indent=2, ensure_ascii=False) + "\n"
     return _redact_shell_text(text)
+
+
+def _shell_managed_preview(text: str) -> str:
+    """Return a LEAK-SAFE preview of shell rc text for ``--dry-run`` (issue #44).
+
+    FAIL-CLOSED for shell: print ONLY the managed marker-fenced block we own,
+    never the user's foreign ``.zshrc`` content. Foreign lines are already
+    never modified (the block transforms only add/remove the fenced region), so
+    printing them serves no diff purpose — and printing them is the leak
+    surface. zsh lets you quote the assignment WORD itself
+    (``export $'OPENAI_API_KEY=SENTINEL'``, ``export "KEY=SENTINEL'``), which a
+    line-anchored regex cannot reliably detect; the only provably-safe choice is
+    to not echo foreign content at all.
+
+    Foreign content is summarized (a ``<N foreign line(s) redacted>`` note plus
+    a per-region marker) so the user still sees WHERE their content sits
+    relative to the managed block, without any of it reaching stdout. The
+    managed block itself is comment-only (no exports) and safe to print.
+
+    An absent/malformed block (no well-formed fence pair) yields an empty
+    managed section; the foreign summary still reflects the surrounding lines.
+    """
+    from zai_python_helper.shell_block import _find_block_range
+
+    lines = text.split("\n")
+    rng = _find_block_range(text)
+    if rng is None:
+        # No well-formed block (absent, or malformed fence). The whole file is
+        # "foreign" from our perspective — summarize, print nothing of it.
+        foreign_count = sum(1 for ln in lines if ln != "")
+        return _foreign_summary(foreign_count, managed="")
+
+    begin_idx, end_idx = rng
+    managed_lines = lines[begin_idx : end_idx + 1]
+    # Foreign = every non-blank line OUTSIDE the managed region. Computed as
+    # (total non-blank) - (non-blank inside the block) so there is no O(n*m)
+    # membership test inside the loop.
+    total_nonblank = sum(1 for ln in lines if ln != "")
+    managed_nonblank = sum(1 for ln in managed_lines if ln != "")
+    foreign_count = total_nonblank - managed_nonblank
+    managed = "\n".join(managed_lines)
+    if managed and not managed.endswith("\n"):
+        managed += "\n"
+    return _foreign_summary(foreign_count, managed=managed)
+
+
+def _foreign_summary(count: int, *, managed: str) -> str:
+    """Build the redacted shell preview: foreign summary line(s) + managed block.
+
+    The foreign count note is emitted on its own line (comment-styled so it is
+    obviously not shell) ABOVE any managed block, mirroring where the user's
+    content usually sits. A zero foreign count emits no summary (nothing
+    hidden). The managed block (when present) follows verbatim — it is
+    comment-only and safe.
+    """
+    parts: list[str] = []
+    if count > 0:
+        # Deliberately NOT the user's content — just a count, comment-styled.
+        parts.append(
+            f"# ({count} foreign line{'s' if count != 1 else ''} hidden — "
+            "not managed, not shown to avoid leaking secrets)\n"
+        )
+    if managed:
+        parts.append(managed)
+    return "".join(parts)
 
 
 def _apply_plan(paths: Paths, plan: PatchPlan, *, dry_run: bool) -> list[FileTag]:
@@ -200,8 +384,10 @@ def _apply_plan(paths: Paths, plan: PatchPlan, *, dry_run: bool) -> list[FileTag
 
         if dry_run:
             # Redact at the SOURCE so the rendered diff never carries a secret.
-            # JSON: structural redaction on the parsed doc (robust to any key
-            # chars / value escaping). Shell: regex redaction on the text.
+            # JSON: fail-closed structural redaction on the parsed doc (an
+            # unclassified scalar is never shown — see :func:`_redact_json_doc`).
+            # Shell: print ONLY the managed block, summarize foreign lines
+            # (issue #44 — zsh assignment-word quoting can defeat any regex).
             if delta.kind == DeltaKind.WRITE_JSON:
                 cur_doc = JsonBackend.read(path)
                 cur_text = (
@@ -211,8 +397,8 @@ def _apply_plan(paths: Paths, plan: PatchPlan, *, dry_run: bool) -> list[FileTag
                 )
                 des_text = JsonBackend.render(_redact_json_doc(delta.content))
             else:  # WRITE_TEXT
-                cur_text = _redact_shell_text(ShellBackend.read(path))
-                des_text = _redact_shell_text(delta.content)
+                cur_text = _shell_managed_preview(ShellBackend.read(path))
+                des_text = _shell_managed_preview(delta.content)
             _print_diff(path, cur_text, des_text, delta.tag)
             continue
 
@@ -230,8 +416,10 @@ def _print_diff(path: Path, current: str, desired: str, tag: FileTag) -> None:
     """Print a unified_diff for one file under ``--dry-run``.
 
     ``current`` and ``desired`` are ALREADY redacted at the source by the
-    caller (structural JSON or shell regex), so the diff text is safe to print
-    verbatim — no post-hoc redaction needed.
+    caller — JSON via fail-closed structural redaction
+    (:func:`_redact_json_doc`), shell via managed-block-only preview
+    (:func:`_shell_managed_preview`) — so the diff text is safe to print
+    verbatim. No post-hoc redaction is applied (or needed).
     """
     label = f"{path} ({tag.value})"
     cur_lines = current.splitlines(keepends=True)
