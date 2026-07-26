@@ -434,6 +434,49 @@ class TestOwnershipJournalE2E:
         assert Paths.from_home(tmp_path).claude_settings.read_text() == snapshot
         assert "no changes" in capsys.readouterr().out.lower()
 
+    def test_completed_cycle_does_not_resurrect_deleted_removal_key(
+        self, tmp_path, monkeypatch
+    ):
+        """THE removal-path data-loss fix, end-to-end (issue #48).
+
+        Sequence: user has ANTHROPIC_API_KEY=P1 → ``use zai`` removes it
+        (journals prior=P1) → ``use default`` restores P1 AND retires the
+        record (cycle completed, ``active=False``) → user DELETES P1 themselves
+        → ``use zai`` re-activates (key absent) → ``use default``.
+
+        The key is ABSENT both during the original removal and after the user's
+        delete, so absence alone cannot tell those apart. Without cycle-state
+        the second ``use default`` would RESTORE the stale prior=P1 — silently
+        RESURRECTING a credential the user deliberately removed (data loss).
+        With ``active=False`` the completed cycle forces a fresh prior (the key
+        really is absent now), so the deleted P1 stays dead.
+        """
+        monkeypatch.setenv("HOME", str(tmp_path))
+        p1 = "sk-user-apikey-P1"
+        _seed(tmp_path, settings={"env": {"ANTHROPIC_API_KEY": p1}})
+        settings_path = Paths.from_home(tmp_path).claude_settings
+
+        # use zai removes the user's API key (ownership-by-removal).
+        _run(["use", "zai", "--api-key", TOKEN])
+        assert "ANTHROPIC_API_KEY" not in json.loads(settings_path.read_text()).get("env", {})
+
+        # use default restores P1 (cycle completed → journal retired active=False).
+        _run(["use", "default", "--region", "global"])
+        assert json.loads(settings_path.read_text())["env"]["ANTHROPIC_API_KEY"] == p1
+
+        # The user deliberately DELETES the restored key themselves.
+        doc = json.loads(settings_path.read_text())
+        doc["env"].pop("ANTHROPIC_API_KEY")
+        settings_path.write_text(json.dumps(doc))
+
+        # Re-activate by removal (key is now absent — a completed cycle).
+        _run(["use", "zai", "--api-key", TOKEN])
+        assert "ANTHROPIC_API_KEY" not in json.loads(settings_path.read_text()).get("env", {})
+
+        # use default must NOT resurrect P1 — the deleted credential stays dead.
+        _run(["use", "default", "--region", "global"])
+        assert "ANTHROPIC_API_KEY" not in json.loads(settings_path.read_text()).get("env", {})
+
     def test_use_default_without_prior_activation_refuses(
         self, tmp_path, monkeypatch, capsys
     ):

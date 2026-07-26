@@ -185,20 +185,25 @@ class ClaudeCodeTool(Tool):
         self,
         journal_records: dict[str, Any],
         state: dict[FileTag, Any],
-    ) -> dict[str, Any]:
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
         from zai_python_helper.ownership import revert
 
         settings_doc = state.get(FileTag.SETTINGS)
         current_env = (settings_doc or {}).get("env") or {}
-        return {
-            key: revert(
-                journal_records,
+        # Thread the journal through each revert so a RESTORE for one key
+        # retires its record before the next key is evaluated (issue #48
+        # cycle-state): the returned ``retired`` carries every retirement.
+        retired: dict[str, Any] = journal_records
+        decisions: dict[str, Any] = {}
+        for key in self.revert_key_set():
+            decision, retired = revert(
+                retired,
                 self.name,
                 key,
                 current_env.get(key) if key in current_env else None,
             )
-            for key in self.revert_key_set()
-        }
+            decisions[key] = decision
+        return decisions, retired
 
     # ------------------------------------------------------------------
     # Status / postcondition / echo

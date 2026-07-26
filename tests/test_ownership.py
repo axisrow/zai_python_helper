@@ -28,6 +28,16 @@ from zai_python_helper.ownership import (
 TOOL = "claude_code"
 
 
+def _revert(records, tool, key, current_value):
+    """Thin wrapper returning ONLY the decision (pre-cycle-state test shape).
+
+    ``revert`` now returns ``(decision, retired_records)`` (issue #48). Most
+    legacy assertions care only about the decision; the new cycle-state tests
+    below use the raw ``revert`` to also assert on ``retired_records``.
+    """
+    return revert(records, tool, key, current_value)[0]
+
+
 # ---------------------------------------------------------------------------
 # Pure: hash_value
 # ---------------------------------------------------------------------------
@@ -108,7 +118,7 @@ def test_revert_restore_when_value_still_ours():
     """current_value matches set_hash → RESTORE the journaled prior."""
     records = take_over({}, TOOL, "K", prior_value="sk-old", prior_present=True,
                         set_hash=hash_value("sk-new"))
-    decision = revert(records, TOOL, "K", current_value="sk-new")
+    decision = _revert(records, TOOL, "K", current_value="sk-new")
     assert decision.action == RevertAction.RESTORE
     assert decision.prior_value == "sk-old"
     assert decision.prior_present is True
@@ -118,7 +128,7 @@ def test_revert_restore_re_absents_when_prior_was_absent():
     """RESTORE with prior_present=False re-removes the key (not empty string)."""
     records = take_over({}, TOOL, "K", prior_value=None, prior_present=False,
                         set_hash=hash_value("sk-new"))
-    decision = revert(records, TOOL, "K", current_value="sk-new")
+    decision = _revert(records, TOOL, "K", current_value="sk-new")
     assert decision.action == RevertAction.RESTORE
     assert decision.prior_present is False
     assert decision.prior_value is None
@@ -128,7 +138,7 @@ def test_revert_refuse_on_external_change():
     """current_value differs from set_hash → REFUSE, do not overwrite."""
     records = take_over({}, TOOL, "K", prior_value="sk-old", prior_present=True,
                         set_hash=hash_value("sk-new"))
-    decision = revert(records, TOOL, "K", current_value="sk-edited-by-user")
+    decision = _revert(records, TOOL, "K", current_value="sk-edited-by-user")
     assert decision.action == RevertAction.REFUSE
     assert "changed externally" in decision.reason
 
@@ -141,7 +151,7 @@ def test_revert_refuse_when_key_now_absent_but_we_set_it():
     """
     records = take_over({}, TOOL, "K", prior_value="sk-old", prior_present=True,
                         set_hash=hash_value("sk-new"))
-    decision = revert(records, TOOL, "K", current_value=None)
+    decision = _revert(records, TOOL, "K", current_value=None)
     assert decision.action == RevertAction.REFUSE
 
 
@@ -153,7 +163,7 @@ def test_revert_refuses_when_no_entry():
     not wipe a key the user configured by hand. The honest inverse when we
     have no provenance is to leave the value untouched + warn.
     """
-    decision = revert({}, TOOL, "K", current_value="whatever")
+    decision = _revert({}, TOOL, "K", current_value="whatever")
     assert decision.action == RevertAction.REFUSE
     assert decision.prior_present is False
     assert "cannot prove ownership" in decision.reason
@@ -162,7 +172,7 @@ def test_revert_refuses_when_no_entry():
 def test_revert_refuses_for_unrelated_tool():
     """An entry under another tool does not count for this tool → REFUSE."""
     records = {"opencode": {"K": {"prior_value": "x", "prior_present": True, "set_hash": "h"}}}
-    decision = revert(records, TOOL, "K", current_value="x")
+    decision = _revert(records, TOOL, "K", current_value="x")
     assert decision.action == RevertAction.REFUSE
 
 
@@ -178,7 +188,7 @@ def test_revert_ownership_by_removal_restores_while_absent():
     records = take_over({}, TOOL, "ANTHROPIC_API_KEY", prior_value="sk-original",
                         prior_present=True, set_hash=None)
     # Key is currently absent (we removed it). Restore the original.
-    decision = revert(records, TOOL, "ANTHROPIC_API_KEY", current_value=None)
+    decision = _revert(records, TOOL, "ANTHROPIC_API_KEY", current_value=None)
     assert decision.action == RevertAction.RESTORE
     assert decision.prior_value == "sk-original"
     assert decision.prior_present is True
@@ -194,7 +204,7 @@ def test_revert_ownership_by_removal_refuses_when_value_reappeared():
     """
     records = take_over({}, TOOL, "ANTHROPIC_API_KEY", prior_value="sk-old",
                         prior_present=True, set_hash=None)
-    decision = revert(records, TOOL, "ANTHROPIC_API_KEY", current_value="sk-user-added-new")
+    decision = _revert(records, TOOL, "ANTHROPIC_API_KEY", current_value="sk-user-added-new")
     assert decision.action == RevertAction.REFUSE
     assert "reappeared" in decision.reason
 
@@ -234,7 +244,7 @@ def test_take_over_preserves_restore_point_across_token_rotation():
     assert records[TOOL]["K"]["prior_value"] == p  # original restore point kept
     assert records[TOOL]["K"]["set_hash"] == hash_value(z2)  # hash advanced
     # And revert of z2 restores the ORIGINAL p, not the stale z1.
-    decision = revert(records, TOOL, "K", current_value=z2)
+    decision = _revert(records, TOOL, "K", current_value=z2)
     assert decision.action.name == "RESTORE"
     assert decision.prior_value == p
 
@@ -264,7 +274,7 @@ def test_take_over_refreshes_restore_point_after_completed_cycle():
     assert records[TOOL]["K"]["prior_value"] == p2  # NOT the stale p1
     assert records[TOOL]["K"]["set_hash"] == hash_value(z)
     # And revert of z now restores P2, not the destroyed P1.
-    decision = revert(records, TOOL, "K", current_value=z)
+    decision = _revert(records, TOOL, "K", current_value=z)
     assert decision.action.name == "RESTORE"
     assert decision.prior_value == p2
 
@@ -290,9 +300,177 @@ def test_revert_decision_is_frozen():
     """RevertDecision is a frozen dataclass (tamper-resistant)."""
     import dataclasses
 
-    d = revert({}, TOOL, "K", current_value=None)
+    d = revert({}, TOOL, "K", current_value=None)[0]
     with pytest.raises(dataclasses.FrozenInstanceError):  # pragma: no cover
         d.action = RevertAction.CLEAR  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# Cycle-state (issue #48): active flag, disk-migration, completed-cycle fresh
+# restore point — closes the symmetric removal-path data loss.
+# ---------------------------------------------------------------------------
+
+
+def test_take_over_records_active_true_by_default():
+    """A fresh take_over writes ``active=True`` (the cycle is in flight)."""
+    records = take_over({}, TOOL, "K", "P", True, hash_value("Z"))
+    assert records[TOOL]["K"]["active"] is True
+
+
+def test_ownership_record_migrates_old_entries_as_active():
+    """``from_dict`` defaults ``active=True`` for pre-#48 journal entries.
+
+    A journal written by an older release (no ``active`` field) must still
+    restore cleanly: the un-reverted ownership is treated as in-flight, and
+    only a real ``revert`` retires it.
+    """
+    from zai_python_helper.ownership import OwnershipRecord
+
+    legacy = OwnershipRecord.from_dict(
+        {"prior_value": "P", "prior_present": True, "set_hash": "h"}
+    )
+    assert legacy.active is True
+
+
+def test_revert_restore_retires_record_active_false():
+    """A RESTORE retires the record: the returned journal marks active=False.
+
+    Set-value path: the value is still ours → restore prior AND retire, so a
+    later re-activation does not preserve the now-stale restore point.
+    """
+    records = take_over({}, TOOL, "K", "P", True, hash_value("Z"))
+    decision, retired = revert(records, TOOL, "K", current_value="Z")
+    assert decision.action == RevertAction.RESTORE
+    assert retired[TOOL]["K"]["active"] is False
+    # The prior/set_hash are preserved (retire flips only the cycle-state).
+    assert retired[TOOL]["K"]["prior_value"] == "P"
+    assert retired[TOOL]["K"]["set_hash"] == hash_value("Z")
+    # Input journal is NOT mutated (pure).
+    assert records[TOOL]["K"]["active"] is True
+
+
+def test_revert_removal_restore_retires_record_active_false():
+    """A REMOVAL-path RESTORE also retires the record (active=False).
+
+    This is the half of issue #48 that has no content-addressable proof:
+    ownership-by-removal's restore must still mark the cycle complete.
+    """
+    records = take_over({}, TOOL, "ANTHROPIC_API_KEY", "sk-P", True, set_hash=None)
+    decision, retired = revert(records, TOOL, "ANTHROPIC_API_KEY", current_value=None)
+    assert decision.action == RevertAction.RESTORE
+    assert retired[TOOL]["ANTHROPIC_API_KEY"]["active"] is False
+
+
+def test_revert_refuse_leaves_journal_untouched():
+    """A REFUSE does NOT retire the record (we did not act; cycle in flight).
+
+    The returned journal is a fresh copy but byte-identical to the input —
+    no ``active`` flip, no record change.
+    """
+    records = take_over({}, TOOL, "K", "P", True, hash_value("Z"))
+    before = {t: dict(b) for t, b in records.items()}
+    decision, retired = revert(records, TOOL, "K", current_value="sk-edited")
+    assert decision.action == RevertAction.REFUSE
+    assert retired == before
+    assert retired[TOOL]["K"]["active"] is True
+
+
+def test_revert_no_entry_leaves_journal_untouched():
+    """No journal entry → REFUSE and an unchanged (empty) journal copy."""
+    decision, retired = revert({}, TOOL, "K", current_value="whatever")
+    assert decision.action == RevertAction.REFUSE
+    assert retired == {}
+
+
+def test_completed_cycle_removal_reactivation_uses_fresh_prior():
+    """THE removal-path data-loss fix (issue #48, Bug 5 symmetric).
+
+    Sequence: P1 → remove (prior P1) → ``use default`` restores P1 AND retires
+    the record → user DELETES P1 → re-activate by removal (key absent). The key
+    is absent both now and during the original removal, so absence alone cannot
+    tell those apart. Without cycle-state the old code would preserve the STALE
+    prior=P1 and a later ``use default`` would RESURRECT the deleted P1. With
+    ``active=False`` the completed cycle forces a FRESH prior (None — the key
+    really is absent now), so the deleted credential is never resurrected.
+    """
+    p1 = "sk-user-P1"
+    # P1 present → activate by removal (we delete ANTHROPIC_API_KEY).
+    records = take_over({}, TOOL, "ANTHROPIC_API_KEY", p1, True, set_hash=None)
+    # ``use default``: key still absent → RESTORE prior P1, retire the record.
+    records = revert(records, TOOL, "ANTHROPIC_API_KEY", current_value=None)[1]
+    assert records[TOOL]["ANTHROPIC_API_KEY"]["active"] is False
+    # User deletes the restored P1 themselves, then re-activates by removal.
+    # The key is absent (completed cycle) → FRESH prior (None), NOT stale P1.
+    records = take_over(records, TOOL, "ANTHROPIC_API_KEY", None, False, set_hash=None)
+    assert records[TOOL]["ANTHROPIC_API_KEY"]["prior_value"] is None  # NOT p1
+    assert records[TOOL]["ANTHROPIC_API_KEY"]["active"] is True  # new cycle
+    # A later ``use default`` restores None (re-absents) — P1 stays dead.
+    decision = _revert(records, TOOL, "ANTHROPIC_API_KEY", current_value=None)
+    assert decision.action == RevertAction.RESTORE
+    assert decision.prior_value is None
+
+
+def test_completed_cycle_set_value_reactivation_uses_fresh_prior():
+    """The set-value path is ALSO covered by cycle-state (regression for #47).
+
+    Even without the Bug-5 hash-drift guard, a completed cycle (active=False)
+    forces a fresh prior. Belt-and-suspenders with #47's no_external_drift
+    check: #47 catches drift when the cycle was NOT retired (no revert ran);
+    cycle-state catches it when the cycle WAS retired.
+    """
+    z, p1, p2 = "sk-zai", "sk-user-P1", "sk-user-P2"
+    records = take_over({}, TOOL, "K", p1, True, hash_value(z))
+    # ``use default`` retires the record (cycle completed), restoring P1.
+    records = revert(records, TOOL, "K", current_value=z)[1]
+    assert records[TOOL]["K"]["active"] is False
+    # User sets P2, re-activates the SAME z. Completed cycle → fresh prior P2.
+    records = take_over(records, TOOL, "K", p2, True, hash_value(z))
+    assert records[TOOL]["K"]["prior_value"] == p2  # NOT the stale p1
+
+
+def test_active_cycle_removal_re_removal_preserves_prior():
+    """Re-removing a key while our removal is STILL ACTIVE keeps the prior.
+
+    The non-regression half: P1→remove→remove (no revert between) is a true
+    idempotent re-removal — the cycle is still in flight (active=True), so the
+    ORIGINAL prior=P1 is preserved. Removing the cycle-state guard would make
+    this lose P1 forever (the false fix the issue warns against).
+    """
+    p1 = "sk-user-P1"
+    records = take_over({}, TOOL, "ANTHROPIC_API_KEY", p1, True, set_hash=None)
+    # Re-remove while still active (no revert ran): preserve original prior.
+    records = take_over(records, TOOL, "ANTHROPIC_API_KEY", None, False, set_hash=None)
+    assert records[TOOL]["ANTHROPIC_API_KEY"]["prior_value"] == p1  # kept
+    assert records[TOOL]["ANTHROPIC_API_KEY"]["active"] is True
+
+
+def test_retired_journal_round_trips_through_disk(tmp_path):
+    """A retired (active=False) record survives a write/read cycle (migration).
+
+    ``from_dict`` must read ``active=False`` back faithfully — the cycle-state
+    is durable on disk, not just in memory. A pre-#48 entry (no ``active``
+    field) round-trips as ``True`` (lenient migration).
+    """
+    from zai_python_helper.ownership import OwnershipRecord
+
+    journal = OwnershipJournal(tmp_path / "ownership.json")
+    records = take_over({}, TOOL, "K", "P", True, hash_value("Z"))
+    records = revert(records, TOOL, "K", current_value="Z")[1]
+    assert records[TOOL]["K"]["active"] is False
+
+    # Retired record round-trips as active=False through real disk IO.
+    journal.write(records)
+    disk = OwnershipJournal(tmp_path / "ownership.json").read()
+    assert OwnershipRecord.from_dict(disk[TOOL]["K"]).active is False
+
+    # A pre-#48 entry (no `active` key) migrates as active=True.
+    legacy = {TOOL: {"K": {"prior_value": "P", "prior_present": True, "set_hash": "h"}}}
+    journal.write(legacy)
+    legacy_disk = OwnershipJournal(tmp_path / "ownership.json").read()
+    assert OwnershipRecord.from_dict(legacy_disk[TOOL]["K"]).active is True
+
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -309,7 +487,7 @@ def test_headline_round_trip_take_over_then_revert_matches():
                         prior_value=original, prior_present=True,
                         set_hash=hash_value(activated))
     # The value is still the one we set → restore the original.
-    decision = revert(records, TOOL, "ANTHROPIC_AUTH_TOKEN", current_value=activated)
+    decision = _revert(records, TOOL, "ANTHROPIC_AUTH_TOKEN", current_value=activated)
     assert decision.action == RevertAction.RESTORE
     assert decision.prior_value == original
 

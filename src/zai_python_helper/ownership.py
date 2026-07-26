@@ -28,7 +28,8 @@ Journal shape on disk::
         "<key>": {
           "prior_value": "<str or null>",
           "prior_present": <bool>,
-          "set_hash": "<sha256 hex of the value we set>"
+          "set_hash": "<sha256 hex of the value we set>",
+          "active": <bool>
         }, ...
       }, ...
     }
@@ -38,6 +39,20 @@ A ``set_hash`` of ``null`` (Python ``None``) means "we took ownership by
 "nothing we set, so there is nothing to validate against" and restores the
 prior value unconditionally (used for ``ANTHROPIC_API_KEY``, which
 ``use zai`` removes rather than sets).
+
+``active`` is the **cycle-state** (issue #48). A record is ``active=True``
+while we still hold ownership of ``(tool, key)``; a successful
+:func:`revert` ``RESTORE`` *retires* the record (``active=False``) — the
+ownership cycle is complete. A later :func:`take_over` over a retired
+record treats the live value as a fresh starting point (records a NEW
+prior) rather than preserving the stale one, which closes a symmetric
+data-loss path: for ownership-by-removal (``set_hash is None``) there is
+no content-addressable proof of continued ownership (key-absence is
+ambiguous between "still our removal" and "completed cycle, then the user
+removed the key themselves"), so the ``active`` flag is the only way to
+tell those apart. Records written before this field existed migrate as
+``active=True`` (lenient :meth:`OwnershipRecord.from_dict`), so an
+in-flight ownership captured by an older release still restores cleanly.
 """
 
 from __future__ import annotations
@@ -88,11 +103,20 @@ class OwnershipRecord:
         set_hash: SHA-256 hex of the value we set when we took ownership, or
             ``None`` if we took ownership by *removing* the key (nothing to
             validate against — revert restores prior unconditionally).
+        active: Whether this ownership cycle is still in flight. ``True`` while
+            we hold ownership; set ``False`` once :func:`revert` has restored
+            the prior (cycle completed). A ``take_over`` over an *inactive*
+            record starts a fresh restore point rather than preserving the
+            stale prior — this is the cycle-state that disambiguates
+            ownership-by-removal's ambiguous key-absence (issue #48). Defaults
+            to ``True``; old journal entries written without this field migrate
+            as ``True`` (an in-flight ownership from an older release).
     """
 
     prior_value: str | None
     prior_present: bool
     set_hash: str | None
+    active: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to the on-disk dict shape."""
@@ -100,15 +124,23 @@ class OwnershipRecord:
             "prior_value": self.prior_value,
             "prior_present": self.prior_present,
             "set_hash": self.set_hash,
+            "active": self.active,
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> OwnershipRecord:
-        """Deserialize from the on-disk dict shape (lenient on missing keys)."""
+        """Deserialize from the on-disk dict shape (lenient on missing keys).
+
+        ``active`` defaults to ``True`` when absent, so journal entries written
+        before the cycle-state field existed (issue #48) migrate as still-in-
+        flight: an older release's un-reverted ownership restores cleanly, and
+        only a real ``revert`` retires it.
+        """
         return cls(
             prior_value=data.get("prior_value"),
             prior_present=bool(data.get("prior_present", False)),
             set_hash=data.get("set_hash"),
+            active=bool(data.get("active", True)),
         )
 
 
@@ -153,6 +185,38 @@ def hash_value(value: Any) -> str:
     return hashlib.new(_HASH_ALGO, str(value).encode("utf-8")).hexdigest()
 
 
+def _copy_records(records: dict[str, Any]) -> dict[str, Any]:
+    """Return a deep-ish copy of the journal dict (records, never mutate input).
+
+    The journal is ``{tool: {key: record_dict}}`` two levels of dicts of
+    JSON-shaped leaves; a shallow per-bucket copy with per-record ``dict(...)``
+    is enough to make every nested record independent of the source.
+    """
+    return {
+        tool: {k: dict(v) for k, v in bucket.items()}
+        for tool, bucket in records.items()
+    }
+
+
+def _with_record(
+    records: dict[str, Any],
+    tool: str,
+    key: str,
+    record: OwnershipRecord,
+) -> dict[str, Any]:
+    """Return a new journal dict with ``(tool, key)`` set to ``record``.
+
+    PURE helper for :func:`revert`'s retire step: copies the journal, then
+    writes ``record.to_dict()`` at ``records[tool][key]`` (creating the tool
+    bucket if absent). The input is never mutated.
+    """
+    new_records = _copy_records(records)
+    tool_bucket = dict(new_records.get(tool, {}))
+    tool_bucket[key] = record.to_dict()
+    new_records[tool] = tool_bucket
+    return new_records
+
+
 def take_over(
     records: dict[str, Any],
     tool: str,
@@ -177,6 +241,14 @@ def take_over(
     instead of the user's original P. Only when ``set_hash`` DIFFERS (a genuine
     value change, e.g. a rotated token) do we record the new prior.
 
+    **Completed cycle ⇒ fresh restore point (issue #48).** If the existing
+    record is INACTIVE (``active=False`` — a prior :func:`revert` ``RESTORE``
+    retired it), the old ownership cycle is over: whatever value is live now is
+    a new starting point, not a continuation of our old ownership, so we record
+    a FRESH prior. This is the symmetric fix to Bug 5 for the removal path,
+    where key-absence alone cannot distinguish "our removal is still live" from
+    "the cycle completed and the user then removed the restored key themselves"
+    — only the ``active`` flag can.
     Args:
         records: The current journal (top-level ``{tool: {key: record}}``).
         tool: The tool name (e.g. ``"claude_code"``).
@@ -198,14 +270,35 @@ def take_over(
     if isinstance(existing, dict):
         existing_record = OwnershipRecord.from_dict(existing)
 
-        # Preserve the ORIGINAL restore point only while the live value is
-        # still ours (no external drift). This covers:
+        # Completed-cycle guard (issue #48, cycle-state): if the existing
+        # record is INACTIVE, a prior revert already retired it — the value
+        # we now see is NOT a continuation of our old ownership, it is a fresh
+        # starting point. Record a NEW restore point regardless of path. This
+        # is what closes the symmetric removal-path data loss: for ownership-
+        # by-removal the key is absent both while our removal is live AND after
+        # a completed cycle (revert) + the user deleting the restored key, so
+        # absence alone cannot tell those apart — only ``active`` can. Without
+        # this guard, P1→remove→default(restore P1)→user deletes P1→re-activate
+        # (absent) would keep the STALE prior=P1 and a later ``use default``
+        # would resurrect the deleted credential.
+        if not existing_record.active:
+            record = OwnershipRecord(
+                prior_value=prior_value,
+                prior_present=prior_present,
+                set_hash=set_hash,
+            )
+            tool_bucket[key] = record.to_dict()
+            new_records[tool] = tool_bucket
+            return new_records
+
+        # The record is still ACTIVE. Preserve the ORIGINAL restore point only
+        # while the live value is still ours (no external drift). This covers:
         #   - re-activating the SAME value (equal set_hash) while it is still
         #     present (P→Z→Z idempotent), AND
         #   - a value ROTATION (P→Z1→Z2) where the live value is still our Z1,
         #     AND
-        #   - re-removing a key we own-by-removal (set_hash is None) while it is
-        #     still ABSENT (the prior absence is still our state).
+        #   - re-removing a key we own-by-removal (set_hash is None) while it
+        #     is still ABSENT (the prior absence is still our live state).
         # In the set-value cases the live value hashes to the recorded
         # ``set_hash``; in the removal case the live value is still absent. In
         # all of them keeping the original prior is correct.
@@ -234,7 +327,10 @@ def take_over(
         # Z). The current value is a genuine new starting point, so record a
         # FRESH restore point. Without this, the second revert would restore
         # the stale P1 and silently destroy the user's P2 (Bug 5, cycle-review
-        # on #41).
+        # on #41). (Note: this branch only fires for a record whose revert
+        # never retired it — i.e. ``use default`` was not run between the two
+        # activations. The completed-cycle re-activation case is handled above
+        # via ``active=False``.)
 
     record = OwnershipRecord(
         prior_value=prior_value,
@@ -251,7 +347,7 @@ def revert(
     tool: str,
     key: str,
     current_value: str | None,
-) -> RevertDecision:
+) -> tuple[RevertDecision, dict[str, Any]]:
     """Decide how to revert one ``(tool, key)`` given its current value.
 
     PURE decision over the journal dict, following ADR-004's
@@ -276,6 +372,15 @@ def revert(
     ABSENT (``current_value is None``); if a value has since appeared (the
     user added a new key), that is an external change → ``REFUSE``.
 
+    **Cycle completion (issue #48).** A ``RESTORE`` *retires* the record —
+    the returned journal marks ``active=False`` for ``(tool, key)``. The
+    ownership cycle is over: a later :func:`take_over` over the retired
+    record starts a fresh restore point instead of preserving the stale
+    prior, which is what prevents resurrecting a credential the user deleted
+    after the revert. ``REFUSE`` and no-entry cases leave the journal
+    untouched (REFUSE means we did NOT act, so the cycle is still in flight;
+    no-entry means there was never a cycle to retire).
+
     Args:
         records: The current journal dict.
         tool: The tool name.
@@ -284,22 +389,40 @@ def revert(
             caller reads this from the live config just before reverting.
 
     Returns:
-        A :class:`RevertDecision` the caller acts on.
+        A ``(decision, new_records)`` pair. ``decision`` tells the caller what
+        to do; ``new_records`` is a NEW journal dict (input never mutated)
+        with the record retired to ``active=False`` when ``decision.action``
+        is ``RESTORE``, and unchanged (but still a fresh copy) otherwise. The
+        caller persists ``new_records`` so the retirement survives to disk.
     """
+
+    def _retire() -> dict[str, Any]:
+        """Return a new journal with ``(tool, key)`` retired (active=False)."""
+        retired = OwnershipRecord(
+            prior_value=record.prior_value,
+            prior_present=record.prior_present,
+            set_hash=record.set_hash,
+            active=False,
+        )
+        return _with_record(records, tool, key, retired)
+
     tool_bucket = records.get(tool) or {}
     raw = tool_bucket.get(key)
     if raw is None:
         # No provenance: we cannot prove we own this key → refuse to touch it
         # (never blindly delete a value we cannot attribute to ourselves).
-        return RevertDecision(
-            action=RevertAction.REFUSE,
-            key=key,
-            prior_value=None,
-            prior_present=False,
-            reason=(
-                f"no journal entry for {tool}/{key} — cannot prove ownership, "
-                "not touching"
+        return (
+            RevertDecision(
+                action=RevertAction.REFUSE,
+                key=key,
+                prior_value=None,
+                prior_present=False,
+                reason=(
+                    f"no journal entry for {tool}/{key} — cannot prove "
+                    "ownership, not touching"
+                ),
             ),
+            _copy_records(records),
         )
 
     record = OwnershipRecord.from_dict(raw if isinstance(raw, dict) else {})
@@ -310,43 +433,55 @@ def revert(
     # refuse to overwrite it.
     if record.set_hash is None:
         if current_value is None:
-            return RevertDecision(
+            return (
+                RevertDecision(
+                    action=RevertAction.RESTORE,
+                    key=key,
+                    prior_value=record.prior_value,
+                    prior_present=record.prior_present,
+                    reason=f"{tool}/{key}: still absent since our removal, restoring prior",
+                ),
+                _retire(),
+            )
+        return (
+            RevertDecision(
+                action=RevertAction.REFUSE,
+                key=key,
+                prior_value=record.prior_value,
+                prior_present=record.prior_present,
+                reason=(
+                    f"{tool}/{key} reappeared after our removal "
+                    "— not overwriting the new value"
+                ),
+            ),
+            _copy_records(records),
+        )
+
+    # We set a value; only restore if the current value is still ours.
+    if current_value is not None and hash_value(current_value) == record.set_hash:
+        return (
+            RevertDecision(
                 action=RevertAction.RESTORE,
                 key=key,
                 prior_value=record.prior_value,
                 prior_present=record.prior_present,
-                reason=f"{tool}/{key}: still absent since our removal, restoring prior",
-            )
-        return RevertDecision(
+                reason=f"{tool}/{key} unchanged since activation — restoring prior",
+            ),
+            _retire(),
+        )
+
+    return (
+        RevertDecision(
             action=RevertAction.REFUSE,
             key=key,
             prior_value=record.prior_value,
             prior_present=record.prior_present,
             reason=(
-                f"{tool}/{key} reappeared after our removal "
-                "— not overwriting the new value"
+                f"{tool}/{key} changed externally since activation "
+                "— not overwriting; inspect ownership.json"
             ),
-        )
-
-    # We set a value; only restore if the current value is still ours.
-    if current_value is not None and hash_value(current_value) == record.set_hash:
-        return RevertDecision(
-            action=RevertAction.RESTORE,
-            key=key,
-            prior_value=record.prior_value,
-            prior_present=record.prior_present,
-            reason=f"{tool}/{key} unchanged since activation — restoring prior",
-        )
-
-    return RevertDecision(
-        action=RevertAction.REFUSE,
-        key=key,
-        prior_value=record.prior_value,
-        prior_present=record.prior_present,
-        reason=(
-            f"{tool}/{key} changed externally since activation "
-            "— not overwriting; inspect ownership.json"
         ),
+        _copy_records(records),
     )
 
 

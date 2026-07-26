@@ -340,7 +340,7 @@ somehow unknown (defensive; the enum makes this unreachable today).
 
 ### `RevertAction`
 
-*enum — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/ownership.py#L61)*
+*enum — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/ownership.py#L76)*
 
 What `revert` decided to do with one managed key.
 
@@ -363,7 +363,7 @@ Members:
 
 ### `RevertDecision`
 
-*dataclass — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/ownership.py#L115)*
+*dataclass — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/ownership.py#L147)*
 
 The outcome of `revert` for one key.
 
@@ -382,7 +382,7 @@ Attributes:
 
 ### `take_over()`
 
-*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/ownership.py#L156)*
+*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/ownership.py#L220)*
 
 ```python
 take_over(records: dict[str, Any], tool: str, key: str, prior_value: str | None, prior_present: bool, set_hash: str | None) -> dict[str, Any]
@@ -404,16 +404,35 @@ on the second activation and a later `use default` would restore Z
 instead of the user's original P. Only when `set_hash` DIFFERS (a genuine
 value change, e.g. a rotated token) do we record the new prior.
 
+**Completed cycle ⇒ fresh restore point (issue #48).** If the existing
+record is INACTIVE (`active=False` — a prior `revert` `RESTORE`
+retired it), the old ownership cycle is over: whatever value is live now is
+a new starting point, not a continuation of our old ownership, so we record
+a FRESH prior. This is the symmetric fix to Bug 5 for the removal path,
+where key-absence alone cannot distinguish "our removal is still live" from
+"the cycle completed and the user then removed the restored key themselves"
+— only the `active` flag can.
+Args:
+    records: The current journal (top-level `{tool: {key: record}}`).
+    tool: The tool name (e.g. `"claude_code"`).
+    key: The env key we are taking ownership of.
+    prior_value: The key's value at the moment of takeover (`None` if
+        absent). Stored so revert can restore it.
+    prior_present: Whether the key was present at takeover.
+    set_hash: Hash of the value we are *setting* (so revert can detect an
+        external change). Pass `None` if we are taking ownership by
+        removing the key (no set value to validate against).
+
 ---
 
 <a id="revert"></a>
 
 ### `revert()`
 
-*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/ownership.py#L249)*
+*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/ownership.py#L345)*
 
 ```python
-revert(records: dict[str, Any], tool: str, key: str, current_value: str | None) -> RevertDecision
+revert(records: dict[str, Any], tool: str, key: str, current_value: str | None) -> tuple[RevertDecision, dict[str, Any]]
 ```
 
 Decide how to revert one `(tool, key)` given its current value.
@@ -439,6 +458,15 @@ on activation, e.g. `ANTHROPIC_API_KEY`). The "value we set" is the
 key's ABSENCE, so revert restores the prior only while the key is STILL
 ABSENT (`current_value is None`); if a value has since appeared (the
 user added a new key), that is an external change → `REFUSE`.
+
+**Cycle completion (issue #48).** A `RESTORE` *retires* the record —
+the returned journal marks `active=False` for `(tool, key)`. The
+ownership cycle is over: a later `take_over` over the retired
+record starts a fresh restore point instead of preserving the stale
+prior, which is what prevents resurrecting a credential the user deleted
+after the revert. `REFUSE` and no-entry cases leave the journal
+untouched (REFUSE means we did NOT act, so the cycle is still in flight;
+no-entry means there was never a cycle to retire).
 
 ---
 
@@ -535,14 +563,20 @@ so the journal never records a key we did not touch.
 #### `revert_decisions()`
 
 ```python
-revert_decisions(self, journal_records: dict[str, Any], state: dict[FileTag, Any]) -> dict[str, RevertDecision]
+revert_decisions(self, journal_records: dict[str, Any], state: dict[FileTag, Any]) -> tuple[dict[str, RevertDecision], dict[str, Any]]
 ```
 
-Compute a per-field `~zai_python_helper.ownership.RevertDecision`.
+Compute per-field `~zai_python_helper.ownership.RevertDecision`.
 
 For each key in `revert_key_set`, look up the field's CURRENT
 value in `state` and consult the journal. RESTORE / REFUSE / CLEAR
 follow `zai_python_helper.ownership.revert`.
+
+Returns `(decisions, retired_records)`: `decisions` is the per-key
+decision the caller acts on; `retired_records` is the journal with
+every `RESTORE` decision's record retired to `active=False`
+(issue #48 cycle-state). The caller persists `retired_records` so a
+later re-activation does not resurrect a stale restore point.
 
 #### `postconditions()`
 

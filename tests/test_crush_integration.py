@@ -79,7 +79,7 @@ class TestApplyAndRevert:
 
         with ProcessLock(paths.lock_file):
             state = tool.read_state(paths)
-            decisions = tool.revert_decisions(journal.read(), state)
+            decisions, retired = tool.revert_decisions(journal.read(), state)
             plan = tool.plan_revert(state=state, decisions=decisions)
             apply_plan_locked(paths, plan)
 
@@ -107,7 +107,7 @@ class TestApplyAndRevert:
 
         with ProcessLock(paths.lock_file):
             state = tool.read_state(paths)
-            decisions = tool.revert_decisions(journal.read(), state)
+            decisions, retired = tool.revert_decisions(journal.read(), state)
             plan = tool.plan_revert(state=state, decisions=decisions)
             apply_plan_locked(paths, plan)
 
@@ -137,7 +137,7 @@ class TestApplyAndRevert:
 
         with ProcessLock(paths.lock_file):
             state = tool.read_state(paths)
-            decisions = tool.revert_decisions(journal.read(), state)
+            decisions, retired = tool.revert_decisions(journal.read(), state)
             plan = tool.plan_revert(state=state, decisions=decisions)
             apply_plan_locked(paths, plan)
 
@@ -170,7 +170,7 @@ class TestApplyAndRevert:
 
         with ProcessLock(paths.lock_file):
             state = tool.read_state(paths)
-            decisions = tool.revert_decisions(journal.read(), state)
+            decisions, retired = tool.revert_decisions(journal.read(), state)
             plan = tool.plan_revert(state=state, decisions=decisions)
             apply_plan_locked(paths, plan)
 
