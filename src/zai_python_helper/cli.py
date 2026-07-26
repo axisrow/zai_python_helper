@@ -38,8 +38,25 @@ from zai_python_helper.tools.base import resolve_path
 _SECRET_ENV_KEYS = ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY")
 _SECRET_NAME_SUFFIXES = ("_KEY", "_TOKEN", "_SECRET", "_PASSWORD", "_PASSWD")
 _SECRET_NAME_SUBSTRINGS = ("SECRET", "PASSWORD", "CREDENTIAL", "TOKEN", "API_KEY")
+# Canonical credential key names that tools write in non-UPPER_CASE forms the
+# suffix/substring heuristics miss. Normalized (separator-stripped, upper) so
+# ``apiKey``/``api_key``/``apikey``/``API-KEY`` all match ``APIKEY``. Without
+# this, a ``--dry-run`` diff of an OpenCode/Crush/Factory Droid config leaked
+# the credential verbatim (camelCase ``apiKey`` matched neither ``_KEY`` nor
+# ``API_KEY``). See cycle-review finding (dry-run secret leak).
+_SECRET_NAME_NORMALIZED = ("APIKEY", "AUTHTOKEN", "ACCESSTOKEN")
 
 _RESTART_NOTICE = "restart recommended for deterministic switching"
+
+
+def _normalize_secret_key(key: str) -> str:
+    """Normalize a key for credential-name matching: upper, separators removed.
+
+    ``apiKey`` → ``APIKEY``, ``api-key`` → ``APIKEY``, ``api_key`` → ``APIKEY``.
+    So the camelCase/kebab/snake variants a tool config uses collapse to one
+    canonical form the substring/suffix checks run against.
+    """
+    return key.upper().replace("_", "").replace("-", "")
 
 
 def _is_secret_key(key: str) -> bool:
@@ -48,14 +65,20 @@ def _is_secret_key(key: str) -> bool:
     Conservative — errs on the side of redacting. Matches the explicit
     managed-secret names plus credential-ish suffixes/substrings so foreign
     secrets (OPENAI_API_KEY, cloud tokens) are caught even though we don't
-    enumerate them. Used by the generic ``--dry-run`` diff renderer.
+    enumerate them. Also matches canonical credential names in any case/separator
+    form (``apiKey``/``api_key``/``apikey`` → ``APIKEY``) so the camelCase keys
+    tools write are redacted, not leaked. Used by the generic ``--dry-run`` diff
+    renderer.
     """
     upper = key.upper()
     if key in _SECRET_ENV_KEYS:
         return True
     if any(upper.endswith(suf) for suf in _SECRET_NAME_SUFFIXES):
         return True
-    return any(sub in upper for sub in _SECRET_NAME_SUBSTRINGS)
+    if any(sub in upper for sub in _SECRET_NAME_SUBSTRINGS):
+        return True
+    normalized = _normalize_secret_key(key)
+    return any(name in normalized for name in _SECRET_NAME_NORMALIZED)
 
 
 def _redact_text(text: str) -> str:
