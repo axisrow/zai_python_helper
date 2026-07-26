@@ -328,6 +328,26 @@ class TestJsonFailClosedAllowlist:
         assert redacted["apiKey"] == "<redacted>"
         assert redacted["ANTHROPIC_BASE_URL"] == "https://api.z.ai"
 
+    def test_container_key_list_of_scalars_redacted(self):
+        """Regression (PR #51 review): a bare-scalar LIST under a CONTAINER
+        key (env/headers/…) is redacted element-for-element. Container keys are
+        structural walkers — their children classify by OWN key (a dict); a
+        bare-scalar list under them is unclassified input and must NOT inherit
+        the container's "safe" status. Without this, ``{"env": ["sk-…"]}``
+        leaked because ``env`` is in the safe-allowlist."""
+        for container in ("env", "headers", "environment", "options"):
+            redacted = _redact_json_doc({container: ["SENTINEL-A", "SENTINEL-B"]})
+            assert redacted == {container: ["<redacted>", "<redacted>"]}, (
+                f"{container}: bare-scalar list leaked"
+            )
+
+    def test_scalar_list_parent_args_still_visible(self):
+        """The container-key fix must NOT over-redact a genuine scalar-list
+        parent: ``args`` (command tokens) shows its elements. Guards the
+        inverse of test_container_key_list_of_scalars_redacted."""
+        redacted = _redact_json_doc({"args": ["-y", "@z_ai/mcp-server"]})
+        assert redacted == {"args": ["-y", "@z_ai/mcp-server"]}
+
 
 # ---------------------------------------------------------------------------
 # Issue #44 — shell foreign .zshrc suppression in dry-run
@@ -413,3 +433,30 @@ class TestShellForeignSuppression:
         assert "zai-python-helper managed" in out
         # And the foreign summary is present:
         assert "foreign line" in out
+
+    def test_managed_block_injected_export_redacted(self):
+        """Regression (PR #51 review): an export line INJECTED between the
+        fences (manual edit / merge / another tool) is redacted in the preview.
+
+        ``_find_block_range`` validates only fence ordering/uniqueness, NOT
+        body content — so an injected ``export ANTHROPIC_API_KEY=sk-…`` still
+        parses as a valid managed block. Pre-fix, ``_shell_managed_preview``
+        printed the slice verbatim and the secret leaked; the managed slice is
+        now run through ``_redact_shell_text`` (defense-in-depth, preserving
+        what #43 established for the whole-file path)."""
+        from zai_python_helper.shell_block import (
+            MANAGED_BLOCK_BEGIN,
+            MANAGED_BLOCK_END,
+        )
+
+        injected = (
+            f"{MANAGED_BLOCK_BEGIN}\n"
+            "# This block is managed by zai-python-helper — do not edit or move it.\n"
+            "export ANTHROPIC_API_KEY=sk-INJECTED-BETWEEN-FENCES\n"
+            f"{MANAGED_BLOCK_END}\n"
+        )
+        preview = _shell_managed_preview(injected)
+        assert "sk-INJECTED-BETWEEN-FENCES" not in preview
+        assert "export ANTHROPIC_API_KEY=<redacted>" in preview
+        # The fence structure is still shown (the block is present):
+        assert "zai-python-helper managed" in preview

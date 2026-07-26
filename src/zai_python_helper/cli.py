@@ -156,14 +156,48 @@ def _is_secret_key(key: str) -> bool:
 
 
 def _is_safe_json_key(key: str) -> bool:
-    """True iff a JSON scalar under ``key`` is known non-secret (issue #44).
+    """True iff a JSON scalar directly under ``key`` is known non-secret (issue #44).
 
     FAIL-CLOSED: defaults to False for any key we did not explicitly allowlist.
     Membership is matched case-insensitively against
     :data:`_SAFE_JSON_KEY_NAMES` so a tool's casing variant (``Url`` vs ``url``)
-    still resolves. Used by :func:`_redact_json_doc` to gate scalar visibility.
+    still resolves. Used by :func:`_redact_json_doc` to gate a DIRECT scalar
+    child's visibility.
+
+    Note: this does NOT vouch for bare-scalar LIST elements under the key —
+    see :func:`_is_safe_scalar_list_parent`. Container keys (``env``,
+    ``headers``, …) are safe to RECURSE but a bare scalar under them is still
+    redacted.
     """
     return key.lower() in {k.lower() for k in _SAFE_JSON_KEY_NAMES}
+
+
+# Keys whose value is a CONTAINER we recurse into, but whose bare-scalar list
+# children must NOT inherit "safe" (issue #44 review). ``env``/``headers`` hold
+# named-keyed children (a dict) — a bare-scalar list under them is unclassified
+# input and is redacted fail-closed. Contrast ``args`` (a list of command
+# tokens) which IS safe to show element-for-element. Listed case-insensitively.
+_CONTAINER_JSON_KEYS: frozenset[str] = frozenset(
+    {"env", "headers", "environment", "providers", "mcpServers", "mcp", "options"}
+)
+
+
+def _is_safe_scalar_list_parent(key: str | None) -> bool:
+    """True iff a bare-scalar LIST element under ``key`` is safe to show.
+
+    ``args`` (a list of command tokens) is safe element-for-element. A
+    CONTAINER key (``env``, ``headers``, …) is NOT — its children are meant to
+    be named-keyed dicts, so a bare-scalar list under it is unclassified input
+    and is redacted fail-closed. This closes the gap where
+    ``_redact_json_doc({'env': ['sk-SENTINEL']})`` leaked because ``env`` is in
+    the safe-allowlist: container keys are safe to recurse but not to vouch for
+    a bare-scalar child.
+    """
+    if key is None:
+        return False
+    if key.lower() in {k.lower() for k in _CONTAINER_JSON_KEYS}:
+        return False
+    return _is_safe_json_key(key)
 
 
 def _redact_json_doc(doc: Any, *, parent_key: str | None = None) -> Any:
@@ -188,17 +222,17 @@ def _redact_json_doc(doc: Any, *, parent_key: str | None = None) -> Any:
     - A nested DICT classifies each child by ITS OWN key (``headers`` →
       ``Authorization`` is secret by its own name, not by ``headers``). So a
       safe container can still hide a secret child.
-    - A LIST of SCALARS inherits the parent key's classification: ``args``
-      (a safe key) shows its command tokens; an unclassified key's list has
-      each scalar redacted. (No managed config carries a secret as a bare list
-      element, so a scalar with no own key is shown only under a known-safe
-      parent.)
     - A LIST of DICTS recurses each element (its children classify by key).
+    - A LIST of SCALARS classifies each element by the parent key, but ONLY via
+      :func:`_is_safe_scalar_list_parent`: ``args`` (command tokens) shows its
+      elements; a CONTAINER parent (``env``, ``headers``) does NOT vouch for a
+      bare-scalar child, so ``{"env": ["sk-…"]}`` redacts each element
+      fail-closed (a bare list under a container is unclassified input).
 
-    ``parent_key`` is the key this value sits under (None at the document root
-    and for list-of-dict elements, which have no own key). Applied to the
-    parsed doc BEFORE it is rendered into a ``--dry-run`` diff, so the diff
-    text itself never carries a secret.
+    ``parent_key`` is the key this value (or its enclosing list) sits under; it
+    is None only at the document root (the initial call). Applied to the parsed
+    doc BEFORE it is rendered into a ``--dry-run`` diff, so the diff text
+    itself never carries a secret.
     """
     if isinstance(doc, dict):
         out: dict[str, Any] = {}
@@ -208,19 +242,24 @@ def _redact_json_doc(doc: Any, *, parent_key: str | None = None) -> Any:
     if isinstance(doc, list):
         return [_redact_json_doc(item, parent_key=parent_key) for item in doc]
     # A scalar value. Decide visibility from the enclosing key:
-    # - secret by name  → always redacted (denylist fast path).
-    # - safe by name    → shown.
-    # - bare scalar under a SAFE parent key (a list element like ``args``) → shown.
-    # - anything else   → redacted (fail-closed).
+    # - secret by name             → always redacted (denylist fast path).
+    # - safe by name (direct child) → shown.
+    # - bare scalar list element    → shown only under a safe SCALAR-LIST parent
+    #   (args); a container parent (env/headers) does not vouch for it.
+    # - anything else              → redacted (fail-closed).
     if parent_key is not None:
         if _is_secret_key(parent_key):
             return "<redacted>"
-        if _is_safe_json_key(parent_key):
+        # A scalar reached here either as a direct dict child (parent_key is
+        # its own name) or as a list element (parent_key is the list's name).
+        # _is_safe_json_key covers the direct-child case; the list-element
+        # case additionally excludes container parents via the combined check.
+        if _is_safe_scalar_list_parent(parent_key):
             return doc
         return "<redacted>"
-    # No enclosing key (document root scalar / list-of-dict element with no
-    # own key): a value with no key carries no hint it is non-secret, so
-    # fail-closed. (No managed config is a bare scalar at root.)
+    # No enclosing key (document-root scalar): a value with no key carries no
+    # hint it is non-secret, so fail-closed. (No managed config is a bare
+    # scalar at root.)
     return "<redacted>"
 
 
@@ -281,9 +320,11 @@ def _redact_text(text: str) -> str:
     source): structural JSON redaction (fail-closed allowlist — see
     :func:`_redact_json_doc`) when the text parses as JSON, otherwise
     shell-assignment redaction. The ``--dry-run`` path redacts at the SOURCE
-    (see :func:`_apply_plan` for the JSON / :func:`_print_diff` for shell) and
-    only falls back to this for stray text (e.g. the MCP ``--dry-run`` echo).
-    A secret value never reaches stdout/stderr.
+    inside :func:`_apply_plan` (JSON via :func:`_redact_json_doc`, shell via
+    :func:`_shell_managed_preview`) BEFORE the diff is rendered; this function
+    is only the fallback for stray text (e.g. the MCP ``--dry-run`` echo).
+    :func:`_print_diff` itself does no redaction — it prints already-redacted
+    strings verbatim. A secret value never reaches stdout/stderr.
     """
     import json
 
@@ -310,10 +351,17 @@ def _shell_managed_preview(text: str) -> str:
     line-anchored regex cannot reliably detect; the only provably-safe choice is
     to not echo foreign content at all.
 
-    Foreign content is summarized (a ``<N foreign line(s) redacted>`` note plus
-    a per-region marker) so the user still sees WHERE their content sits
-    relative to the managed block, without any of it reaching stdout. The
-    managed block itself is comment-only (no exports) and safe to print.
+    Foreign content is summarized (a ``<N foreign line(s) redacted>`` note) so
+    the user knows their content exists without any of it reaching stdout.
+
+    The managed block itself is ALSO run through :func:`_redact_shell_text`
+    before printing (defense-in-depth). The block body is comment-only by
+    construction, but :func:`~zai_python_helper.shell_block._find_block_range`
+    validates only fence ordering/uniqueness — NOT body content — so a line
+    injected BETWEEN the fences (manual edit, merge, another tool) still yields
+    a valid range. Redacting the slice guarantees an injected ``export
+    KEY=secret`` can never leak via the preview, preserving the defense #43
+    established for the whole-file path.
 
     An absent/malformed block (no well-formed fence pair) yields an empty
     managed section; the foreign summary still reflects the surrounding lines.
@@ -336,7 +384,12 @@ def _shell_managed_preview(text: str) -> str:
     total_nonblank = sum(1 for ln in lines if ln != "")
     managed_nonblank = sum(1 for ln in managed_lines if ln != "")
     foreign_count = total_nonblank - managed_nonblank
-    managed = "\n".join(managed_lines)
+    # DEFENSE-IN-DEPTH: redact the managed slice too. The block body is
+    # comment-only by construction, but _find_block_range does not validate
+    # body content — an export injected between the fences still parses as a
+    # valid block. Running the shell redactor over the slice closes that hole
+    # (the whole-file redaction #43 added is preserved here for the slice).
+    managed = _redact_shell_text("\n".join(managed_lines))
     if managed and not managed.endswith("\n"):
         managed += "\n"
     return _foreign_summary(foreign_count, managed=managed)
