@@ -141,15 +141,35 @@ def _plan_zai_doc(
 ) -> dict[str, Any]:
     """Return the desired ``settings.json`` document after ``use zai``.
 
-    Deep-merge: drop every prior ``GLM Coding Plan`` entry from
-    ``customModels``, then append our two protocol entries; preserve every
-    foreign entry and all other top-level keys. Does NOT mutate the input.
+    For each of our two protocol entries: DEEP-MERGE our managed fields
+    (displayName/provider/model/maxOutputTokens/baseUrl/apiKey) into any
+    existing GLM Coding Plan entry of the SAME protocol, preserving foreign
+    sibling keys the user set on it — so activation never clobbers user
+    config. Any prior GLM entry of a DIFFERENT protocol is dropped (a
+    global↔china switch keeps only the current protocols). Foreign entries and
+    all other top-level keys round-trip untouched. Does NOT mutate the input.
     """
     new_doc: dict[str, Any] = dict(doc) if doc else {}
     models = list(new_doc.get("customModels") or [])
-    models = [m for m in models if not _is_our_entry(m)]
-    models.extend(_our_entries(region, auth_token))
-    new_doc["customModels"] = models
+    # Index our existing entries by protocol so we can deep-merge into them.
+    existing_by_proto: dict[str, dict[str, Any]] = {}
+    kept: list[dict[str, Any]] = []
+    for m in models:
+        if _is_our_entry(m):
+            proto = _protocol_of(m)
+            if proto is not None and proto not in existing_by_proto:
+                existing_by_proto[proto] = dict(m)
+            # other GLM entries (duplicate / different protocol we'll re-add)
+            # are dropped here and re-added fresh below.
+        else:
+            kept.append(m)
+    for entry in _our_entries(region, auth_token):
+        proto = _protocol_of(entry)
+        assert proto is not None  # our entries always carry a known protocol
+        base = dict(existing_by_proto.get(proto) or {})
+        base.update(entry)  # our managed fields win; user sibling keys survive
+        kept.append(base)
+    new_doc["customModels"] = kept
     return new_doc
 
 

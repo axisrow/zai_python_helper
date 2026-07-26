@@ -75,6 +75,34 @@ class TestPlanZai:
         assert len(ours) == 2  # not 4
         assert all(m["apiKey"] == TOKEN for m in ours)
 
+    def test_deep_merges_user_keys_into_our_entry(self):
+        """Bug 3 regression: activation must DEEP-MERGE our managed fields
+        into an existing GLM entry of the SAME protocol, preserving foreign
+        sibling keys the user set on it — not replace the whole entry."""
+        seed = {
+            "customModels": [
+                {
+                    "displayName": "Z.ai GLM Coding Plan (Anthropic)",
+                    "provider": "anthropic",
+                    "custom": "keep-me",
+                    "tools": ["shell", "edit"],
+                }
+            ]
+        }
+        plan = fd.plan_zai(Region.GLOBAL, factory_doc=seed, auth_token=TOKEN)
+        anth = next(
+            m
+            for m in plan.delta_for(FileTag.FACTORY_DROID).content["customModels"]
+            if fd._is_our_entry(m) and fd._protocol_of(m) == fd.PROVIDER_ANTHROPIC
+        )
+        # Our managed fields set.
+        assert anth["apiKey"] == TOKEN
+        assert anth["baseUrl"] == GLOBAL_ANTHROPIC
+        assert anth["model"] == "glm-4.7"
+        # User's foreign sibling keys preserved (not clobbered).
+        assert anth["custom"] == "keep-me"
+        assert anth["tools"] == ["shell", "edit"]
+
     def test_idempotent_on_post_state(self):
         first = fd.plan_zai(Region.GLOBAL, factory_doc=None, auth_token=TOKEN)
         post = first.delta_for(FileTag.FACTORY_DROID).content
