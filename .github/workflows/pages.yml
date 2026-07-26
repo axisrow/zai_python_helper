@@ -1,0 +1,63 @@
+name: Pages
+
+# Issue #20 — publish the human-readable docs site to GitHub Pages.
+# The site is built by mkdocs (Material theme + mkdocs-static-i18n for the
+# ru/en/zh language selector + mkdocstrings to embed the auto-generated API
+# reference from issue #19). Built on every push to main; PRs only run the
+# structure-sync gate (in docs.yml) and never publish.
+#
+# Pages must be configured in the repo settings: Source = "GitHub Actions".
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Only one deploy at a time; a queued run supersedes the in-progress one.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install package with docs extras
+        # docs extra = griffe + mkdocs/material/mkdocstrings/mkdocs-static-i18n
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[docs]"
+      - name: Enforce human-docs i18n structure sync
+        # ru/ must mirror en/ file-for-file, or the selector 404s. zh is served
+        # via fallback_to_default until its content lands in #34; the gate is
+        # run with --targets ru only here and expanded to ru+zh in #34.
+        run: python tools/check_human_docs_structure.py --targets ru
+      - name: Build with mkdocs
+        # --strict turns broken links / nav refs into a hard failure.
+        run: mkdocs build --strict
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    name: Deploy to Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4

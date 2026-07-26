@@ -1,0 +1,137 @@
+# mkdocs configuration — issue #20.
+#
+# Human-readable docs site on GitHub Pages, i18n: en / ru / zh.
+#
+# Layout (docs_dir = docs/):
+#   docs/{en,ru,zh}/**/*.md        — per-language human content (issue #20).
+#                                    The locale MUST be the first path segment
+#                                    (mkdocs-static-i18n folder mode requirement).
+#   docs/api/zai_python_helper.md   — AUTO-GENERATED API reference (issue #19)
+#   docs/ARCHITECTURE.md            — design, ADRs
+#
+# i18n via mkdocs-static-i18n in **folder** mode: one sub-folder per language.
+# English (`en`) is the source of truth; ru/zh are derivatives. The plugin
+# builds one tree per language and Material's language selector links them.
+# `fallback_to_default: true` means a page missing in ru/zh is served from en.
+#
+# Local preview:  `pip install -e ".[docs]" && mkdocs serve`
+# Build:          `mkdocs build`  (site/ is the deploy artifact)
+
+site_name: zai_python_helper
+site_description: >-
+  MIT-licensed, clean-room Python helper connecting Claude Code to the Z.ai GLM
+  Coding Plan. Importable + headless. Configured by patching settings, not by a
+  daemon.
+site_url: https://axisrow.github.io/zai_python_helper/
+repo_url: https://github.com/axisrow/zai_python_helper
+repo_name: axisrow/zai_python_helper
+edit_uri: edit/main/docs/
+
+docs_dir: docs
+
+# ---- Theme: Material, with per-language selection ----
+theme:
+  name: material
+  language: en
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.indexes
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+    - content.action.edit
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  icon:
+    repo: fontawesome/brands/github
+
+# ---- Plugins ----
+plugins:
+  # i18n via sub-folders (docs_structure: folder).
+  # `en` is the default language = source of truth; ru/zh are derivatives.
+  # `reconfigure_material` wires up Material's language selector automatically.
+  - i18n:
+      docs_structure: folder
+      fallback_to_default: true
+      reconfigure_material: true
+      reconfigure_search: true
+      languages:
+        - locale: en
+          name: English
+          default: true
+          build: true
+        - locale: ru
+          name: Русский
+          build: true
+        - locale: zh
+          name: 中文
+          build: true
+  - search
+  # mkdocstrings renders the auto-generated API reference (issue #19) inside
+  # the same site, so human docs and the API reference share one nav.
+  - mkdocstrings:
+      default_handler: python
+      handlers:
+        python:
+          options:
+            show_source: true
+            show_root_heading: true
+            show_signature_annotations: true
+            separate_signature: true
+            heading_level: 2
+
+# ---- Markdown extensions ----
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.snippets
+  - toc:
+      permalink: true
+  - attr_list
+  - md_in_html
+  - def_list
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/axisrow/zai_python_helper
+
+# ---- Navigation ----
+# Identical across languages (CI enforces ru/zh mirror en/ file-for-file).
+# Paths are written for the DEFAULT language (en); the i18n plugin rewrites
+# the `en/` prefix to the current language's folder. Language-neutral files
+# (api/, ARCHITECTURE.md) live outside the locale folders and are shared.
+nav:
+  - Home: en/index.md
+  - Quickstart: en/quickstart.md
+  - Guide:
+      - en/guide/index.md
+      - Model modes: en/guide/modes.md
+      - Importable API: en/guide/importable.md
+  - CLI reference: en/cli-reference.md
+  - Parity: en/parity.md
+  - Contribute: en/contribute.md
+  - API reference: api/zai_python_helper.md
+  - Architecture: ARCHITECTURE.md

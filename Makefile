@@ -3,7 +3,7 @@
 
 PYTHON ?= python3
 
-.PHONY: install dev test lint docs docs-check clean
+.PHONY: install dev test lint docs docs-check human-docs-check clean
 
 # Editable install with dev + docs extras (one-shot bootstrap for local work).
 install:
@@ -29,6 +29,12 @@ docs:
 docs-check: docs
 	@git diff --exit-code docs/ llms.txt \
 		|| (echo "::error::Docs are stale. Run 'make docs' and commit docs/ + llms.txt." && exit 1)
+
+# #20 — human-docs i18n structure-sync gate. English (docs/en/) is the source
+# of truth; ru/ and zh/ must contain the same set of .md files. Fails (non-zero)
+# on any missing or extra file so the language selector never leads to a 404.
+human-docs-check:
+	$(PYTHON) tools/check_human_docs_structure.py
 
 clean:
 	rm -rf build dist *.egg-info src/*.egg-info
