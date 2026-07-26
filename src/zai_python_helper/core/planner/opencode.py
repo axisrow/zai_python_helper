@@ -66,13 +66,16 @@ ALL_PROVIDER_NAMES: tuple[str, ...] = tuple(PROVIDER_NAME_BY_REGION.values())
 # providers (openai, anthropic, ollama, etc.).
 _PROVIDER_MARKER = "coding-plan"
 
-# Model strings written to top-level ``model`` / ``small_model``. The prefix
-# is the provider-namespace OpenCode resolves against; ``zai`` is the default
-# (issue #7 follow-up if a different prefix is required). The model IDs follow
-# the spec: glm-4.6 for the main model, glm-4.5-air for the small model.
-_MODEL_PREFIX = "zai"
-MODEL_MAIN = f"{_MODEL_PREFIX}/glm-4.6"
-MODEL_SMALL = f"{_MODEL_PREFIX}/glm-4.5-air"
+# Model strings written to top-level ``model`` / ``small_model``. OpenCode
+# model IDs are ``<provider_id>/<model_id>`` and MUST reference the configured
+# coding-plan provider (the same name we install under ``provider.<name>``) —
+# otherwise OpenCode cannot resolve the model to our provider and the
+# activation is inert (or, worse, routes to a different provider). So the
+# prefix is region-dependent: ``zai-coding-plan`` global /
+# ``zhipuai-coding-plan`` china. The model IDs follow the spec: glm-4.6 for the
+# main model, glm-4.5-air for the small model.
+MODEL_ID_MAIN = "glm-4.6"
+MODEL_ID_SMALL = "glm-4.5-air"
 
 
 def provider_name_for_region(region: Region) -> str:
@@ -81,6 +84,16 @@ def provider_name_for_region(region: Region) -> str:
         return PROVIDER_NAME_BY_REGION[region]
     except KeyError as e:  # pragma: no cover - enum-closed, unreachable
         raise ValueError(f"Unknown region: {region!r}") from e
+
+
+def model_main_for_region(region: Region) -> str:
+    """The top-level ``model`` string for ``region`` — ``<provider>/glm-4.6``."""
+    return f"{provider_name_for_region(region)}/{MODEL_ID_MAIN}"
+
+
+def model_small_for_region(region: Region) -> str:
+    """The top-level ``small_model`` string for ``region`` — ``<provider>/glm-4.5-air``."""
+    return f"{provider_name_for_region(region)}/{MODEL_ID_SMALL}"
 
 
 def _is_our_provider(name: str) -> bool:
@@ -119,18 +132,33 @@ def _plan_zai_doc(
     new_doc: dict[str, Any] = dict(doc) if doc else {}
 
     # Providers: drop every prior coding-plan provider first (there can be at
-    # most one in practice, but the loop is defensive), then set the current
-    # region's. Foreign providers round-trip untouched.
+    # most one in practice, but the loop is defensive), then DEEP-MERGE the
+    # current region's apiKey into the entry — preserving any foreign keys the
+    # user set on it (e.g. timeout, concurrency, nested models). Foreign
+    # providers round-trip untouched. Replacing the whole entry (the old code)
+    # discarded user configuration irreversibly.
+    name = provider_name_for_region(region)
     providers = dict(new_doc.get("provider") or {})
-    for name in [n for n in providers if _is_our_provider(n)]:
-        providers.pop(name, None)
-    providers[provider_name_for_region(region)] = {"options": {"apiKey": auth_token}}
+    # Seed the merge from any prior coding-plan entry so a same-region
+    # re-activation (or a global→china switch keeping user keys) preserves
+    # them; foreign providers are never touched. At most one coding-plan entry
+    # exists in practice (plan_zai removes prior ones), so the first match is
+    # authoritative.
+    entry: dict[str, Any] = {}
+    for prior in [n for n in providers if _is_our_provider(n)]:
+        entry = dict(providers.pop(prior) or {})
+        break
+    options = dict(entry.get("options") or {})
+    options["apiKey"] = auth_token
+    entry["options"] = options
+    providers[name] = entry
     new_doc["provider"] = providers
 
     # Top-level model strings — always set to the coding-plan models on
-    # activation (the spec pins them).
-    new_doc["model"] = MODEL_MAIN
-    new_doc["small_model"] = MODEL_SMALL
+    # activation. The prefix is the region's provider name so OpenCode resolves
+    # the model against OUR provider (postcondition requires this).
+    new_doc["model"] = model_main_for_region(region)
+    new_doc["small_model"] = model_small_for_region(region)
     return new_doc
 
 

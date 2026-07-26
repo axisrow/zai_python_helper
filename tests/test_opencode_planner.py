@@ -28,14 +28,21 @@ class TestPlanZai:
         assert delta.kind == DeltaKind.WRITE_JSON
         doc = delta.content
         assert doc["provider"][GLOBAL_NAME] == {"options": {"apiKey": TOKEN}}
-        assert doc["model"] == "zai/glm-4.6"
-        assert doc["small_model"] == "zai/glm-4.5-air"
+        # Bug 2 regression: model MUST reference the configured provider
+        # (zai-coding-plan), not a bare "zai" — else OpenCode can't resolve it
+        # and postcondition fails on our own output.
+        assert doc["model"] == "zai-coding-plan/glm-4.6"
+        assert doc["small_model"] == "zai-coding-plan/glm-4.5-air"
+        # And the postcondition holds on the planned doc (Bug 2 end-to-end).
+        assert oc.postconditions(Region.GLOBAL, opencode_doc=doc) is True
 
     def test_china_uses_zhipuai_provider_name(self):
         plan = oc.plan_zai(Region.CHINA, opencode_doc=None, auth_token=TOKEN)
         doc = plan.delta_for(FileTag.OPENCODE).content
         assert doc["provider"][CHINA_NAME] == {"options": {"apiKey": TOKEN}}
         assert GLOBAL_NAME not in doc["provider"]
+        assert doc["model"] == "zhipuai-coding-plan/glm-4.6"
+        assert oc.postconditions(Region.CHINA, opencode_doc=doc) is True
 
     def test_preserves_schema_and_foreign_providers(self):
         seed = {
@@ -55,8 +62,8 @@ class TestPlanZai:
         """A global→china switch must not leave the stale global provider."""
         seed = {
             "provider": {GLOBAL_NAME: {"options": {"apiKey": "old"}}},
-            "model": "zai/glm-4.6",
-            "small_model": "zai/glm-4.5-air",
+            "model": "zai-coding-plan/glm-4.6",
+            "small_model": "zai-coding-plan/glm-4.5-air",
         }
         plan = oc.plan_zai(Region.CHINA, opencode_doc=seed, auth_token=TOKEN)
         doc = plan.delta_for(FileTag.OPENCODE).content
@@ -75,13 +82,35 @@ class TestPlanZai:
         seed = {
             "$schema": "x",
             "provider": {"openai": {"options": {"apiKey": "f"}}},
-            "model": "zai/glm-4.6",
-            "small_model": "zai/glm-4.5-air",
+            "model": "zai-coding-plan/glm-4.6",
+            "small_model": "zai-coding-plan/glm-4.5-air",
         }
         first = oc.plan_zai(Region.GLOBAL, opencode_doc=seed, auth_token=TOKEN)
         post = first.delta_for(FileTag.OPENCODE).content
         second = oc.plan_zai(Region.GLOBAL, opencode_doc=post, auth_token=TOKEN)
         assert second.is_empty
+
+    def test_deep_merges_user_keys_into_provider_entry(self):
+        """Bug 3 regression: activation must DEEP-MERGE the apiKey into the
+        provider entry, preserving foreign keys the user set on it (timeout,
+        concurrency, nested models) — not replace the whole entry."""
+        seed = {
+            "provider": {
+                GLOBAL_NAME: {
+                    "options": {"apiKey": "old", "timeout": 30},
+                    "models": {"glm-4.6": {"toolCallStreaming": True}},
+                    "npm": None,
+                }
+            },
+        }
+        plan = oc.plan_zai(Region.GLOBAL, opencode_doc=seed, auth_token=TOKEN)
+        entry = plan.delta_for(FileTag.OPENCODE).content["provider"][GLOBAL_NAME]
+        # apiKey updated; user's timeout preserved (deep-merge under options).
+        assert entry["options"]["apiKey"] == TOKEN
+        assert entry["options"]["timeout"] == 30
+        # Sibling user keys preserved (not clobbered by the apiKey write).
+        assert entry["models"] == {"glm-4.6": {"toolCallStreaming": True}}
+        assert entry["npm"] is None
 
     def test_token_rotation_is_not_idempotent(self):
         """A different token is a genuine change → non-NOOP."""

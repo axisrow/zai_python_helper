@@ -49,8 +49,8 @@ class TestApplyAndRevert:
 
         doc = _read_doc(paths)
         assert doc["provider"][GLOBAL_NAME] == {"options": {"apiKey": TOKEN}}
-        assert doc["model"] == "zai/glm-4.6"
-        assert doc["small_model"] == "zai/glm-4.5-air"
+        assert doc["model"] == "zai-coding-plan/glm-4.6"
+        assert doc["small_model"] == "zai-coding-plan/glm-4.5-air"
 
     def test_use_zai_is_idempotent(self, tool, tmp_path):
         paths = Paths.from_home(tmp_path)

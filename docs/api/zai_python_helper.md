@@ -643,13 +643,9 @@ Attributes:
 
 ### `REGISTRY`
 
-*constant — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/tools/__init__.py#L20) (`dict[str, Tool]`)*
+*constant — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/tools/__init__.py#L21) (`dict[str, Tool]`)*
 
-<<<<<<< HEAD
-Value: `{ClaudeCodeTool.name: ClaudeCodeTool(), CrushTool.name: CrushTool()}`
-=======
-Value: `{ClaudeCodeTool.name: ClaudeCodeTool(), OpenCodeTool.name: OpenCodeTool()}`
->>>>>>> b0c2f2e (feat(S6): OpenCode config planner + tool adapter (#7))
+Value: `{ClaudeCodeTool.name: ClaudeCodeTool(), CrushTool.name: CrushTool(), OpenCodeTool.name: OpenCodeTool()}`
 
 *(no docstring)*
 
@@ -659,7 +655,7 @@ Value: `{ClaudeCodeTool.name: ClaudeCodeTool(), OpenCodeTool.name: OpenCodeTool(
 
 ### `get_tool()`
 
-*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/tools/__init__.py#L26)*
+*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/tools/__init__.py#L28)*
 
 ```python
 get_tool(name: str) -> Tool
@@ -678,7 +674,7 @@ a clear error.
 
 ### `tool_names()`
 
-*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/tools/__init__.py#L40)*
+*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/tools/__init__.py#L42)*
 
 ```python
 tool_names() -> list[str]

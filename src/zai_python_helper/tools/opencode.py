@@ -267,7 +267,7 @@ class OpenCodeTool(Tool):
         name = oc.provider_name_for_region(region)
         return [
             f"  provider: {name}",
-            f"  model: {oc.MODEL_MAIN}",
-            f"  small_model: {oc.MODEL_SMALL}",
+            f"  model: {oc.model_main_for_region(region)}",
+            f"  small_model: {oc.model_small_for_region(region)}",
             "  apiKey: <redacted>",
         ]
