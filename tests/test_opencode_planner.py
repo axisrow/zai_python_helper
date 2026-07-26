@@ -70,6 +70,44 @@ class TestPlanZai:
         assert GLOBAL_NAME not in doc["provider"]  # stale global removed
         assert doc["provider"][CHINA_NAME] == {"options": {"apiKey": TOKEN}}
 
+    def test_preserves_foreign_provider_with_coding_plan_substring(self):
+        """A foreign provider whose name merely CONTAINS ``coding-plan``
+        (e.g. ``my-coding-plan-proxy``) must NOT be treated as ours. Only the
+        two exact regional names are managed — a substring match would
+        destroy the user's foreign provider (ADR-004: do not clobber)."""
+        seed = {
+            "provider": {
+                "my-coding-plan-proxy": {
+                    "options": {"apiKey": "user-foreign"},
+                    "baseURL": "https://user.proxy",
+                },
+            },
+        }
+        plan = oc.plan_zai(Region.GLOBAL, opencode_doc=seed, auth_token=TOKEN)
+        doc = plan.delta_for(FileTag.OPENCODE).content
+        # Foreign provider round-trips untouched.
+        assert doc["provider"]["my-coding-plan-proxy"]["options"]["apiKey"] == "user-foreign"
+        assert doc["provider"]["my-coding-plan-proxy"]["baseURL"] == "https://user.proxy"
+        # And the real coding-plan provider is added alongside it.
+        assert doc["provider"][GLOBAL_NAME] == {"options": {"apiKey": TOKEN}}
+
+    def test_removes_all_regional_providers_before_install(self):
+        """With BOTH regional entries present (an edge state left by a prior
+        cross-region switch), ``plan_zai`` must remove every managed regional
+        provider before installing the target — not just the first one (else a
+        stale helper credential survives in the config)."""
+        seed = {
+            "provider": {
+                GLOBAL_NAME: {"options": {"apiKey": "helper-old"}},
+                CHINA_NAME: {"options": {"apiKey": "helper-cn"}},
+            },
+        }
+        plan = oc.plan_zai(Region.GLOBAL, opencode_doc=seed, auth_token=TOKEN)
+        doc = plan.delta_for(FileTag.OPENCODE).content
+        # Only the freshly-installed global entry remains; china is gone too.
+        assert list(doc["provider"].keys()) == [GLOBAL_NAME]
+        assert doc["provider"][GLOBAL_NAME] == {"options": {"apiKey": TOKEN}}
+
     def test_idempotent_on_post_state(self):
         """A second plan_zai on the first plan's post-state is a NOOP."""
         first = oc.plan_zai(Region.GLOBAL, opencode_doc=None, auth_token=TOKEN)

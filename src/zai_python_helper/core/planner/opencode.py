@@ -60,11 +60,11 @@ PROVIDER_NAME_BY_REGION: dict[Region, str] = {
 }
 ALL_PROVIDER_NAMES: tuple[str, ...] = tuple(PROVIDER_NAME_BY_REGION.values())
 
-# A provider key is "ours" (a coding-plan provider we manage) if it contains
-# the substring ``coding-plan``. Conservative — matches both known names and
-# any future variant following the same convention, without matching foreign
-# providers (openai, anthropic, ollama, etc.).
-_PROVIDER_MARKER = "coding-plan"
+# A provider key is "ours" iff it EXACTLY equals one of the two regional names
+# above. Exact-match (not a ``coding-plan`` substring) is deliberate: a substring
+# would also catch a foreign provider whose name merely contains the marker
+# (e.g. ``my-coding-plan-proxy``) and destroy it on activation / reversion,
+# violating ADR-004 (do not clobber external state).
 
 # Model strings written to top-level ``model`` / ``small_model``. OpenCode
 # model IDs are ``<provider_id>/<model_id>`` and MUST reference the configured
@@ -97,17 +97,25 @@ def model_small_for_region(region: Region) -> str:
 
 
 def _is_our_provider(name: str) -> bool:
-    """True iff ``name`` is a coding-plan provider we manage."""
-    return _PROVIDER_MARKER in name
+    """True iff ``name`` is one of the two managed regional provider names.
+
+    Exact-match against :data:`ALL_PROVIDER_NAMES` — a substring match
+    (``coding-plan``) would also catch a foreign provider whose name merely
+    contains the marker (e.g. ``my-coding-plan-proxy``) and destroy it on
+    activation / reversion, violating ADR-004 (do not clobber external state).
+    """
+    return name in ALL_PROVIDER_NAMES
 
 
 def _references_our_provider(value: Any) -> bool:
-    """True iff a model string references a coding-plan provider.
+    """True iff a model string references one of our managed providers.
 
     OpenCode model strings are ``<provider>/<model>``; the provider prefix is
-    ours if it contains the coding-plan marker.
+    ours iff it exactly equals one of the two regional names.
     """
-    return isinstance(value, str) and _PROVIDER_MARKER in value
+    if not isinstance(value, str) or "/" not in value:
+        return False
+    return value.split("/", 1)[0] in ALL_PROVIDER_NAMES
 
 
 # ---------------------------------------------------------------------------
@@ -131,23 +139,25 @@ def _plan_zai_doc(
     """
     new_doc: dict[str, Any] = dict(doc) if doc else {}
 
-    # Providers: drop every prior coding-plan provider first (there can be at
-    # most one in practice, but the loop is defensive), then DEEP-MERGE the
-    # current region's apiKey into the entry — preserving any foreign keys the
-    # user set on it (e.g. timeout, concurrency, nested models). Foreign
-    # providers round-trip untouched. Replacing the whole entry (the old code)
-    # discarded user configuration irreversibly.
+    # Providers: drop EVERY prior coding-plan provider first, then DEEP-MERGE
+    # the current region's apiKey into one migration-source entry — preserving
+    # any foreign keys the user set on it (e.g. timeout, concurrency, nested
+    # models). Foreign providers round-trip untouched. Replacing the whole
+    # entry (the old code) discarded user configuration irreversibly.
     name = provider_name_for_region(region)
     providers = dict(new_doc.get("provider") or {})
-    # Seed the merge from any prior coding-plan entry so a same-region
+    # Seed the merge from the first prior coding-plan entry so a same-region
     # re-activation (or a global→china switch keeping user keys) preserves
-    # them; foreign providers are never touched. At most one coding-plan entry
-    # exists in practice (plan_zai removes prior ones), so the first match is
-    # authoritative.
+    # them. Foreign providers are never touched. Remove EVERY regional entry
+    # — at most one exists in normal flow, but a prior cross-region switch can
+    # leave both; popping only the first (the old ``break``) left a stale
+    # helper credential behind, surviving ``use default``.
     entry: dict[str, Any] = {}
-    for prior in [n for n in providers if _is_our_provider(n)]:
-        entry = dict(providers.pop(prior) or {})
-        break
+    for prior in [n for n in list(providers) if _is_our_provider(n)]:
+        if not entry:
+            entry = dict(providers.pop(prior) or {})
+        else:
+            providers.pop(prior, None)
     options = dict(entry.get("options") or {})
     options["apiKey"] = auth_token
     entry["options"] = options
