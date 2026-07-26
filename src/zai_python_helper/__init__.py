@@ -62,6 +62,27 @@ from zai_python_helper.errors import (
     ValidationError,
     ZaiPythonHelperError,
 )
+
+# NOTE (variant C, Tool name): the S6 Tool ABC (``tools.base.Tool``) owns the
+# top-level ``Tool`` name (see ``__all__`` below). The S7 MCP module defines its
+# OWN ``Tool`` enum (``mcp.Tool``) — a different concept (which coding tool an
+# MCP is installed into). To keep the two from colliding on the public surface,
+# the MCP ``Tool`` is NOT re-exported here: callers reach it as
+# ``zai_python_helper.mcp.Tool``. Only the MCP preset/install surface is lifted.
+from zai_python_helper.mcp import (
+    PRESET_MCP_SERVICES,
+    McpPreset,
+    build_mcp_entry,
+    install_into_doc,
+    install_mcp,
+    is_installed,
+    list_installed,
+    preset_by_id,
+    preset_ids,
+    tool_config_path,
+    uninstall_from_doc,
+    uninstall_mcp,
+)
 from zai_python_helper.ownership import (
     RevertAction,
     RevertDecision,
@@ -122,6 +143,22 @@ __all__ = [
     "StatusReport",
     "detect_status",
     "render_status",
+    # preset MCP servers (S7, issue #8) — cross-tool install/uninstall.
+    # NOTE: the MCP ``Tool`` enum is intentionally NOT here — it lives at
+    # ``zai_python_helper.mcp.Tool`` (variant C), so it cannot shadow the S6
+    # Tool ABC that owns the top-level ``Tool`` name above.
+    "McpPreset",
+    "PRESET_MCP_SERVICES",
+    "preset_by_id",
+    "preset_ids",
+    "build_mcp_entry",
+    "install_into_doc",
+    "uninstall_from_doc",
+    "list_installed",
+    "is_installed",
+    "tool_config_path",
+    "install_mcp",
+    "uninstall_mcp",
     # errors
     "ConfigurationError",
     "ProviderError",

@@ -381,3 +381,115 @@ def test_doctor_mcp_probe_none_then_installed(_isolate_home, capsys):
     assert "preset MCP servers" in out
     assert "zread@claude-code" in out
     assert rc == 0
+
+
+# --------------------------------------------------------------------------- #
+# CLI — headless install/uninstall/list + dry-run secret redaction.
+# --------------------------------------------------------------------------- #
+
+
+def _run_cli(argv: list[str]) -> tuple[int, str, str]:
+    """Invoke the CLI parser+handler in-process; return (rc, stdout, stderr).
+
+    Mirrors ``__main__.main``: a handler raises :class:`ZaiPythonHelperError`
+    on bad input (it does NOT print/exit itself — ``main`` formats it as
+    stderr + exit 1). We emulate that here so error-path assertions see rc=1
+    and the message on stderr.
+    """
+    import contextlib
+    import io
+
+    from zai_python_helper.cli import build_parser
+    from zai_python_helper.errors import ZaiPythonHelperError
+
+    parser = build_parser()
+    out, err = io.StringIO(), io.StringIO()
+    try:
+        args = parser.parse_args(argv)
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = args.func(args)
+    except ZaiPythonHelperError as e:
+        err.write(f"{e}\n")
+        rc = 1
+    except SystemExit as e:
+        rc = int(e.code) if isinstance(e.code, int) else 1
+    return rc, out.getvalue(), err.getvalue()
+
+
+def test_cli_mcp_install_uninstall_list_roundtrip(_isolate_home):
+    """The headless CLI installs, lists (installed), then uninstalls."""
+    rc, out, _ = _run_cli(
+        ["mcp", "install", "zread", "--tool", "claude-code", "--api-key", _KEY]
+    )
+    assert rc == 0
+    assert "zread: installed" in out
+
+    rc, out, _ = _run_cli(["mcp", "list", "--tool", "claude-code"])
+    assert rc == 0
+    assert "zread [installed]" in out
+
+    rc, out, _ = _run_cli(["mcp", "uninstall", "zread", "--tool", "claude-code"])
+    assert rc == 0
+    assert "zread: removed" in out
+
+
+def test_cli_mcp_install_dry_run_redacts_api_key(_isolate_home):
+    """dry-run must NEVER print the real --api-key (cycle-review regression).
+
+    The entry shape is shown with a <redacted> placeholder where the key lands
+    (env.Z_AI_API_KEY for stdio, headers.Authorization for http). A passed
+    ``--api-key`` must not reach stdout in any form.
+    """
+    secret = "sk-DO-NOT-LEAK-THIS-KEY"
+    rc, out, _ = _run_cli(
+        ["mcp", "install", "zai-mcp-server", "--tool", "claude-code", "--api-key", secret, "--dry-run"]
+    )
+    assert rc == 0
+    assert secret not in out
+    assert "<redacted>" in out
+    # The auth field is shown so the user sees WHERE the key lands.
+    assert "Z_AI_API_KEY" in out
+
+    # http preset: the Bearer header value must be redacted too.
+    rc, out, _ = _run_cli(
+        ["mcp", "install", "zread", "--tool", "claude-code", "--api-key", secret, "--dry-run"]
+    )
+    assert rc == 0
+    assert secret not in out
+    assert "Authorization" in out
+
+
+def test_cli_mcp_install_unknown_preset_errors(_isolate_home):
+    """An unknown preset id surfaces as a clean error (not a traceback)."""
+    rc, _out, err = _run_cli(
+        ["mcp", "install", "no-such", "--tool", "claude-code", "--api-key", _KEY]
+    )
+    assert rc != 0
+    assert "Unknown MCP preset" in err
+
+
+def test_cli_mcp_uninstall_dry_run_does_not_mutate(_isolate_home):
+    """`mcp uninstall --dry-run` must be read-only (cycle-review regression).
+
+    Dry-run is a preview contract across the whole CLI (`use zai`/`use default`
+    dry-run never write). The uninstall handler used to ignore ``--dry-run`` and
+    delete the entry for real — this guards that it shows a preview and leaves
+    the config byte-for-byte unchanged.
+    """
+    # Install first so there is something to preview removing.
+    _run_cli(["mcp", "install", "zread", "--tool", "claude-code", "--api-key", _KEY])
+    path = tool_config_path(Tool.CLAUDE_CODE, _isolate_home)
+    before = path.read_text(encoding="utf-8")
+    assert "zread" in before
+
+    rc, out, _ = _run_cli(
+        ["mcp", "uninstall", "zread", "--tool", "claude-code", "--dry-run"]
+    )
+    assert rc == 0
+    # The config must be byte-for-byte unchanged after a dry-run.
+    assert path.read_text(encoding="utf-8") == before
+    # And the preview must NOT claim it was removed.
+    assert "removed" not in out
+    assert "would remove" in out or "dry-run" in out.lower()
+
+

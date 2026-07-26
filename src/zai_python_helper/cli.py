@@ -22,12 +22,15 @@ import argparse
 import difflib
 import re
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from zai_python_helper.core.planner import DeltaKind, FileTag, PatchPlan
 from zai_python_helper.paths import Paths
 from zai_python_helper.regions import Region
 from zai_python_helper.tools.base import resolve_path
+
+if TYPE_CHECKING:
+    from zai_python_helper.mcp import Tool
 
 # Keys whose values are secrets and must be redacted in any diff/echo output
 # (ADR: secrets never logged). Used by ``--dry-run`` diff rendering. This is a
@@ -570,6 +573,171 @@ def _handle_doctor(args: argparse.Namespace) -> int:
     return run_doctor(Paths.default())
 
 
+# --------------------------------------------------------------------------- #
+# `mcp` — preset MCP server install/uninstall/list (S7, issue #8).
+#
+# Headless: every action is a flag (``--tool`` / ``--region`` / ``--api-key``),
+# no interactive menu — our extension over the upstream. ``use zai`` / ``use
+# default`` do NOT touch MCP; installing a preset is an explicit opt-in here.
+# --------------------------------------------------------------------------- #
+
+
+def _resolve_mcp_tool(value: str) -> "Tool":
+    """Coerce a CLI ``--tool`` string into a :class:`~zai_python_helper.mcp.Tool`.
+
+    This is the MCP-side tool resolver (``mcp.Tool`` enum), distinct from the
+    generic :func:`_resolve_tool` used by ``use zai`` / ``use default`` (which
+    resolves the S6 Tool ABC via ``tools.get_tool``). Wrapped so an unknown
+    tool surfaces as a clean :class:`ValidationError` (one-line stderr + exit 1)
+    rather than a bare ``ValueError`` traceback.
+    """
+    from zai_python_helper.errors import ValidationError
+    from zai_python_helper.mcp import Tool
+
+    try:
+        return Tool(value)
+    except ValueError as e:
+        raise ValidationError(
+            f"Unknown tool {value!r}. Choose one of: "
+            f"{', '.join(t.value for t in Tool)}"
+        ) from e
+
+
+def _handle_mcp_install(args: argparse.Namespace) -> int:
+    """Install a preset MCP server into a tool's MCP config (headless).
+
+    Resolves the tool + region + key from flags, delegates the one-shot IO
+    cycle to :func:`zai_python_helper.mcp.install_mcp`, and prints the outcome.
+    The key is resolved via :func:`io.secrets.resolve_key` (env/flag/prompt) in
+    real mode and NEVER printed in ``--dry-run`` — the preview builds the entry
+    with a ``<redacted>`` placeholder so the rendered shape shows WHERE the key
+    lands (``env.Z_AI_API_KEY`` / ``headers.Authorization``) without leaking it.
+    ``--dry-run`` is read-only: it shows the entry that WOULD be written,
+    writes nothing.
+    """
+    from zai_python_helper.errors import ValidationError
+    from zai_python_helper.mcp import (
+        PRESET_MCP_SERVICES,
+        build_mcp_entry,
+        install_mcp,
+        preset_by_id,
+    )
+
+    tool = _resolve_mcp_tool(args.tool)
+    mcp_id = args.mcp_id
+    region = Region(getattr(args, "region", Region.GLOBAL.value))
+    dry_run = getattr(args, "dry_run", False)
+
+    preset = preset_by_id(mcp_id)
+    if preset is None:
+        known = ", ".join(p["id"] for p in PRESET_MCP_SERVICES)
+        raise ValidationError(f"Unknown MCP preset: {mcp_id}. Choose one of: {known}")
+
+    if dry_run:
+        # Read-only preview: no key prompt, no write. ALWAYS build the entry
+        # with the placeholder (never the real ``--api-key``) so the secret
+        # can never reach stdout. The rendered shape still shows the auth
+        # FIELD (env.Z_AI_API_KEY / headers.Authorization) where the key would
+        # land. Redacting unconditionally — not just when --api-key is absent —
+        # is the fix: the prior ``or "<redacted>"`` leaked a passed key.
+        entry = build_mcp_entry(tool, mcp_id, "<redacted>", region)
+        print(f"--dry-run: would install {mcp_id} into {tool.value}")
+        import json
+
+        rendered = json.dumps({mcp_id: entry}, indent=2)
+        # Defense-in-depth: also run the redactor over the rendered JSON so a
+        # future field that carries a secret is caught even if the builder
+        # changes. Matches how `use zai` treats its dry-run diff output.
+        print(_redact_text(rendered), end="")
+        return 0
+
+    from zai_python_helper.io.secrets import resolve_key
+
+    key = resolve_key(getattr(args, "api_key", None))
+    changed = install_mcp(tool, mcp_id, key, region)
+    label = "installed" if changed else "already installed (no change)"
+    print(f"  {mcp_id}: {label} for {tool.value}")
+    return 0
+
+
+def _handle_mcp_uninstall(args: argparse.Namespace) -> int:
+    """Remove a preset MCP server from a tool's MCP config (headless, opt-in).
+
+    Delegates to :func:`zai_python_helper.mcp.uninstall_mcp`. Idempotent: an
+    absent id writes nothing and reports "not installed". ``--dry-run`` is
+    read-only (the same contract as ``use zai``/``use default`` dry-run): it
+    reports whether the id WOULD be removed, without touching the config.
+    """
+    from zai_python_helper.mcp import (
+        is_installed,
+        read_config,
+        tool_config_path,
+        uninstall_mcp,
+    )
+
+    tool = _resolve_mcp_tool(args.tool)
+    mcp_id = args.mcp_id
+    dry_run = getattr(args, "dry_run", False)
+
+    if dry_run:
+        # Read-only preview: never call the mutator. Resolve the live config
+        # (Path.home(), the same place the real uninstall targets) and report
+        # whether the id is present — without writing anything.
+        doc = read_config(tool_config_path(tool, Path.home()))
+        present = is_installed(doc, tool, mcp_id)
+        label = "would remove" if present else "not installed (no change)"
+        print(f"--dry-run: {mcp_id}: {label} from {tool.value}")
+        return 0
+
+    changed = uninstall_mcp(tool, mcp_id)
+    label = "removed" if changed else "not installed (no change)"
+    print(f"  {mcp_id}: {label} from {tool.value}")
+    return 0
+
+
+def _handle_mcp_list(args: argparse.Namespace) -> int:
+    """List preset MCPs and their installed status per tool (headless, read-only).
+
+    With ``--tool``: shows the preset table + which are installed for that one
+    tool. Without ``--tool``: shows the preset table only (install status is
+    per-tool, so a tool must be named to read it). Pure read — no writes.
+    """
+    from pathlib import Path
+
+    from zai_python_helper.mcp import (
+        PRESET_MCP_SERVICES,
+        list_installed,
+        read_config,
+        tool_config_path,
+    )
+
+    print("Preset MCP servers:")
+    print()
+    installed: set[str] = set()
+    tool_filter = getattr(args, "tool", None)
+    if tool_filter is not None:
+        tool = _resolve_mcp_tool(tool_filter)
+        doc = read_config(tool_config_path(tool, Path.home()))
+        installed = set(list_installed(doc, tool))
+
+    for preset in PRESET_MCP_SERVICES:
+        mark = ""
+        if tool_filter is not None:
+            mark = " [installed]" if preset["id"] in installed else " [not installed]"
+        proto = preset["protocol"]
+        endpoint = ""
+        if "urlTemplate" in preset:
+            endpoint = preset["urlTemplate"].get("glm_coding_plan_global", "")
+        elif "command" in preset:
+            endpoint = f"{preset['command']} {' '.join(preset.get('args', []))}".strip()
+        print(f"  {preset['id']}{mark}")
+        print(f"    name: {preset['name']} ({preset['description']})")
+        print(f"    protocol: {proto}  endpoint: {endpoint}")
+    print()
+    print("Install with: zai-python-helper mcp install <id> --tool <tool>")
+    return 0
+
+
 def _add_use_flags(parser: argparse.ArgumentParser) -> None:
     """Attach the tool + model-selection + region flags to a ``use`` subparser.
 
@@ -741,5 +909,74 @@ def build_parser() -> argparse.ArgumentParser:
         parents=[sub_flags],
     )
     p_doctor.set_defaults(func=_handle_doctor)
+
+    # `mcp` — preset MCP server install/uninstall/list (S7, issue #8). Headless
+    # (flags, no menu). ``use zai``/``use default`` do NOT touch MCP; this is
+    # the explicit opt-in surface for installing the four Z.ai preset MCPs into
+    # a tool's MCP config.
+    p_mcp = subparsers.add_parser(
+        "mcp",
+        help="manage preset MCP servers (install/uninstall/list)",
+        parents=[sub_flags],
+    )
+    mcp_sub = p_mcp.add_subparsers(
+        dest="mcp_cmd",
+        required=True,
+        metavar="<mcp command>",
+    )
+    from zai_python_helper.mcp import Tool as _McpTool
+
+    _tool_choices = [t.value for t in _McpTool]
+
+    p_mcp_install = mcp_sub.add_parser(
+        "install",
+        help="install a preset MCP server into a tool",
+        parents=[sub_flags],
+    )
+    p_mcp_install.add_argument("mcp_id", help="preset MCP id (e.g. web-search-prime)")
+    p_mcp_install.add_argument(
+        "--tool",
+        required=True,
+        choices=_tool_choices,
+        help="target tool",
+    )
+    p_mcp_install.add_argument(
+        "--region",
+        choices=[r.value for r in Region],
+        default=Region.GLOBAL.value,
+        help="Z.ai region (default: global)",
+    )
+    p_mcp_install.add_argument(
+        "--api-key",
+        help="Z.ai auth token (else resolved from ZAI_API_KEY env / prompt)",
+    )
+    p_mcp_install.set_defaults(func=_handle_mcp_install)
+
+    p_mcp_uninstall = mcp_sub.add_parser(
+        "uninstall",
+        help="remove a preset MCP server from a tool",
+        parents=[sub_flags],
+    )
+    p_mcp_uninstall.add_argument("mcp_id", help="preset MCP id to remove")
+    p_mcp_uninstall.add_argument(
+        "--tool",
+        required=True,
+        choices=_tool_choices,
+        help="target tool",
+    )
+    p_mcp_uninstall.set_defaults(func=_handle_mcp_uninstall)
+
+    p_mcp_list = mcp_sub.add_parser(
+        "list",
+        help="list preset MCP servers (+ installed status with --tool)",
+        parents=[sub_flags],
+    )
+    p_mcp_list.add_argument(
+        "--tool",
+        choices=_tool_choices,
+        default=None,
+        help="show installed status for this tool",
+    )
+    p_mcp_list.set_defaults(func=_handle_mcp_list)
 
     return parser
