@@ -239,6 +239,36 @@ def test_take_over_preserves_restore_point_across_token_rotation():
     assert decision.prior_value == p
 
 
+def test_take_over_refreshes_restore_point_after_completed_cycle():
+    """Re-activation with the SAME set_hash but a DRIFTED live value starts a
+    fresh restore point (Bug 5, cycle-review on #41).
+
+    Sequence: P1 → activate Z (prior P1) → ``use default`` reverts to P1 → user
+    sets P2 → activate the SAME Z again. The second activation carries the same
+    ``set_hash`` (we set Z both times), so the old code treated it as an
+    idempotent repeat and kept the STALE prior=P1. But the live value is now P2
+    (not our Z), so this is a NEW starting point — the prior must be recorded as
+    P2, otherwise a later ``use default`` restores P1 and silently destroys P2.
+
+    The equal-hash early return must therefore check the no-drift condition
+    (live value still hashes to the recorded set_hash) before preserving the
+    old restore point.
+    """
+    z, p1, p2 = "sk-zai", "sk-user-P1", "sk-user-P2"
+    records = take_over({}, TOOL, "K", prior_value=p1, prior_present=True,
+                        set_hash=hash_value(z))
+    # ``use default`` reverts (journal NOT retired); user then sets P2; we
+    # re-activate the same Z. Live value is P2 (≠ Z) → drifted → fresh prior.
+    records = take_over(records, TOOL, "K", prior_value=p2, prior_present=True,
+                        set_hash=hash_value(z))
+    assert records[TOOL]["K"]["prior_value"] == p2  # NOT the stale p1
+    assert records[TOOL]["K"]["set_hash"] == hash_value(z)
+    # And revert of z now restores P2, not the destroyed P1.
+    decision = revert(records, TOOL, "K", current_value=z)
+    assert decision.action.name == "RESTORE"
+    assert decision.prior_value == p2
+
+
 def test_take_over_starts_new_restore_point_on_external_drift():
     """If the live value drifted from our set, start a fresh restore point.
 
