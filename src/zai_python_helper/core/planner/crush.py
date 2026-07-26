@@ -88,12 +88,16 @@ def _plan_zai_doc(
 ) -> dict[str, Any]:
     """Return the desired ``crush.json`` document after ``use zai``.
 
-    Deep-merge: set ``providers.zai`` to the Z.ai provider entry; preserve all
-    foreign providers and every other top-level key. Does NOT mutate the input.
+    DEEP-MERGE the Z.ai provider fields (id/name/base_url/api_key) into any
+    existing ``providers.zai`` entry, preserving foreign sibling keys the user
+    set on it (so activation never clobbers user config). Foreign providers and
+    every other top-level key round-trip untouched. Does NOT mutate the input.
     """
     new_doc: dict[str, Any] = dict(doc) if doc else {}
     providers = dict(new_doc.get("providers") or {})
-    providers[PROVIDER_KEY] = _provider_entry(region, auth_token)
+    entry = dict(providers.get(PROVIDER_KEY) or {})
+    entry.update(_provider_entry(region, auth_token))
+    providers[PROVIDER_KEY] = entry
     new_doc["providers"] = providers
     return new_doc
 

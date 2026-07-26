@@ -40,6 +40,30 @@ class TestPlanZai:
         assert doc["theme"] == "dark"
         assert doc["providers"]["zai"]["api_key"] == TOKEN
 
+    def test_deep_merges_user_keys_into_zai_entry(self):
+        """Bug 3 regression: activation must DEEP-MERGE the Z.ai provider
+        fields into any existing ``providers.zai`` entry, preserving foreign
+        sibling keys the user set on it — not replace the whole entry."""
+        seed = {
+            "providers": {
+                "zai": {"custom": "keep-me", "options_extra": {"nested": True}},
+                "openai": {"api_key": "foreign"},
+            }
+        }
+        plan = cr.plan_zai(Region.GLOBAL, crush_doc=seed, auth_token=TOKEN)
+        entry = plan.delta_for(FileTag.CRUSH).content["providers"]["zai"]
+        # Our managed fields set.
+        assert entry["api_key"] == TOKEN
+        assert entry["base_url"] == GLOBAL_PAAS
+        assert entry["id"] == "zai"
+        # User's foreign sibling keys preserved (not clobbered).
+        assert entry["custom"] == "keep-me"
+        assert entry["options_extra"] == {"nested": True}
+        # Foreign provider untouched.
+        assert plan.delta_for(FileTag.CRUSH).content["providers"]["openai"] == {
+            "api_key": "foreign"
+        }
+
     def test_idempotent_on_post_state(self):
         first = cr.plan_zai(Region.GLOBAL, crush_doc=None, auth_token=TOKEN)
         post = first.delta_for(FileTag.CRUSH).content
