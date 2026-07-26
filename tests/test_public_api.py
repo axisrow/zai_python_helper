@@ -63,3 +63,17 @@ def test_package_import_is_side_effect_free():
     importlib.reload(z)
     assert "__version__" in z.__all__
     assert len(z.__all__) >= 20
+
+
+def test_tools_layer_is_public():
+    """The S6 Tool protocol + registry are importable (issue #7 / #18)."""
+    for name in ("Tool", "ManagedField", "StatusRow", "REGISTRY", "get_tool", "tool_names"):
+        assert name in z.__all__, f"{name} missing from __all__"
+        assert hasattr(z, name), f"{name} not importable"
+
+
+def test_region_endpoint_constants_are_public():
+    """The S6 region endpoint maps are importable for tools/callers."""
+    for name in ("ZAI_PAAS_BASE_URL_BY_REGION", "ZAI_ANTHROPIC_BASE_URL_BY_REGION_V2"):
+        assert name in z.__all__, f"{name} missing from __all__"
+        assert hasattr(z, name)

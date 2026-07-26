@@ -69,13 +69,19 @@ from zai_python_helper.ownership import (
     take_over,
 )
 from zai_python_helper.paths import Paths
-from zai_python_helper.regions import Region
+from zai_python_helper.regions import (
+    ZAI_ANTHROPIC_BASE_URL_BY_REGION_V2,
+    ZAI_PAAS_BASE_URL_BY_REGION,
+    Region,
+)
 from zai_python_helper.status import (
     ClaudeCodeStatus,
     StatusReport,
     detect_status,
     render_status,
 )
+from zai_python_helper.tools import REGISTRY, get_tool, tool_names
+from zai_python_helper.tools.base import ManagedField, StatusRow, Tool
 
 __all__ = [
     "__version__",
@@ -97,6 +103,16 @@ __all__ = [
     "RevertDecision",
     "take_over",
     "revert",
+    # tools layer (S6): Tool protocol + registry (importable, per #18)
+    "Tool",
+    "ManagedField",
+    "StatusRow",
+    "REGISTRY",
+    "get_tool",
+    "tool_names",
+    # region endpoints (paas + V2 anthropic for S6 tools)
+    "ZAI_PAAS_BASE_URL_BY_REGION",
+    "ZAI_ANTHROPIC_BASE_URL_BY_REGION_V2",
     # infra
     "Paths",
     "JsonBackend",

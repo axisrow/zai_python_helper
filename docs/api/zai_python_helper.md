@@ -22,6 +22,14 @@ Machine-readable reference for the **importable public API** (`__all__`, issue #
 - [`RevertDecision`](#revertdecision)
 - [`take_over`](#take_over)
 - [`revert`](#revert)
+- [`Tool`](#tool)
+- [`ManagedField`](#managedfield)
+- [`StatusRow`](#statusrow)
+- [`REGISTRY`](#registry)
+- [`get_tool`](#get_tool)
+- [`tool_names`](#tool_names)
+- [`ZAI_PAAS_BASE_URL_BY_REGION`](#zai_paas_base_url_by_region)
+- [`ZAI_ANTHROPIC_BASE_URL_BY_REGION_V2`](#zai_anthropic_base_url_by_region_v2)
 - [`Paths`](#paths)
 - [`JsonBackend`](#jsonbackend)
 - [`ShellBackend`](#shellbackend)
@@ -154,7 +162,7 @@ Members:
 
 ### `FileDelta`
 
-*dataclass — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/core/planner/__init__.py#L64)*
+*dataclass — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/core/planner/__init__.py#L69)*
 
 A single file's intended mutation, addressed by semantic tag.
 
@@ -185,6 +193,9 @@ Members:
 - `SETTINGS` = `'settings'`
 - `CLAUDE_JSON` = `'claude_json'`
 - `ZSHRC` = `'zshrc'`
+- `OPENCODE` = `'opencode'`
+- `CRUSH` = `'crush'`
+- `FACTORY_DROID` = `'factory_droid'`
 
 ---
 
@@ -192,7 +203,7 @@ Members:
 
 ### `PatchPlan`
 
-*dataclass — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/core/planner/__init__.py#L82)*
+*dataclass — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/core/planner/__init__.py#L87)*
 
 An ordered list of file deltas describing a complete activation.
 
@@ -419,6 +430,272 @@ user added a new key), that is an external change → `REFUSE`.
 
 ---
 
+<a id="tool"></a>
+
+### `Tool`
+
+*dataclass — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/tools/base.py#L121)*
+
+A config-patching tool integration (the CLI's dispatch unit).
+
+Concrete tools (`ClaudeCodeTool`, `OpenCodeTool`, ...) implement this.
+The CLI holds a `{name: Tool}` registry (`~zai_python_helper.tools.REGISTRY`)
+and dispatches `use zai` / `use default` generically: it reads state,
+plans, captures ownership, commits, and echoes — all via these methods, so
+no tool-specific branch ever lives in `cli.py`.
+
+Attributes:
+
+- `name`: `str`
+- `file_tags`: `tuple[FileTag, ...]`
+
+#### `read_state()`
+
+```python
+read_state(self, paths: Paths) -> dict[FileTag, Any]
+```
+
+Read the parsed docs/texts this tool plans against.
+
+Returns `{tag: doc_or_text}` for every tag in `file_tags`.
+The CLI calls this inside the held process lock so the plan reflects a
+consistent snapshot. JSON tags yield a `dict | None`; text tags
+(`ZSHRC`) yield a `str`.
+
+#### `plan_zai()`
+
+```python
+plan_zai(self, spec: ProviderSpec, region: Region, state: dict[FileTag, Any], auth_token: str) -> PatchPlan
+```
+
+Plan the `use zai` activation against the read `state`.
+
+#### `plan_revert()`
+
+```python
+plan_revert(self, state: dict[FileTag, Any], decisions: dict[str, RevertDecision]) -> PatchPlan
+```
+
+Plan the journal-aware `use default` reversion.
+
+`decisions` is `{field.key: RevertDecision}` for every key in
+`revert_key_set`; the tool applies them back through its
+`ManagedField` descriptors.
+
+#### `managed_fields()`
+
+```python
+managed_fields(self, spec: ProviderSpec) -> list[ManagedField]
+```
+
+The closed set of fields this tool owns for `spec`'s model mode.
+
+The set may depend on the mode (e.g. Claude Code DEFAULT contributes
+extra `ANTHROPIC_DEFAULT_*_MODEL` fields). The CLI journals exactly
+these.
+
+#### `revert_key_set()`
+
+```python
+revert_key_set(self) -> tuple[str, ...]
+```
+
+The UNION of journal keys ANY activation could have set.
+
+`use default` considers every key here regardless of the current
+mode, so a cross-mode revert is clean (no stale keys left behind).
+
+#### `extract_takeover()`
+
+```python
+extract_takeover(self, plan: PatchPlan, prior_state: dict[FileTag, Any], spec: ProviderSpec) -> list[tuple[str, str | None, bool, str | None]]
+```
+
+Compute `(key, prior_value, prior_present, set_hash)` per owned field.
+
+For each field in `managed_fields`: prior comes from the
+PRE-patch `prior_state`; `set_hash` is the hash of the value the
+plan writes (read back out of the planned delta via the field's
+`get`), or `None` when the plan REMOVES the field (ownership taken
+as a removal). A field the plan neither sets nor removes is skipped,
+so the journal never records a key we did not touch.
+
+#### `revert_decisions()`
+
+```python
+revert_decisions(self, journal_records: dict[str, Any], state: dict[FileTag, Any]) -> dict[str, RevertDecision]
+```
+
+Compute a per-field `~zai_python_helper.ownership.RevertDecision`.
+
+For each key in `revert_key_set`, look up the field's CURRENT
+value in `state` and consult the journal. RESTORE / REFUSE / CLEAR
+follow `zai_python_helper.ownership.revert`.
+
+#### `postconditions()`
+
+```python
+postconditions(self, region: Region, state: dict[FileTag, Any]) -> bool
+```
+
+True iff `state` reflects an active `use zai` for `region`.
+
+#### `status_row()`
+
+```python
+status_row(self, paths: Paths) -> StatusRow
+```
+
+Read-only detect of this tool's state for the `status` report.
+
+#### `echo_lines()`
+
+```python
+echo_lines(self, plan: PatchPlan, region: Region) -> list[str]
+```
+
+Human-readable lines to print after `use zai` (secrets masked).
+
+
+---
+
+<a id="managedfield"></a>
+
+### `ManagedField`
+
+*dataclass — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/tools/base.py#L56)*
+
+One field a tool owns, addressable for the ownership journal.
+
+A field may live at a flat top-level key or deep inside a nested JSON
+document (or inside an array element). The descriptor hides that structure
+behind two operations so the CLI's ownership capture / revert logic stays
+tool-agnostic.
+
+A field is "removed" when its value is `None`; `set_value`
+translates that to the right structural deletion (drop the key, pop the
+array element, etc.).
+
+Attributes:
+
+- `key`: `str`
+
+#### `get()`
+
+```python
+get(self, doc: dict[str, Any] | None) -> tuple[bool, str | None]
+```
+
+Return `(present, value)` for this field in `doc`.
+
+`present` is False when the field (or any of its parents) is absent;
+`value` is the field's value coerced to `str`-comparable form when
+present, else `None`. `present`/`value` feed the ownership
+journal's prior-value capture and the revert-time current-value check.
+
+#### `set_value()`
+
+```python
+set_value(self, doc: dict[str, Any], value: str | None) -> dict[str, Any]
+```
+
+Return a NEW doc with this field set to `value` (or removed).
+
+`value is None` means REMOVE the field (drop the key, filter the
+array element). Never mutates the input `doc`. Foreign keys always
+round-trip untouched.
+
+
+---
+
+<a id="statusrow"></a>
+
+### `StatusRow`
+
+*dataclass — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/tools/base.py#L101)*
+
+One tool's line(s) in the `status` report (read-only detect output).
+
+Attributes:
+
+- `tool`: `str`
+- `configured`: `bool`
+- `zai_active`: `bool`
+- `region`: `Region | None`
+- `detail`: `str`
+
+
+---
+
+<a id="registry"></a>
+
+### `REGISTRY`
+
+*constant — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/tools/__init__.py#L19) (`dict[str, Tool]`)*
+
+Value: `{ClaudeCodeTool.name: ClaudeCodeTool()}`
+
+*(no docstring)*
+
+---
+
+<a id="get_tool"></a>
+
+### `get_tool()`
+
+*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/tools/__init__.py#L24)*
+
+```python
+get_tool(name: str) -> Tool
+```
+
+Return the registered `Tool` for `name`.
+
+Raises `KeyError` (surfaced by the caller as a CLI error) when the
+name is unknown — the argparse `choices` list is derived from the keys so
+this is unreachable in normal CLI use, but importable callers benefit from
+a clear error.
+
+---
+
+<a id="tool_names"></a>
+
+### `tool_names()`
+
+*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/tools/__init__.py#L38)*
+
+```python
+tool_names() -> list[str]
+```
+
+The sorted list of registered tool names (for `--tool` choices).
+
+---
+
+<a id="zai_paas_base_url_by_region"></a>
+
+### `ZAI_PAAS_BASE_URL_BY_REGION`
+
+*constant — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/regions.py#L39) (`dict[Region, str]`)*
+
+Value: `{Region.GLOBAL: 'https://api.z.ai/api/coding/paas/v4', Region.CHINA: 'https://open.bigmodel.cn/api/coding/paas/v4'}`
+
+*(no docstring)*
+
+---
+
+<a id="zai_anthropic_base_url_by_region_v2"></a>
+
+### `ZAI_ANTHROPIC_BASE_URL_BY_REGION_V2`
+
+*constant — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/regions.py#L52) (`dict[Region, str]`)*
+
+Value: `{Region.GLOBAL: 'https://api.z.ai/api/anthropic', Region.CHINA: 'https://open.bigmodel.cn/api/anthropic'}`
+
+*(no docstring)*
+
+---
+
 <a id="paths"></a>
 
 ### `Paths`
@@ -437,6 +714,9 @@ Attributes:
 - `claude_settings`: `Path`
 - `claude_json`: `Path`
 - `zshrc`: `Path`
+- `opencode`: `Path`
+- `crush`: `Path`
+- `factory_droid`: `Path`
 - `ownership_json`: `Path`
 - `recovery_json`: `Path`
 - `lock_file`: `Path`
@@ -462,6 +742,9 @@ The resolved paths:
 - `claude_settings`   = `home / ".claude" / "settings.json"`
 - `claude_json`       = `home / ".claude.json"`
 - `zshrc`             = `home / ".zshrc"`
+- `opencode`          = `home / ".config" / "opencode" / "opencode.json"`
+- `crush`             = `home / ".config" / "crush" / "crush.json"`
+- `factory_droid`     = `home / ".factory" / "settings.json"`
 - `ownership_json`   = `home / ".zai-python-helper" / "ownership.json"`
 - `recovery_json`    = `home / ".zai-python-helper" / "recovery.json"`
 - `lock_file`         = `home / ".zai-python-helper" / "lock"`

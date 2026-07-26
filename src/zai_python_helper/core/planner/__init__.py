@@ -59,6 +59,11 @@ class FileTag(Enum):
     SETTINGS = "settings"  # ~/.claude/settings.json
     CLAUDE_JSON = "claude_json"  # ~/.claude.json
     ZSHRC = "zshrc"  # ~/.zshrc
+    # S6 tools (issue #7). Each planner addresses its own config file by tag;
+    # the CLI maps a tag to a concrete path via Paths (paths.py).
+    OPENCODE = "opencode"  # ~/.config/opencode/opencode.json
+    CRUSH = "crush"  # ~/.config/crush/crush.json
+    FACTORY_DROID = "factory_droid"  # ~/.factory/settings.json
 
 
 @dataclass(frozen=True)

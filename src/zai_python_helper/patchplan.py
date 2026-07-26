@@ -230,14 +230,10 @@ def _delta_to_entry(delta: FileDelta, paths: Paths) -> _RecoveryEntry | None:
 
 
 def _tag_path(paths: Paths, tag: FileTag) -> Path:
-    """Map a semantic tag to its resolved path (mirrors the CLI's mapping)."""
-    if tag == FileTag.SETTINGS:
-        return paths.claude_settings
-    if tag == FileTag.CLAUDE_JSON:
-        return paths.claude_json
-    if tag == FileTag.ZSHRC:
-        return paths.zshrc
-    raise ValueError(f"Unknown FileTag: {tag!r}")  # pragma: no cover - enum-closed
+    """Map a semantic tag to its resolved path (mirrors the tools-layer mapping)."""
+    from zai_python_helper.tools.base import resolve_path
+
+    return resolve_path(paths, tag)
 
 
 def _write_manifest(path: Path, entries: list[_RecoveryEntry]) -> None:

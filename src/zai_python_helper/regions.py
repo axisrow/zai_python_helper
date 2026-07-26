@@ -26,6 +26,35 @@ ZAI_ANTHROPIC_BASE_URL_BY_REGION: dict[Region, str] = {
 }
 
 
+# Z.ai OpenAI/paas-compatible base URLs, one per region (epic #1 endpoint
+# matrix). Used by tools whose provider speaks the OpenAI chat-completion
+# protocol against Z.ai's paas gateway (e.g. Crush providers.zai.base_url,
+# Factory Droid OpenAI-proto entries). Pure data — no side effects.
+#
+# NOTE (issue #7 follow-up): epic #1 lists the china paas endpoint as
+# ``https://open.bigmodel.cn/api/coding/paas/v4``. We take that literally. The
+# legacy :func:`get_endpoint(region, "paas")` returns a different host without
+# the ``/api/coding/paas/v4`` path; it is left untouched to avoid disturbing
+# existing behavior, and reconciling the two is a tracked follow-up.
+ZAI_PAAS_BASE_URL_BY_REGION: dict[Region, str] = {
+    Region.GLOBAL: "https://api.z.ai/api/coding/paas/v4",
+    Region.CHINA: "https://open.bigmodel.cn/api/coding/paas/v4",
+}
+
+
+# Z.ai Anthropic-compatible base URLs per epic #1's endpoint matrix. The S6
+# tools (OpenCode / Factory Droid Anthropic-proto entries) write Anthropic-
+# protocol endpoints; per epic #1 the china anthropic endpoint is
+# ``https://open.bigmodel.cn/api/anthropic``. This DIFFERS from
+# :data:`ZAI_ANTHROPIC_BASE_URL_BY_REGION` (Claude Code's china URL, in main).
+# We keep BOTH rather than disturb Claude Code's working behavior; reconciling
+# the two is a tracked follow-up (issue #7 comment).
+ZAI_ANTHROPIC_BASE_URL_BY_REGION_V2: dict[Region, str] = {
+    Region.GLOBAL: "https://api.z.ai/api/anthropic",
+    Region.CHINA: "https://open.bigmodel.cn/api/anthropic",
+}
+
+
 def get_endpoint(region: Region, service: str) -> str:
     """Get the API endpoint for a given region and service.
 
