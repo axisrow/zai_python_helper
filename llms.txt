@@ -88,7 +88,7 @@ Auto-generated from `zai_python_helper.__all__` (the versioned contract, issue
 - `RevertAction` (enum): What `revert` decided to do with one managed key.
 - `RevertDecision` (dataclass): The outcome of `revert` for one key.
 - `take_over(records: dict[str, Any], tool: str, key: str, prior_value: str | None, prior_present: bool, set_hash: str | None) -> dict[str, Any]`: Record that we now own `(tool, key)`; return an updated journal copy.
-- `revert(records: dict[str, Any], tool: str, key: str, current_value: str | None) -> RevertDecision`: Decide how to revert one `(tool, key)` given its current value.
+- `revert(records: dict[str, Any], tool: str, key: str, current_value: str | None) -> tuple[RevertDecision, dict[str, Any]]`: Decide how to revert one `(tool, key)` given its current value.
 - `Tool` (dataclass): A config-patching tool integration (the CLI's dispatch unit).
 - `ManagedField` (dataclass): One field a tool owns, addressable for the ownership journal.
 - `StatusRow` (dataclass): One tool's line(s) in the `status` report (read-only detect output).

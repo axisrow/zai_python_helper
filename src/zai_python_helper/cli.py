@@ -514,7 +514,7 @@ def _handle_use_default(args: argparse.Namespace) -> int:
         # Read-only preview: no lock, no write.
         state = tool.read_state(paths)
         journal_records = OwnershipJournal(paths.ownership_json).read()
-        decisions = tool.revert_decisions(journal_records, state)
+        decisions = tool.revert_decisions(journal_records, state)[0]
         plan = tool.plan_revert(state=state, decisions=decisions)
         _print_refuse_warnings(decisions)
         print("--dry-run: no files written")
@@ -529,11 +529,23 @@ def _handle_use_default(args: argparse.Namespace) -> int:
     # read and our commit (which would make the decisions stale).
     with ProcessLock(paths.lock_file):
         state = tool.read_state(paths)
-        journal_records = OwnershipJournal(paths.ownership_json).read()
-        decisions = tool.revert_decisions(journal_records, state)
+        journal = OwnershipJournal(paths.ownership_json)
+        journal_records = journal.read()
+        decisions, retired_records = tool.revert_decisions(journal_records, state)
         plan = tool.plan_revert(state=state, decisions=decisions)
         _print_refuse_warnings(decisions)
-        written = apply_plan_locked(paths, plan)
+
+        # Persist the retired journal ALONGSIDE the revert (issue #48
+        # cycle-state): every RESTORE retires its record to ``active=False`` so
+        # a later re-activation starts a fresh restore point instead of
+        # resurrecting a stale credential. The persist runs under the same lock
+        # and only when the revert actually commits (on_locked), mirroring how
+        # ``use zai`` persists its takeover journal. REFUSE-only reverts leave
+        # the journal byte-identical (a fresh copy with no retirement).
+        def _persist_retired_journal() -> None:
+            journal.write(retired_records)
+
+        written = apply_plan_locked(paths, plan, on_locked=_persist_retired_journal)
     if not written:
         print("(no changes — already at default)")
     else:

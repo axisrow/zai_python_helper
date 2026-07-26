@@ -230,12 +230,18 @@ class Tool(ABC):
         self,
         journal_records: dict[str, Any],
         state: dict[FileTag, Any],
-    ) -> dict[str, RevertDecision]:
-        """Compute a per-field :class:`~zai_python_helper.ownership.RevertDecision`.
+    ) -> tuple[dict[str, RevertDecision], dict[str, Any]]:
+        """Compute per-field :class:`~zai_python_helper.ownership.RevertDecision`.
 
         For each key in :meth:`revert_key_set`, look up the field's CURRENT
         value in ``state`` and consult the journal. RESTORE / REFUSE / CLEAR
         follow :func:`zai_python_helper.ownership.revert`.
+
+        Returns ``(decisions, retired_records)``: ``decisions`` is the per-key
+        decision the caller acts on; ``retired_records`` is the journal with
+        every ``RESTORE`` decision's record retired to ``active=False``
+        (issue #48 cycle-state). The caller persists ``retired_records`` so a
+        later re-activation does not resurrect a stale restore point.
         """
         ...
 
