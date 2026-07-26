@@ -166,6 +166,28 @@ class TestRedactText:
         assert "sk-export-g-secret" not in out
         assert "<redacted>" in out
 
+    def test_shell_multi_assignment_secret_after_nonsecret_redacted(self):
+        """Regression (Codex cycle-3): a single ``export`` line with multiple
+        assignments where a NON-secret key precedes a SECRET one must redact
+        the whole line. The regex matches only the first ``KEY=VALUE``; the
+        first key (ANTHROPIC_BASE_URL) is non-secret, so without inspecting
+        later tokens the second assignment's credential leaked. ``ANTHROPIC_*``
+        overrides in a user's ``.zshrc`` are exactly the project's credential
+        surface, and one-line two-var exports are valid POSIX/zsh."""
+        text = 'export ANTHROPIC_BASE_URL=https://api.z.ai ANTHROPIC_API_KEY=sk-secret-xyz\n'
+        out = _redact_text(text)
+        assert "sk-secret-xyz" not in out
+        assert "<redacted>" in out
+
+    def test_shell_multi_assignment_all_nonsecret_preserved(self):
+        """A multi-assignment line where NEITHER key is secret is NOT redacted
+        (the fail-closed multi-key check must not over-redact)."""
+        text = "export PATH=/usr/local/bin:$PATH MODEL=glm\n"
+        out = _redact_text(text)
+        assert "/usr/local/bin" in out
+        assert "glm" in out
+        assert "<redacted>" not in out
+
     def test_non_secret_shell_value_preserved(self):
         """A non-secret assignment is NOT redacted (fail-closed only on secrets)."""
         text = 'export PATH="/usr/local/bin:$PATH"\n'

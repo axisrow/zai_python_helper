@@ -136,9 +136,19 @@ def _redact_shell_text(text: str) -> str:
     def _replace_shell(match: re.Match[str]) -> str:
         prefix = match.group(1) or ""
         key = match.group(2)
-        if not _is_secret_key(key):
-            return match.group(0)
-        return f"{prefix}{key}=<redacted>"
+        if _is_secret_key(key):
+            return f"{prefix}{key}=<redacted>"
+        # FAIL-CLOSED for multiple assignments on one line: the regex matched
+        # only the FIRST ``KEY=VALUE``. If the first key is non-secret but a
+        # LATER ``IDENTIFIER=`` token in the RHS names a secret key (e.g.
+        # ``export ANTHROPIC_BASE_URL=… ANTHROPIC_API_KEY=sk-…``), redact the
+        # whole line — otherwise the second assignment's credential leaks via
+        # the unchanged line. Whitespace-separated multi-assignment is valid
+        # POSIX/zsh and a realistic form for an ``ANTHROPIC_*`` override.
+        _later_key = re.compile(r"(?<![A-Za-z0-9_-])([A-Za-z_][A-Za-z0-9_-]*)=")
+        if any(_is_secret_key(k) for k in _later_key.findall(match.group(3))):
+            return f"{prefix}{key}=<redacted>"
+        return match.group(0)
 
     return _shell_pat.sub(_replace_shell, text)
 
