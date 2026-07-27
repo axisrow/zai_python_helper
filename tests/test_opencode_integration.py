@@ -21,6 +21,7 @@ from zai_python_helper.tools.opencode import OpenCodeTool
 
 TOKEN = "sk-integration-token"
 GLOBAL_NAME = "zai-coding-plan"
+CHINA_NAME = "zhipuai-coding-plan"
 
 
 @pytest.fixture
@@ -149,6 +150,44 @@ class TestApplyAndRevert:
         # Claude Code settings round-trip unchanged.
         cc = JsonBackend.read(paths.claude_settings)
         assert cc == {"env": {"ANTHROPIC_AUTH_TOKEN": "cc-tok"}}
+
+    def test_duplicate_state_activation_refused(self, tool, tmp_path):
+        """Issue #50 / Bug 4 edge (integration): a duplicate-state seed (BOTH
+        regional providers with distinct credentials) must NOT proceed through
+        ``use zai``. A region switch would silently destroy one entry because
+        the ownership journal keys the apiKey under a single fixed logical name
+        and cannot round-trip two regional names. ``plan_zai`` refuses the
+        activation (ConfigurationError) instead of guessing; the on-disk doc is
+        left untouched (non-destructive). Both insertion orders refused."""
+        from zai_python_helper.errors import ConfigurationError
+
+        paths = Paths.from_home(tmp_path)
+        spec = _spec()
+        seed = {
+            "$schema": "keep",
+            "provider": {
+                GLOBAL_NAME: {
+                    "options": {"apiKey": "user-global-key"},
+                    "baseURL": "https://user.global",
+                },
+                CHINA_NAME: {
+                    "options": {"apiKey": "user-china-key"},
+                    "baseURL": "https://user.china",
+                    "models": {"glm-4.6": {}},
+                },
+            },
+        }
+        JsonBackend.write(paths.opencode, seed)
+
+        # Activating EITHER region is refused from a dual-provider seed.
+        for region in (Region.GLOBAL, Region.CHINA):
+            with ProcessLock(paths.lock_file):
+                state = tool.read_state(paths)
+                with pytest.raises(ConfigurationError):
+                    tool.plan_zai(spec, region, state=state, auth_token=TOKEN)
+
+        # The seed is left exactly as-is — no silent data loss.
+        assert _read_doc(paths) == seed
 
 
 # ---------------------------------------------------------------------------
