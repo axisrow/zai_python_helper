@@ -217,16 +217,21 @@ class OpenCodeTool(Tool):
         self,
         journal_records: dict[str, Any],
         state: dict[FileTag, Any],
-    ) -> dict[str, Any]:
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
         from zai_python_helper.ownership import revert
 
         doc = state.get(FileTag.OPENCODE)
+        # Thread the journal through each revert so a RESTORE for one field
+        # retires its record before the next field is evaluated (issue #48
+        # cycle-state): the returned ``retired`` carries every retirement.
+        retired: dict[str, Any] = journal_records
         out: dict[str, Any] = {}
         for field in self.managed_fields(ProviderSpec(base_url="", model_mode=None)):  # type: ignore[arg-type]
             present, value = field.get(doc)
             current = value if present else None
-            out[field.key] = revert(journal_records, self.name, field.key, current)
-        return out
+            decision, retired = revert(retired, self.name, field.key, current)
+            out[field.key] = decision
+        return out, retired
 
     # ------------------------------------------------------------------
     # Status / postcondition / echo
