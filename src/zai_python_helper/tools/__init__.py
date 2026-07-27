@@ -14,6 +14,7 @@ from __future__ import annotations
 from zai_python_helper.tools.base import Tool
 from zai_python_helper.tools.claude_code import ClaudeCodeTool
 from zai_python_helper.tools.crush import CrushTool
+from zai_python_helper.tools.factory_droid import FactoryDroidTool
 from zai_python_helper.tools.opencode import OpenCodeTool
 
 #: ``{tool_name: Tool}``. The CLI dispatches on this. Add a tool by
@@ -21,6 +22,7 @@ from zai_python_helper.tools.opencode import OpenCodeTool
 REGISTRY: dict[str, Tool] = {
     ClaudeCodeTool.name: ClaudeCodeTool(),
     CrushTool.name: CrushTool(),
+    FactoryDroidTool.name: FactoryDroidTool(),
     OpenCodeTool.name: OpenCodeTool(),
 }
 
