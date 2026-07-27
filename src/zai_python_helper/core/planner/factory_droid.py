@@ -46,6 +46,7 @@ from __future__ import annotations
 from typing import Any
 
 from zai_python_helper.core.planner import DeltaKind, FileDelta, FileTag, PatchPlan
+from zai_python_helper.errors import ValidationError
 from zai_python_helper.regions import (
     ZAI_ANTHROPIC_BASE_URL_BY_REGION_V2,
     ZAI_PAAS_BASE_URL_BY_REGION,
@@ -129,6 +130,155 @@ def _our_entries(region: Region, auth_token: str) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
+# Entry-identity guards (issue #53) — fail closed on ambiguous / lossy state
+# ---------------------------------------------------------------------------
+#
+# Two edge-case data-loss paths share one root cause: the ownership model
+# addresses customModels[] entries by marker+protocol (a synthetic key), not
+# by an exact immutable identity, and journals ONLY the prior apiKey — never
+# model / baseUrl / limits. Both guards REFUSE the operation (raise
+# ValidationError → one-line ``error:`` + exit 1) rather than silently drop a
+# foreign entry or irreversibly clobber user config.
+#
+# F2 (field drift): activation deep-merges our managed fields over a pre-
+# existing GLM entry, but only the apiKey is journaled — so model/baseUrl/
+# limits would be lost on revert. Refuse when a pre-existing entry carries a
+# managed field at a value we would overwrite.
+#
+# F3 (duplicates): two GLM-marker entries for one protocol make "which is
+# ours" indeterminate — the merge keeps the first (dropping the rest) and
+# revert removes the first (possibly a foreign entry inserted before ours).
+# Refuse when >1 exists per protocol.
+
+# Managed fields Factory Droid writes into an entry. A pre-existing GLM entry
+# carrying any of these at a value DIFFERENT from the helper's canonical value
+# means activation would IRREVERSIBLY clobber user config (only the apiKey is
+# journaled). ``displayName`` is EXCLUDED — detection is an intentional
+# substring match, so renaming to our canonical displayName is desired
+# identity behavior, not data loss. ``provider`` is the protocol discriminator
+# (not a data field); ``apiKey`` is journaled and restorable (drift there is
+# normal token rotation).
+_MANAGED_FIELDS: tuple[str, ...] = ("model", "maxOutputTokens", "baseUrl")
+
+
+def _canonical_entry(provider: str, region: Region) -> dict[str, Any]:
+    """The helper's canonical managed-field values for ``provider`` at ``region``.
+
+    A pre-existing GLM entry whose managed fields ALL match these is a true
+    re-activation post-state (idempotent path); any field that DIFFERS is user
+    config we would clobber irreversibly. Derived from the same constants
+    :func:`_entry` writes, so it tracks them automatically.
+    """
+    base_url = (
+        anthropic_base_url_for_region(region)
+        if provider == PROVIDER_ANTHROPIC
+        else paas_base_url_for_region(region)
+    )
+    return {
+        "model": MODEL_ID,
+        "maxOutputTokens": MAX_OUTPUT_TOKENS,
+        "baseUrl": base_url,
+    }
+
+
+def _known_base_urls(provider: str) -> set[str]:
+    """Every regional baseUrl the helper recognizes for ``provider``.
+
+    Used by the activation drift check to allow-list ``baseUrl``: a GLOBAL→CHINA
+    (or vice-versa) region switch leaves the OTHER region's URL in place, which
+    is still "us" — only a value outside this set is treated as user
+    customization that activation would irreversibly overwrite.
+    """
+    if provider == PROVIDER_ANTHROPIC:
+        return set(ZAI_ANTHROPIC_BASE_URL_BY_REGION_V2.values())
+    return set(ZAI_PAAS_BASE_URL_BY_REGION.values())
+
+
+def _assert_no_duplicates(models: list[Any], *, path: str) -> None:
+    """Raise ``ValidationError`` if >1 our-entry exists per protocol (F3).
+
+    Two GLM-marker entries for one protocol make "which is ours" indeterminate
+    — ``existing_by_proto`` keeps only the first (silently dropping the rest)
+    and ``apply_revert_decisions``'s ``next(...)`` removes whichever comes
+    first (possibly a foreign GLM entry inserted before ours). Refusing is
+    safe: the user inspects ``settings.json`` and removes the stray entry.
+    ``path`` labels the call site (``use zai`` / ``use default``) in the
+    message.
+    """
+    seen: dict[str, int] = {}
+    for m in models:
+        if not _is_our_entry(m):
+            continue
+        proto = _protocol_of(m)
+        if proto is None:
+            continue  # marker + unknown provider — not ours, leave alone
+        seen[proto] = seen.get(proto, 0) + 1
+    dups = sorted(p for p, n in seen.items() if n > 1)
+    if dups:
+        raise ValidationError(
+            f"{path}: found multiple 'GLM Coding Plan' entries for "
+            f"provider(s) {dups} in ~/.factory/settings.json customModels — "
+            "remove the duplicate(s) before retrying (the helper cannot tell "
+            "them apart safely)."
+        )
+
+
+def _assert_no_managed_field_drift(models: list[Any], region: Region) -> None:
+    """Raise ``ValidationError`` if a pre-existing our-entry's managed field
+    carries a value activation would irreversibly overwrite (F2).
+
+    Checks the FIRST our-entry per protocol (duplicates are refused first by
+    :func:`_assert_no_duplicates`). A managed field (``model`` /
+    ``maxOutputTokens`` / ``baseUrl``) present at a value DIFFERENT from the
+    canonical helper value trips the guard, because the journal restores only
+    the apiKey — that overwrite cannot round-trip. ``baseUrl`` drift is allowed
+    when the value is any KNOWN regional URL (a cross-region re-activation),
+    and only refused for a genuinely foreign endpoint. ``model`` and
+    ``maxOutputTokens`` are region-independent constants, so any drift is user
+    customization. A field that is simply ABSENT (not set) is not drift —
+    activation just adds it.
+    """
+    want = {
+        PROVIDER_ANTHROPIC: _canonical_entry(PROVIDER_ANTHROPIC, region),
+        PROVIDER_OPENAI: _canonical_entry(PROVIDER_OPENAI, region),
+    }
+    allowed_urls = {
+        PROVIDER_ANTHROPIC: _known_base_urls(PROVIDER_ANTHROPIC),
+        PROVIDER_OPENAI: _known_base_urls(PROVIDER_OPENAI),
+    }
+    first_by_proto: dict[str, dict[str, Any]] = {}
+    for m in models:
+        if not _is_our_entry(m):
+            continue
+        proto = _protocol_of(m)
+        if proto is None or proto in first_by_proto:
+            continue  # dups refused above; inspect only the first per protocol
+        first_by_proto[proto] = m
+        canonical = want[proto]
+        drifted: list[str] = []
+        for fld in _MANAGED_FIELDS:
+            if fld not in m:
+                continue  # absent → activation adds it, not a conflict
+            if fld == "baseUrl":
+                # A known regional URL is a cross-region re-activation, not
+                # user customization — allow it; only a foreign URL conflicts.
+                if m[fld] not in allowed_urls[proto]:
+                    drifted.append(fld)
+            elif m[fld] != canonical[fld]:
+                drifted.append(fld)
+        if drifted:
+            raise ValidationError(
+                f"Factory Droid activation would overwrite user-configured "
+                f"field(s) {drifted} on an existing '{proto}' 'GLM Coding "
+                f"Plan' entry in ~/.factory/settings.json. The helper only "
+                f"journals the prior apiKey, so this overwrite is "
+                f"irreversible. Back up the entry, then either rename it "
+                f"(drop 'GLM Coding Plan' from displayName) or align it with "
+                f"the helper values ({canonical}) and retry."
+            )
+
+
+# ---------------------------------------------------------------------------
 # Document transforms
 # ---------------------------------------------------------------------------
 
@@ -151,6 +301,12 @@ def _plan_zai_doc(
     """
     new_doc: dict[str, Any] = dict(doc) if doc else {}
     models = list(new_doc.get("customModels") or [])
+    # Entry-identity guards (issue #53) — refuse BEFORE the merge loop, which
+    # would otherwise silently drop duplicate GLM entries (F3) and irreversibly
+    # clobber user-configured model/baseUrl/limits on a pre-existing entry (F2,
+    # only the apiKey is journaled).
+    _assert_no_duplicates(models, path="use zai")
+    _assert_no_managed_field_drift(models, region)
     # Index our existing entries by protocol so we can deep-merge into them.
     existing_by_proto: dict[str, dict[str, Any]] = {}
     kept: list[dict[str, Any]] = []
@@ -182,6 +338,10 @@ def _plan_default_doc(doc: dict[str, Any] | None) -> dict[str, Any]:
     """
     new_doc: dict[str, Any] = dict(doc) if doc else {}
     models = list(new_doc.get("customModels") or [])
+    # Refuse ambiguous duplicates (F3): with >1 GLM entry per protocol the blind
+    # inverse cannot tell ours from a foreign GLM entry and would silently
+    # destroy the wrong one.
+    _assert_no_duplicates(models, path="use default")
     models = [m for m in models if not _is_our_entry(m)]
     if models:
         new_doc["customModels"] = models
@@ -311,6 +471,13 @@ def apply_revert_decisions(
         dict(m) if isinstance(m, dict) else m
         for m in (new_doc.get("customModels") or [])
     ]
+    # Refuse ambiguous duplicates (F3): ``next(...)`` below resolves the FIRST
+    # our-entry per protocol — with >1 present it could remove a foreign GLM
+    # entry inserted before ours instead of the helper's. No field-drift check
+    # here (no ``region`` available); revert only ever sets apiKey (RESTORE) or
+    # removes an entry (CLEAR/REFUSE), never model/baseUrl/limits, so F2 does
+    # not apply on this path.
+    _assert_no_duplicates(models, path="use default")
 
     for key, decision in decisions.items():
         proto = _protocol_for_journal_key(key)
