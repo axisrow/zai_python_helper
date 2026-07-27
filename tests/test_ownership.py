@@ -444,6 +444,83 @@ def test_active_cycle_removal_re_removal_preserves_prior():
     assert records[TOOL]["ANTHROPIC_API_KEY"]["active"] is True
 
 
+# ---------------------------------------------------------------------------
+# Bug 6 (issue #54): revert must REFUSE on an INACTIVE record — a completed
+# cycle must not be re-RESTORE'd, or a repeat ``use default`` resurrects a
+# stale prior and destroys the user's (re)created config.
+# ---------------------------------------------------------------------------
+
+
+def test_revert_refuses_on_inactive_record_set_value():
+    """Bug 6 (set-value path): a retired record must NOT be re-RESTORE'd.
+
+    Sequence: ``use zai`` sets AUTH_TOKEN=Z (prior=P) → ``use default``
+    RESTORE's P and retires the record (active=False) → the user re-creates
+    their config with the SAME token Z we once wrote → a repeat ``use default``
+    sees current=Z still matching the retired ``set_hash``. Without the
+    active-check the stale prior=P would be RESTORE'd, silently destroying the
+    user's Z (data loss). The fix REFUSEs on the inactive record and leaves
+    everything untouched.
+    """
+    z, p = "sk-zai", "sk-user-P"
+    # ``use zai`` then ``use default``: a completed cycle, record retired.
+    records = take_over({}, TOOL, "ANTHROPIC_AUTH_TOKEN", p, True, hash_value(z))
+    records = revert(records, TOOL, "ANTHROPIC_AUTH_TOKEN", current_value=z)[1]
+    assert records[TOOL]["ANTHROPIC_AUTH_TOKEN"]["active"] is False
+
+    # User re-creates the config with the same Z; a repeat ``use default``
+    # current=Z still matches the retired set_hash, but the cycle is OVER.
+    before = {t: dict(b) for t, b in records.items()}
+    decision, retired = revert(records, TOOL, "ANTHROPIC_AUTH_TOKEN", current_value=z)
+    assert decision.action == RevertAction.REFUSE
+    assert "already completed" in decision.reason
+    # No stale RESTORE: the user's Z is not destroyed (prior_value carries the
+    # stale prior only for diagnostics, the action is REFUSE — caller must NOT
+    # write it).
+    assert retired == before  # journal byte-identical (no retirement flip)
+    assert retired[TOOL]["ANTHROPIC_AUTH_TOKEN"]["active"] is False
+
+
+def test_revert_refuses_on_inactive_record_removal_path():
+    """Bug 6 (removal path): a retired removal record must NOT resurrect.
+
+    Sequence: ``use zai`` removes API_KEY (prior=P1) → ``use default`` RESTORE's
+    P1 and retires (active=False) → the user DELETES the restored P1 → a repeat
+    ``use default`` sees current=None (key absent), which still looks like "our
+    removal is live". Without the active-check the stale prior=P1 would be
+    RESTORE'd, RESURRECTING the credential the user deleted. The fix REFUSEs.
+    """
+    p1 = "sk-user-P1"
+    records = take_over({}, TOOL, "ANTHROPIC_API_KEY", p1, True, set_hash=None)
+    records = revert(records, TOOL, "ANTHROPIC_API_KEY", current_value=None)[1]
+    assert records[TOOL]["ANTHROPIC_API_KEY"]["active"] is False
+
+    # User deletes the restored P1; repeat ``use default`` (current=None).
+    before = {t: dict(b) for t, b in records.items()}
+    decision, retired = revert(records, TOOL, "ANTHROPIC_API_KEY", current_value=None)
+    assert decision.action == RevertAction.REFUSE  # NOT a stale RESTORE of P1
+    assert retired == before  # no resurrection, no journal change
+
+
+def test_full_resurrection_scenario_does_not_destroy_user_config():
+    """The headline Bug 6 scenario end-to-end (set-value, both tools).
+
+    ``use zai`` → ``use default`` (retire) → user re-creates the SAME token →
+    repeat ``use default`` MUST be a no-op (REFUSE), never a stale RESTORE.
+    Asserts the decision the caller would act on AND that the journal is left
+    alone, so the user's re-created config survives.
+    """
+    z, p = "sk-zai-token", "sk-user-original"
+    records = take_over({}, TOOL, "ANTHROPIC_AUTH_TOKEN", p, True, hash_value(z))
+    # ``use default``: completed cycle, record retired.
+    records = revert(records, TOOL, "ANTHROPIC_AUTH_TOKEN", current_value=z)[1]
+    assert records[TOOL]["ANTHROPIC_AUTH_TOKEN"]["active"] is False
+
+    # User re-creates the config (same token) → repeat ``use default``.
+    decision = _revert(records, TOOL, "ANTHROPIC_AUTH_TOKEN", current_value=z)
+    assert decision.action == RevertAction.REFUSE  # user's Z is preserved
+
+
 def test_retired_journal_round_trips_through_disk(tmp_path):
     """A retired (active=False) record survives a write/read cycle (migration).
 

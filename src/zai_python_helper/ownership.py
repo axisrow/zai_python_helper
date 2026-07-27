@@ -365,6 +365,17 @@ def revert(
        attribute to ourselves. (This is the fix for the S3 blind-deletion
        regression: ``use default`` with no prior ``use zai`` must not wipe a
        key the user configured by hand.)
+    4. **Entry exists but is INACTIVE (``active=False``)** → ``REFUSE``. A
+       prior ``revert`` already restored the prior and retired this record —
+       the ownership cycle is OVER. The value live now belongs to whoever
+       (re)created it after our cycle ended, so a repeat ``use default`` must
+       NOT act again: re-matching the retired ``set_hash`` (e.g. the user
+       re-set the SAME token we once wrote) would otherwise RESTORE the STALE
+       prior and destroy their config, and the removal path would RESURRECT a
+       credential the user deleted after the first revert. The ``active`` flag
+       gates BOTH halves of the cycle (symmetric to the ``take_over`` check,
+       issue #48). This is the Bug 6 fix (issue #54): the journal is left
+       untouched (there is no in-flight ownership to retire).
 
     A ``None`` ``set_hash`` records ownership-by-removal (we deleted the key
     on activation, e.g. ``ANTHROPIC_API_KEY``). The "value we set" is the
@@ -379,7 +390,9 @@ def revert(
     prior, which is what prevents resurrecting a credential the user deleted
     after the revert. ``REFUSE`` and no-entry cases leave the journal
     untouched (REFUSE means we did NOT act, so the cycle is still in flight;
-    no-entry means there was never a cycle to retire).
+    no-entry means there was never a cycle to retire). The INACTIVE-record
+    ``REFUSE`` (case 4) also leaves the journal untouched — the cycle was
+    already completed by an earlier revert, so there is nothing to retire.
 
     Args:
         records: The current journal dict.
@@ -426,6 +439,33 @@ def revert(
         )
 
     record = OwnershipRecord.from_dict(raw if isinstance(raw, dict) else {})
+
+    # Completed-cycle guard (issue #54, Bug 6): if the record is INACTIVE, a
+    # prior revert already RESTORE'd and retired it — the ownership cycle is
+    # OVER. Re-running ``use default`` must NOT act again, because the value
+    # live now belongs to whoever (re)created it after our cycle ended, not to
+    # us. Without this gate the stale ``set_hash``/prior pair stays
+    # authoritative: a repeat revert that still matches the retired ``set_hash``
+    # (e.g. the user re-set the SAME token we once wrote) would RESTORE the
+    # STALE prior and silently destroy their config, and the removal path would
+    # RESURRECT a credential the user deleted after the first revert. Symmetric
+    # to the ``take_over`` active-check (#48) — the ``active`` flag gates BOTH
+    # halves of the cycle. We REFUSE (no-op) and leave the journal untouched:
+    # there is no in-flight ownership to retire.
+    if not record.active:
+        return (
+            RevertDecision(
+                action=RevertAction.REFUSE,
+                key=key,
+                prior_value=record.prior_value,
+                prior_present=record.prior_present,
+                reason=(
+                    f"{tool}/{key} ownership cycle already completed "
+                    "(inactive record) — not restoring stale prior"
+                ),
+            ),
+            _copy_records(records),
+        )
 
     # We took ownership by REMOVING the key. The "value we set" is absence:
     # restore the prior only while the key is still absent. If a value has
