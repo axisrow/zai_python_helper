@@ -70,6 +70,16 @@ OUR_PROTOCOLS: tuple[str, ...] = (PROVIDER_ANTHROPIC, PROVIDER_OPENAI)
 MODEL_ID = "glm-4.7"
 MAX_OUTPUT_TOKENS = 131072
 
+# Every value the helper has EVER written for a managed field, current first.
+# The drift guard relaxes only for values inside these sets: a canonical-name
+# entry carrying one is a stale post-state we may upgrade in place, while any
+# other value is user customization we must refuse (see
+# :func:`_assert_no_managed_field_drift`). APPEND the outgoing value here
+# whenever MODEL_ID / MAX_OUTPUT_TOKENS changes — dropping one turns routine
+# activation into a refusal for users still on it.
+_KNOWN_MODEL_IDS: frozenset[str] = frozenset({MODEL_ID, "glm-4.6"})
+_KNOWN_MAX_OUTPUT_TOKENS: frozenset[int] = frozenset({MAX_OUTPUT_TOKENS})
+
 
 def anthropic_base_url_for_region(region: Region) -> str:
     """Z.ai Anthropic-protocol endpoint for ``region`` (epic #1 V2 matrix)."""
@@ -153,11 +163,13 @@ def _our_entries(region: Region, auth_token: str) -> list[dict[str, Any]]:
 #
 # F2 (field drift): activation deep-merges our managed fields over a pre-
 # existing GLM entry, but only the apiKey is journaled — so model/baseUrl/
-# limits would be lost on revert. Refuse when a USER-authored entry carries a
-# managed field at a value we would overwrite. Provenance is decided by the
-# exact canonical displayName (see _assert_no_managed_field_drift): the marker
-# is a substring match a user's own entry can satisfy, so "looks like ours" is
-# not "is ours".
+# limits would be lost on revert. Refuse when a managed field carries a value
+# we would overwrite and cannot restore. Provenance takes TWO checks (see
+# _assert_no_managed_field_drift): the exact canonical displayName proves the
+# ENTRY is ours (the marker is a substring a user's own entry can satisfy), and
+# _is_helper_value proves the VALUE is ours (displayName is user-editable, so a
+# user customizing a managed entry keeps the canonical name). "Looks like ours"
+# is not "is ours" — at either level.
 #
 # F3 (duplicates): two GLM-marker entries for one protocol make "which is
 # ours" indeterminate — the merge keeps the first (dropping the rest) and
@@ -193,6 +205,35 @@ def _canonical_entry(provider: str, region: Region) -> dict[str, Any]:
         "maxOutputTokens": MAX_OUTPUT_TOKENS,
         "baseUrl": base_url,
     }
+
+
+def _known_base_urls(provider: str) -> set[str]:
+    """Every regional baseUrl the helper could have written for ``provider``.
+
+    One of the three "values the helper could have written" sets consumed by
+    :func:`_assert_no_managed_field_drift`. A canonical-name entry on one of
+    these URLs is a cross-region post-state we may rewrite; any other endpoint
+    (a private proxy, say) is user configuration and refuses.
+    """
+    if provider == PROVIDER_ANTHROPIC:
+        return set(ZAI_ANTHROPIC_BASE_URL_BY_REGION_V2.values())
+    return set(ZAI_PAAS_BASE_URL_BY_REGION.values())
+
+
+def _is_helper_value(field: str, value: Any, provider: str) -> bool:
+    """True iff ``value`` is one the helper itself could have written.
+
+    The second half of the provenance test. A canonical ``displayName`` proves
+    the ENTRY is ours; it does NOT prove the current field VALUES are, because
+    displayName is user-editable and a user customizing an existing helper
+    entry naturally keeps the managed name. So each managed field is checked
+    against the closed set of values this helper has ever written.
+    """
+    if field == "model":
+        return value in _KNOWN_MODEL_IDS
+    if field == "maxOutputTokens":
+        return value in _KNOWN_MAX_OUTPUT_TOKENS
+    return value in _known_base_urls(provider)  # baseUrl
 
 
 def _assert_no_duplicates(models: list[Any], *, path: str) -> None:
@@ -234,22 +275,26 @@ def _assert_no_managed_field_drift(models: list[Any], region: Region) -> None:
     canonical helper value trips the guard, because the journal restores only
     the apiKey — that overwrite cannot round-trip.
 
-    PROVENANCE is the discriminator. ``_is_our_entry`` matches the ``_MARKER``
-    substring, which a USER-authored entry can also carry ("My GLM Coding Plan
-    china"). The helper, by contrast, always writes the EXACT canonical
-    ``displayName``. So:
+    PROVENANCE is the discriminator, and it takes TWO independent checks —
+    one for the entry, one for each value. Neither alone is sufficient:
 
-    * **Helper-written** (canonical displayName) — rewriting it is us
-      overwriting us, never user data loss. Two relaxations apply, and ONLY
-      here: a ``baseUrl`` at any KNOWN regional URL is a cross-region
-      re-activation, and a stale ``model`` / ``maxOutputTokens`` is a value we
-      wrote under an earlier constant (so bumping ``MODEL_ID`` does not turn
-      routine activation into a refusal for every existing user).
-    * **User-authored** (marker substring, different displayName) — ANY managed
-      field at a non-canonical value is user config that activation would
-      irreversibly clobber, including a known regional URL: the user pointing
-      their own entry at a Z.ai endpoint is still their configuration, and both
-      that URL and their displayName are lost on revert.
+    * **The entry** — ``_is_our_entry`` matches the ``_MARKER`` substring, which
+      a USER-authored entry can also carry ("My GLM Coding Plan china"). The
+      helper always writes the EXACT canonical ``displayName``, so only that
+      exact string marks the entry as one we created.
+    * **The value** — a canonical ``displayName`` does NOT prove the current
+      field values are ours. displayName is user-editable, and a user
+      customizing an existing helper entry naturally KEEPS the managed name
+      (it is what marks the entry as managed). So each managed field is
+      additionally checked against :func:`_is_helper_value` — the closed set of
+      values this helper has ever written.
+
+    A field is drift unless BOTH hold. That keeps the stale-constant upgrade
+    (canonical name + a value we wrote under an earlier ``MODEL_ID``, or
+    another region's URL after a global↔china switch) while refusing in-place
+    user customization (canonical name + a private proxy URL, a fine-tune, a
+    hand-set token limit) — which the journal cannot restore, since it records
+    only the prior apiKey.
 
     A field that is ABSENT — or explicitly ``None``, which in JSON means unset
     — is not drift; activation just writes it.
@@ -267,25 +312,31 @@ def _assert_no_managed_field_drift(models: list[Any], region: Region) -> None:
             continue  # dups refused above; inspect only the first per protocol
         first_by_proto[proto] = m
         canonical = want[proto]
-        # Helper-written iff the displayName is EXACTLY what _entry writes.
+        # The entry is ours iff the displayName is EXACTLY what _entry writes.
         helper_written = m.get("displayName") == _canonical_display_name(proto)
-        if helper_written:
-            continue  # ours to rewrite — region switch and stale constants alike
         drifted: list[str] = []
         for fld in _MANAGED_FIELDS:
-            if m.get(fld) is None:
+            value = m.get(fld)
+            if value is None:
                 continue  # absent or explicit null → unset; activation adds it
-            if m[fld] != canonical[fld]:
-                drifted.append(fld)
+            if value == canonical[fld]:
+                continue  # already what we would write
+            # Non-canonical value: ours to upgrade only if BOTH the entry and
+            # the value are the helper's. Either one alone means user config.
+            if helper_written and _is_helper_value(fld, value, proto):
+                continue  # stale helper state (old constant / other region)
+            drifted.append(fld)
         if drifted:
             raise ValidationError(
                 f"Factory Droid activation would overwrite user-configured "
                 f"field(s) {drifted} on an existing '{proto}' 'GLM Coding "
                 f"Plan' entry in ~/.factory/settings.json. The helper only "
                 f"journals the prior apiKey, so this overwrite is "
-                f"irreversible. Back up the entry, then either rename it "
-                f"(drop 'GLM Coding Plan' from displayName) or align it with "
-                f"the helper values ({canonical}) and retry."
+                f"irreversible. Back up the entry, then either move your "
+                f"customization to a separate entry the helper does not manage "
+                f"(one whose displayName omits 'GLM Coding Plan') or align "
+                f"these field(s) with the helper values ({canonical}) and "
+                f"retry."
             )
 
 

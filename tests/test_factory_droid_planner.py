@@ -491,6 +491,44 @@ class TestFailClosedGuards:
         with pytest.raises(ValidationError, match="model"):
             fd.plan_zai(Region.GLOBAL, factory_doc=seed, auth_token=TOKEN)
 
+    def test_canonical_name_with_user_custom_model_raises(self):
+        """Round-2 regression: a canonical displayName proves the ENTRY is ours,
+        not that the current field VALUES are. A user who customizes an existing
+        helper entry naturally keeps the managed name, so a value outside the
+        set the helper could have written is user config and must refuse."""
+        seed = {"customModels": [{
+            "displayName": "Z.ai GLM Coding Plan (Anthropic)",  # canonical, kept
+            "provider": "anthropic",
+            "model": "glm-4.7-my-finetune",  # user's own, never a helper value
+            "baseUrl": GLOBAL_ANTHROPIC, "apiKey": "USER",
+        }]}
+        with pytest.raises(ValidationError, match="model"):
+            fd.plan_zai(Region.GLOBAL, factory_doc=seed, auth_token=TOKEN)
+
+    def test_canonical_name_with_foreign_baseurl_raises(self):
+        """Same class for baseUrl: a canonical-name entry pointed at a private
+        proxy is user config. Round 1 refused this; the provenance rework must
+        not silently overwrite it."""
+        seed = {"customModels": [{
+            "displayName": "Z.ai GLM Coding Plan (Anthropic)",
+            "provider": "anthropic",
+            "model": fd.MODEL_ID, "baseUrl": "https://my.proxy.internal/anthropic",
+        }]}
+        with pytest.raises(ValidationError, match="baseUrl"):
+            fd.plan_zai(Region.GLOBAL, factory_doc=seed, auth_token=TOKEN)
+
+    def test_canonical_name_with_custom_maxtokens_raises(self):
+        """Same class for maxOutputTokens: a value the helper never wrote is
+        user config even under the canonical displayName."""
+        seed = {"customModels": [{
+            "displayName": "Z.ai GLM Coding Plan (Anthropic)",
+            "provider": "anthropic",
+            "model": fd.MODEL_ID, "baseUrl": GLOBAL_ANTHROPIC,
+            "maxOutputTokens": 8192,  # never a helper value
+        }]}
+        with pytest.raises(ValidationError, match="maxOutputTokens"):
+            fd.plan_zai(Region.GLOBAL, factory_doc=seed, auth_token=TOKEN)
+
     def test_explicit_null_managed_field_is_not_drift(self):
         """F5: an explicitly-null managed field means UNSET, not user config —
         it takes the same path as an absent key (activation just writes it)."""
