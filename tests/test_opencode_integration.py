@@ -12,6 +12,7 @@ from __future__ import annotations
 import pytest
 
 from zai_python_helper.backends import JsonBackend
+from zai_python_helper.core.planner import opencode as oc
 from zai_python_helper.ownership import OwnershipJournal
 from zai_python_helper.patchplan import ProcessLock, apply_plan_locked
 from zai_python_helper.paths import Paths
@@ -189,17 +190,65 @@ class TestApplyAndRevert:
         # The seed is left exactly as-is — no silent data loss.
         assert _read_doc(paths) == seed
 
-    def test_use_default_does_not_clear_duplicate_state(self, tool, tmp_path):
-        """Pins the documented recovery contract: ``use default`` does NOT
-        resolve a duplicate-state doc — a hand edit is the only exit.
+    def _use_default(self, tool, paths):
+        """Run the CLI's ``use default`` path (journal-aware plan_revert)."""
+        with ProcessLock(paths.lock_file):
+            state = tool.read_state(paths)
+            journal_records = OwnershipJournal(paths.ownership_json).read()
+            decisions, _ = tool.revert_decisions(journal_records, state)
+            plan = tool.plan_revert(state=state, decisions=decisions)
+            apply_plan_locked(paths, plan)
+            return decisions
 
-        The CLI's ``use default`` routes through the journal-aware
-        ``plan_revert``, which infers ONE region by first-match and therefore
-        only ever touches that entry. On an unowned duplicate seed every
-        decision is REFUSE, so the doc round-trips byte-identical and a
-        following ``use zai`` still hits the guard. This test exists so the
-        docstring/error-message claim cannot silently drift back to the false
-        'run use default then use zai' recovery."""
+    def test_use_default_clears_duplicate_when_our_value_intact(
+        self, tool, tmp_path
+    ):
+        """Recovery contract, branch 1: when one entry still holds exactly
+        what we wrote (value matches the journal ``set_hash``), ``use default``
+        RESTOREs it away and the duplicate is cleared — the user is NOT stuck
+        and must not be told to hand-edit JSON.
+
+        Sequence: clean GLOBAL activation (journal owns provider.apiKey), then
+        the user hand-adds a china provider. Our global entry is provably ours,
+        so revert removes it and leaves the user's china entry untouched."""
+        paths = Paths.from_home(tmp_path)
+        spec = _spec()
+
+        with ProcessLock(paths.lock_file):
+            state = tool.read_state(paths)
+            plan = tool.plan_zai(spec, Region.GLOBAL, state=state, auth_token=TOKEN)
+            records = tool.extract_takeover(plan, prior_state=state, spec=spec)
+            apply_plan_locked(paths, plan)
+        journal = OwnershipJournal(paths.ownership_json)
+        journal.write(_merge(tool, journal.read(), records))
+
+        # User hand-adds the china provider -> duplicate state.
+        doc = _read_doc(paths)
+        doc["provider"][CHINA_NAME] = {"options": {"apiKey": "user-china-key"}}
+        JsonBackend.write(paths.opencode, doc)
+
+        decisions = self._use_default(tool, paths)
+        assert decisions["provider.apiKey"].action.name == "RESTORE"
+
+        after = _read_doc(paths)
+        assert not oc.has_duplicate_regional_providers(after)
+        # Our entry is gone; the user's china key survives untouched.
+        assert GLOBAL_NAME not in after["provider"]
+        assert after["provider"][CHINA_NAME] == {"options": {"apiKey": "user-china-key"}}
+
+        # ...and `use zai` now succeeds — recovery is complete.
+        with ProcessLock(paths.lock_file):
+            state = tool.read_state(paths)
+            tool.plan_zai(spec, Region.GLOBAL, state=state, auth_token=TOKEN)
+
+    def test_use_default_cannot_clear_duplicate_when_unowned(self, tool, tmp_path):
+        """Recovery contract, branch 2: when NO entry's value matches the
+        journal (both user-authored here), every decision is REFUSE, the doc
+        round-trips byte-identical, and ``use zai`` stays refused — a hand edit
+        is the only exit.
+
+        This is the seed the guard exists for; pinning both branches keeps the
+        docstring/error message from generalizing either one to the other."""
         from zai_python_helper.errors import ConfigurationError
 
         paths = Paths.from_home(tmp_path)
@@ -212,18 +261,12 @@ class TestApplyAndRevert:
         }
         JsonBackend.write(paths.opencode, seed)
 
-        with ProcessLock(paths.lock_file):
-            state = tool.read_state(paths)
-            journal_records = OwnershipJournal(paths.ownership_json).read()
-            decisions, _ = tool.revert_decisions(journal_records, state)
-            plan = tool.plan_revert(state=state, decisions=decisions)
-            apply_plan_locked(paths, plan)
+        self._use_default(tool, paths)
 
         # `use default` changed nothing — the duplicate state survives.
         assert _read_doc(paths) == seed
 
-        # ...and `use zai` is therefore still refused: the user is not
-        # unstuck by `use default`, exactly as the error message now states.
+        # ...and `use zai` is therefore still refused.
         with ProcessLock(paths.lock_file):
             state = tool.read_state(paths)
             with pytest.raises(ConfigurationError):
