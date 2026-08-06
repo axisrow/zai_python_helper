@@ -103,6 +103,7 @@ class FactoryDroidTool(Tool):
         *,
         state: dict[FileTag, Any],
         auth_token: str,
+        journal_records: dict[str, Any] | None = None,
     ) -> PatchPlan:
         return fd.plan_zai(
             region, factory_doc=state.get(FileTag.FACTORY_DROID), auth_token=auth_token
@@ -113,6 +114,7 @@ class FactoryDroidTool(Tool):
         *,
         state: dict[FileTag, Any],
         decisions: dict[str, Any],
+        journal_records: dict[str, Any] | None = None,
     ) -> PatchPlan:
         return fd.plan_revert(decisions, factory_doc=state.get(FileTag.FACTORY_DROID))
 
@@ -120,7 +122,11 @@ class FactoryDroidTool(Tool):
     # Ownership descriptor
     # ------------------------------------------------------------------
 
-    def managed_fields(self, spec: ProviderSpec) -> list[ManagedField]:
+    def managed_fields(
+        self,
+        spec: ProviderSpec,
+        journal_records: dict[str, Any] | None = None,
+    ) -> list[ManagedField]:
         return [
             _CustomModelApiKeyField(fd.PROVIDER_ANTHROPIC, fd.JOURNAL_KEY_ANTHROPIC_APIKEY),
             _CustomModelApiKeyField(fd.PROVIDER_OPENAI, fd.JOURNAL_KEY_OPENAI_APIKEY),
@@ -134,6 +140,8 @@ class FactoryDroidTool(Tool):
         plan: PatchPlan,
         prior_state: dict[FileTag, Any],
         spec: ProviderSpec,
+        *,
+        journal_records: dict[str, Any] | None = None,
     ) -> list[tuple[str, str | None, bool, str | None]]:
         from zai_python_helper.ownership import hash_value
 

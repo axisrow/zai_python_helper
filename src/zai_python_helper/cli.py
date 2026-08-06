@@ -671,8 +671,19 @@ def _handle_use_zai(args: argparse.Namespace) -> int:
 
     if dry_run:
         # Dry-run is read-only: read state, plan, preview. No lock, no write.
+        # The journal is read here too (read-only) so the preview reflects the
+        # SAME ownership-aware decision the real run would take — otherwise a
+        # doc that activates cleanly would preview as a refusal (issue #61).
+        from zai_python_helper.ownership import OwnershipJournal as _Journal
+
         state = tool.read_state(paths)
-        plan = tool.plan_zai(spec, region, state=state, auth_token=auth_token)
+        plan = tool.plan_zai(
+            spec,
+            region,
+            state=state,
+            auth_token=auth_token,
+            journal_records=_Journal(paths.ownership_json).read(),
+        )
         print("--dry-run: no files written")
         if plan.is_empty:
             print("(no changes — already in desired state)")
@@ -697,16 +708,31 @@ def _handle_use_zai(args: argparse.Namespace) -> int:
         # commit (and so the takeover prior reflects exactly the pre-commit
         # state we are about to overwrite).
         state = tool.read_state(paths)
-        plan = tool.plan_zai(spec, region, state=state, auth_token=auth_token)
+
+        # Read the journal BEFORE planning, still under the lock: a tool may
+        # need prior ownership to plan at all — on a config state that is
+        # ambiguous by document alone, the journal is what distinguishes an
+        # entry we wrote from one the user wrote (issue #61). Reading it here
+        # keeps the snapshot consistent with the state we plan against.
+        journal = OwnershipJournal(paths.ownership_json)
+        journal_records = journal.read()
+
+        plan = tool.plan_zai(
+            spec,
+            region,
+            state=state,
+            auth_token=auth_token,
+            journal_records=journal_records,
+        )
 
         # Ownership journal (ADR-004): for every field we are about to
         # set/remove, record its PRIOR value/presence + a hash of what we set.
         # take_over is idempotent w.r.t. the restore point (a repeat
         # activation of the same value preserves the ORIGINAL prior), so a
         # re-activation does not lose the user's first pre-activation value.
-        records = tool.extract_takeover(plan, prior_state=state, spec=spec)
-
-        journal = OwnershipJournal(paths.ownership_json)
+        records = tool.extract_takeover(
+            plan, prior_state=state, spec=spec, journal_records=journal_records
+        )
 
         def _persist_journal() -> None:
             if records:
@@ -756,7 +782,9 @@ def _handle_use_default(args: argparse.Namespace) -> int:
         state = tool.read_state(paths)
         journal_records = OwnershipJournal(paths.ownership_json).read()
         decisions = tool.revert_decisions(journal_records, state)[0]
-        plan = tool.plan_revert(state=state, decisions=decisions)
+        plan = tool.plan_revert(
+            state=state, decisions=decisions, journal_records=journal_records
+        )
         _print_refuse_warnings(decisions)
         print("--dry-run: no files written")
         if plan.is_empty:
@@ -773,7 +801,9 @@ def _handle_use_default(args: argparse.Namespace) -> int:
         journal = OwnershipJournal(paths.ownership_json)
         journal_records = journal.read()
         decisions, retired_records = tool.revert_decisions(journal_records, state)
-        plan = tool.plan_revert(state=state, decisions=decisions)
+        plan = tool.plan_revert(
+            state=state, decisions=decisions, journal_records=journal_records
+        )
         _print_refuse_warnings(decisions)
 
         # Persist the retired journal ALONGSIDE the revert (issue #48
