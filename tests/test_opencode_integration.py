@@ -12,6 +12,7 @@ from __future__ import annotations
 import pytest
 
 from zai_python_helper.backends import JsonBackend
+from zai_python_helper.core.planner import opencode as oc
 from zai_python_helper.ownership import OwnershipJournal
 from zai_python_helper.patchplan import ProcessLock, apply_plan_locked
 from zai_python_helper.paths import Paths
@@ -21,6 +22,7 @@ from zai_python_helper.tools.opencode import OpenCodeTool
 
 TOKEN = "sk-integration-token"
 GLOBAL_NAME = "zai-coding-plan"
+CHINA_NAME = "zhipuai-coding-plan"
 
 
 @pytest.fixture
@@ -149,6 +151,126 @@ class TestApplyAndRevert:
         # Claude Code settings round-trip unchanged.
         cc = JsonBackend.read(paths.claude_settings)
         assert cc == {"env": {"ANTHROPIC_AUTH_TOKEN": "cc-tok"}}
+
+    def test_duplicate_state_activation_refused(self, tool, tmp_path):
+        """Issue #50 / Bug 4 edge (integration): a duplicate-state seed (BOTH
+        regional providers with distinct credentials) must NOT proceed through
+        ``use zai``. A region switch would silently destroy one entry because
+        the ownership journal keys the apiKey under a single fixed logical name
+        and cannot round-trip two regional names. ``plan_zai`` refuses the
+        activation (ConfigurationError) instead of guessing; the on-disk doc is
+        left untouched (non-destructive). Both insertion orders refused."""
+        from zai_python_helper.errors import ConfigurationError
+
+        paths = Paths.from_home(tmp_path)
+        spec = _spec()
+        seed = {
+            "$schema": "keep",
+            "provider": {
+                GLOBAL_NAME: {
+                    "options": {"apiKey": "user-global-key"},
+                    "baseURL": "https://user.global",
+                },
+                CHINA_NAME: {
+                    "options": {"apiKey": "user-china-key"},
+                    "baseURL": "https://user.china",
+                    "models": {"glm-4.6": {}},
+                },
+            },
+        }
+        JsonBackend.write(paths.opencode, seed)
+
+        # Activating EITHER region is refused from a dual-provider seed.
+        for region in (Region.GLOBAL, Region.CHINA):
+            with ProcessLock(paths.lock_file):
+                state = tool.read_state(paths)
+                with pytest.raises(ConfigurationError):
+                    tool.plan_zai(spec, region, state=state, auth_token=TOKEN)
+
+        # The seed is left exactly as-is — no silent data loss.
+        assert _read_doc(paths) == seed
+
+    def _use_default(self, tool, paths):
+        """Run the CLI's ``use default`` path (journal-aware plan_revert)."""
+        with ProcessLock(paths.lock_file):
+            state = tool.read_state(paths)
+            journal_records = OwnershipJournal(paths.ownership_json).read()
+            decisions, _ = tool.revert_decisions(journal_records, state)
+            plan = tool.plan_revert(state=state, decisions=decisions)
+            apply_plan_locked(paths, plan)
+            return decisions
+
+    def test_use_default_clears_duplicate_when_our_value_intact(
+        self, tool, tmp_path
+    ):
+        """Recovery contract, branch 1: when one entry still holds exactly
+        what we wrote (value matches the journal ``set_hash``), ``use default``
+        RESTOREs it away and the duplicate is cleared — the user is NOT stuck
+        and must not be told to hand-edit JSON.
+
+        Sequence: clean GLOBAL activation (journal owns provider.apiKey), then
+        the user hand-adds a china provider. Our global entry is provably ours,
+        so revert removes it and leaves the user's china entry untouched."""
+        paths = Paths.from_home(tmp_path)
+        spec = _spec()
+
+        with ProcessLock(paths.lock_file):
+            state = tool.read_state(paths)
+            plan = tool.plan_zai(spec, Region.GLOBAL, state=state, auth_token=TOKEN)
+            records = tool.extract_takeover(plan, prior_state=state, spec=spec)
+            apply_plan_locked(paths, plan)
+        journal = OwnershipJournal(paths.ownership_json)
+        journal.write(_merge(tool, journal.read(), records))
+
+        # User hand-adds the china provider -> duplicate state.
+        doc = _read_doc(paths)
+        doc["provider"][CHINA_NAME] = {"options": {"apiKey": "user-china-key"}}
+        JsonBackend.write(paths.opencode, doc)
+
+        decisions = self._use_default(tool, paths)
+        assert decisions["provider.apiKey"].action.name == "RESTORE"
+
+        after = _read_doc(paths)
+        assert not oc.has_duplicate_regional_providers(after)
+        # Our entry is gone; the user's china key survives untouched.
+        assert GLOBAL_NAME not in after["provider"]
+        assert after["provider"][CHINA_NAME] == {"options": {"apiKey": "user-china-key"}}
+
+        # ...and `use zai` now succeeds — recovery is complete.
+        with ProcessLock(paths.lock_file):
+            state = tool.read_state(paths)
+            tool.plan_zai(spec, Region.GLOBAL, state=state, auth_token=TOKEN)
+
+    def test_use_default_cannot_clear_duplicate_when_unowned(self, tool, tmp_path):
+        """Recovery contract, branch 2: when NO entry's value matches the
+        journal (both user-authored here), every decision is REFUSE, the doc
+        round-trips byte-identical, and ``use zai`` stays refused — a hand edit
+        is the only exit.
+
+        This is the seed the guard exists for; pinning both branches keeps the
+        docstring/error message from generalizing either one to the other."""
+        from zai_python_helper.errors import ConfigurationError
+
+        paths = Paths.from_home(tmp_path)
+        spec = _spec()
+        seed = {
+            "provider": {
+                GLOBAL_NAME: {"options": {"apiKey": "user-global-key"}},
+                CHINA_NAME: {"options": {"apiKey": "user-china-key"}},
+            },
+        }
+        JsonBackend.write(paths.opencode, seed)
+
+        self._use_default(tool, paths)
+
+        # `use default` changed nothing — the duplicate state survives.
+        assert _read_doc(paths) == seed
+
+        # ...and `use zai` is therefore still refused.
+        with ProcessLock(paths.lock_file):
+            state = tool.read_state(paths)
+            with pytest.raises(ConfigurationError):
+                tool.plan_zai(spec, Region.GLOBAL, state=state, auth_token=TOKEN)
 
 
 # ---------------------------------------------------------------------------

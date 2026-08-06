@@ -118,6 +118,33 @@ def _references_our_provider(value: Any) -> bool:
     return value.split("/", 1)[0] in ALL_PROVIDER_NAMES
 
 
+def has_duplicate_regional_providers(doc: dict[str, Any] | None) -> bool:
+    """True iff BOTH regional provider names are present in ``doc`` (PURE).
+
+    This is the *duplicate-state* seed of issue #50: a doc carrying both
+    ``zai-coding-plan`` (global) AND ``zhipuai-coding-plan`` (china) at once.
+    Such a doc is reachable only via a manual config edit or migration from
+    the old broken version — the normal cross-region switch never creates it
+    (``_plan_zai_doc`` removes any prior regional provider before adding the
+    current one, leaving at most one).
+
+    It is genuinely ambiguous here WHICH entry the user means to keep, and a
+    region switch would silently clobber one entry's distinct
+    credentials/options (Bug 4 edge) because the ownership journal keys the
+    apiKey under a single fixed logical name (``provider.apiKey``) and so
+    cannot tell the two regional names apart through a revert. Rather than
+    guess (and lose data), :func:`plan_zai` refuses the activation — the
+    non-destructive, fail-closed choice (ADR-004: do not clobber state we
+    cannot safely switch). The guard is symmetric: it fires regardless of
+    content equivalence or insertion order, because two coexisting managed
+    names is itself the condition we cannot round-trip.
+    """
+    if not doc:
+        return False
+    providers = doc.get("provider") or {}
+    return all(name in providers for name in ALL_PROVIDER_NAMES)
+
+
 # ---------------------------------------------------------------------------
 # Document transforms
 # ---------------------------------------------------------------------------
@@ -219,7 +246,57 @@ def plan_zai(
     Returns:
         A :class:`PatchPlan` with one delta for the OpenCode config file.
         Idempotent: a second ``use zai`` on the post-state is a NOOP.
+
+    Raises:
+        ConfigurationError: If ``opencode_doc`` is a duplicate-state seed —
+            i.e. BOTH regional provider names are present at once (issue #50,
+            Bug 4 edge). Such a doc is ambiguous (which entry does the user
+            mean to keep?) and a region switch would silently clobber one
+            entry's distinct credentials because the journal's single
+            ``provider.apiKey`` key cannot round-trip two regional names. We
+            refuse the activation rather than guess.
+
+            Recovery depends on whether one entry is still provably OURS.
+            ``use default`` routes through :func:`plan_revert` (journal-aware),
+            which infers a single region by first-match and only ever touches
+            that one entry; what it does there is decided by the journal:
+
+            - **Value matches the journal ``set_hash``** (the entry still holds
+              exactly what we wrote): the apiKey decision is RESTORE, our entry
+              is restored away, the other entry is left untouched — the
+              duplicate is CLEARED and a following ``use zai`` succeeds. This
+              is the ordinary case after a helper activation plus a hand-added
+              second provider, and ``use default`` is the supported fix.
+            - **No entry's value matches** (both user-authored, or ours was
+              rotated/edited so ownership can no longer be proved): every
+              decision is REFUSE, the doc round-trips byte-identical, and a
+              MANUAL edit of ``opencode.json`` — deleting the regional entry
+              you no longer want — is the only exit.
+
+            The pure :func:`plan_default` library function removes both
+            unconditionally, but it is not what the CLI calls, and on a seed
+            whose entries carry USER credentials a blind remove-both would
+            itself be destructive.
+
+            Known gap (tracked separately): in the second case above the guard
+            refuses even when the doc could in principle be disambiguated,
+            leaving the hand edit as the only route.
     """
+    if has_duplicate_regional_providers(opencode_doc):
+        from zai_python_helper.errors import ConfigurationError
+
+        raise ConfigurationError(
+            "opencode.json carries BOTH regional providers "
+            f"({ALL_PROVIDER_NAMES[0]} and {ALL_PROVIDER_NAMES[1]}) at once. "
+            "This duplicate state is ambiguous and a region switch would "
+            "silently destroy one entry's credentials. Try `use default` "
+            "first: if one of the two entries is still the one this tool "
+            "wrote, that removes it and leaves your own entry intact — then "
+            "`use zai` again. If `use default` reports it cannot revert "
+            "(neither entry is ours to remove), edit opencode.json by hand "
+            f"and delete the `provider.{ALL_PROVIDER_NAMES[0]}` or "
+            f"`provider.{ALL_PROVIDER_NAMES[1]}` entry you no longer want."
+        )
     desired = _plan_zai_doc(opencode_doc, region=region, auth_token=auth_token)
     kind = DeltaKind.NOOP if opencode_doc == desired else DeltaKind.WRITE_JSON
     return PatchPlan(deltas=(FileDelta(FileTag.OPENCODE, kind, desired),))

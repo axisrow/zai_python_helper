@@ -7,6 +7,8 @@ exercise the pure transforms in :mod:`zai_python_helper.core.planner.opencode`.
 
 from __future__ import annotations
 
+import pytest
+
 from zai_python_helper.core.planner import DeltaKind, FileTag
 from zai_python_helper.core.planner import opencode as oc
 from zai_python_helper.regions import Region
@@ -91,22 +93,43 @@ class TestPlanZai:
         # And the real coding-plan provider is added alongside it.
         assert doc["provider"][GLOBAL_NAME] == {"options": {"apiKey": TOKEN}}
 
-    def test_removes_all_regional_providers_before_install(self):
-        """With BOTH regional entries present (an edge state left by a prior
-        cross-region switch), ``plan_zai`` must remove every managed regional
-        provider before installing the target — not just the first one (else a
-        stale helper credential survives in the config)."""
+    def test_refuses_duplicate_regional_state_global(self):
+        """Issue #50 / Bug 4 edge: a duplicate-state seed (BOTH regional
+        provider names present at once with distinct credentials) is
+        ambiguous, and a region switch would silently destroy one entry's
+        identity (the journal keys the apiKey under a single fixed logical
+        name and cannot round-trip two regional names through revert). So
+        ``plan_zai`` REFUSES the activation (fail-closed) rather than guess
+        and lose data. The user resolves the duplicate by hand. Both
+        insertion orders must trip the guard (issue #50 acceptance)."""
+        from zai_python_helper.errors import ConfigurationError
+
         seed = {
             "provider": {
-                GLOBAL_NAME: {"options": {"apiKey": "helper-old"}},
-                CHINA_NAME: {"options": {"apiKey": "helper-cn"}},
+                GLOBAL_NAME: {"options": {"apiKey": "user-global-key"}},
+                CHINA_NAME: {"options": {"apiKey": "user-china-key"}},
             },
         }
-        plan = oc.plan_zai(Region.GLOBAL, opencode_doc=seed, auth_token=TOKEN)
-        doc = plan.delta_for(FileTag.OPENCODE).content
-        # Only the freshly-installed global entry remains; china is gone too.
-        assert list(doc["provider"].keys()) == [GLOBAL_NAME]
-        assert doc["provider"][GLOBAL_NAME] == {"options": {"apiKey": TOKEN}}
+        assert oc.has_duplicate_regional_providers(seed) is True
+        with pytest.raises(ConfigurationError):
+            oc.plan_zai(Region.GLOBAL, opencode_doc=seed, auth_token=TOKEN)
+
+    def test_refuses_duplicate_regional_state_china(self):
+        """The duplicate-state guard fires for EITHER target region — the
+        ambiguity is in the seed (two managed names), not in which name we
+        are activating. Reversed insertion order too (issue #50 acceptance:
+        both insertion orders)."""
+        from zai_python_helper.errors import ConfigurationError
+
+        seed = {
+            "provider": {
+                CHINA_NAME: {"options": {"apiKey": "user-china-key"}},
+                GLOBAL_NAME: {"options": {"apiKey": "user-global-key"}},
+            },
+        }
+        assert oc.has_duplicate_regional_providers(seed) is True
+        with pytest.raises(ConfigurationError):
+            oc.plan_zai(Region.CHINA, opencode_doc=seed, auth_token=TOKEN)
 
     def test_idempotent_on_post_state(self):
         """A second plan_zai on the first plan's post-state is a NOOP."""
@@ -267,3 +290,67 @@ class TestRegionHelpers:
             "model",
             "small_model",
         }
+
+
+# ---------------------------------------------------------------------------
+# Duplicate-state detection (issue #50, Bug 4 edge)
+# ---------------------------------------------------------------------------
+
+
+class TestDuplicateRegionalState:
+    """``has_duplicate_regional_providers`` gates the fail-closed activation
+    refusal (issue #50). The condition is "BOTH managed regional names present"
+    — symmetric in insertion order and independent of content equality, because
+    two coexisting managed names is itself the state we cannot round-trip."""
+
+    def test_true_when_both_regional_names_present(self):
+        doc = {
+            "provider": {
+                GLOBAL_NAME: {"options": {"apiKey": "g"}},
+                CHINA_NAME: {"options": {"apiKey": "c"}},
+            }
+        }
+        assert oc.has_duplicate_regional_providers(doc) is True
+
+    def test_true_when_both_present_reversed_order(self):
+        doc = {
+            "provider": {
+                CHINA_NAME: {"options": {"apiKey": "c"}},
+                GLOBAL_NAME: {"options": {"apiKey": "g"}},
+            }
+        }
+        assert oc.has_duplicate_regional_providers(doc) is True
+
+    def test_false_when_only_global_present(self):
+        doc = {"provider": {GLOBAL_NAME: {"options": {"apiKey": "g"}}}}
+        assert oc.has_duplicate_regional_providers(doc) is False
+
+    def test_false_when_only_china_present(self):
+        doc = {"provider": {CHINA_NAME: {"options": {"apiKey": "c"}}}}
+        assert oc.has_duplicate_regional_providers(doc) is False
+
+    def test_false_when_one_regional_plus_foreign(self):
+        """A foreign provider alongside ONE regional name is not duplicate-state."""
+        doc = {
+            "provider": {
+                GLOBAL_NAME: {"options": {"apiKey": "g"}},
+                "openai": {"options": {"apiKey": "f"}},
+            }
+        }
+        assert oc.has_duplicate_regional_providers(doc) is False
+
+    def test_false_for_foreign_provider_with_coding_plan_substring(self):
+        """The detector uses exact-name matching: a foreign provider whose
+        name merely contains ``coding-plan`` is NOT a second managed regional
+        provider (ADR-004 exact-match contract)."""
+        doc = {
+            "provider": {
+                GLOBAL_NAME: {"options": {"apiKey": "g"}},
+                "my-coding-plan-proxy": {"options": {"apiKey": "p"}},
+            }
+        }
+        assert oc.has_duplicate_regional_providers(doc) is False
+
+    def test_false_for_empty_or_absent_doc(self):
+        assert oc.has_duplicate_regional_providers({}) is False
+        assert oc.has_duplicate_regional_providers(None) is False
