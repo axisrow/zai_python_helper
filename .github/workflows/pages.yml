@@ -38,10 +38,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[docs]"
       - name: Enforce human-docs i18n structure sync
-        # ru/ must mirror en/ file-for-file, or the selector 404s. zh is served
-        # via fallback_to_default until its content lands in #34; the gate is
-        # run with --targets ru only here and expanded to ru+zh in #34.
-        run: python tools/check_human_docs_structure.py --targets ru
+        # ru/ and zh/ must mirror en/ file-for-file, or the selector 404s.
+        # zh content landed in #34; the gate now covers both derivatives.
+        run: python tools/check_human_docs_structure.py
       - name: Build with mkdocs
         # --strict turns broken links / nav refs into a hard failure.
         run: mkdocs build --strict
