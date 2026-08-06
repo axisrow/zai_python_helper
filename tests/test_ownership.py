@@ -13,6 +13,7 @@ Covers the pure operations (:func:`take_over` / :func:`revert` /
 
 from __future__ import annotations
 
+import copy
 import json
 
 import pytest
@@ -470,7 +471,11 @@ def test_revert_refuses_on_inactive_record_set_value():
 
     # User re-creates the config with the same Z; a repeat ``use default``
     # current=Z still matches the retired set_hash, but the cycle is OVER.
-    before = {t: dict(b) for t, b in records.items()}
+    # Deep-copy the baseline: a shallow ``dict(b)`` shares the inner record
+    # dicts with ``records``, so an in-place mutation by ``revert`` would
+    # mutate the baseline too and the equality assertion below would pass
+    # vacuously. The point is to prove ``revert`` is pure.
+    before = copy.deepcopy(records)
     decision, retired = revert(records, TOOL, "ANTHROPIC_AUTH_TOKEN", current_value=z)
     assert decision.action == RevertAction.REFUSE
     assert "already completed" in decision.reason
@@ -496,29 +501,44 @@ def test_revert_refuses_on_inactive_record_removal_path():
     assert records[TOOL]["ANTHROPIC_API_KEY"]["active"] is False
 
     # User deletes the restored P1; repeat ``use default`` (current=None).
-    before = {t: dict(b) for t, b in records.items()}
+    # Deep-copy so the purity assertion below is not vacuous (see the
+    # set-value test for why a shallow copy cannot detect in-place mutation).
+    before = copy.deepcopy(records)
     decision, retired = revert(records, TOOL, "ANTHROPIC_API_KEY", current_value=None)
     assert decision.action == RevertAction.REFUSE  # NOT a stale RESTORE of P1
     assert retired == before  # no resurrection, no journal change
 
 
-def test_full_resurrection_scenario_does_not_destroy_user_config():
-    """The headline Bug 6 scenario end-to-end (set-value, both tools).
+def test_full_resurrection_scenario_is_per_tool_isolated():
+    """The headline Bug 6 scenario across TWO tools sharing one journal.
 
     ``use zai`` → ``use default`` (retire) → user re-creates the SAME token →
     repeat ``use default`` MUST be a no-op (REFUSE), never a stale RESTORE.
-    Asserts the decision the caller would act on AND that the journal is left
-    alone, so the user's re-created config survives.
+
+    The single-tool set-value case is already covered above; what this adds is
+    that the completed-cycle gate is scoped PER TOOL. Two tools live in one
+    journal dict, so a retired record under one tool must neither gate nor be
+    gated by the other: the retired tool REFUSEs while the still-active tool
+    RESTOREs normally in the same journal.
     """
     z, p = "sk-zai-token", "sk-user-original"
-    records = take_over({}, TOOL, "ANTHROPIC_AUTH_TOKEN", p, True, hash_value(z))
-    # ``use default``: completed cycle, record retired.
-    records = revert(records, TOOL, "ANTHROPIC_AUTH_TOKEN", current_value=z)[1]
-    assert records[TOOL]["ANTHROPIC_AUTH_TOKEN"]["active"] is False
+    other = "opencode"
+    key = "ANTHROPIC_AUTH_TOKEN"
 
-    # User re-creates the config (same token) → repeat ``use default``.
-    decision = _revert(records, TOOL, "ANTHROPIC_AUTH_TOKEN", current_value=z)
-    assert decision.action == RevertAction.REFUSE  # user's Z is preserved
+    # Both tools take ownership; only TOOL completes its cycle.
+    records = take_over({}, TOOL, key, p, True, hash_value(z))
+    records = take_over(records, other, key, p, True, hash_value(z))
+    records = revert(records, TOOL, key, current_value=z)[1]
+    assert records[TOOL][key]["active"] is False
+    assert records[other][key]["active"] is True  # untouched by TOOL's revert
+
+    # Retired tool: user re-created the config with the same token → REFUSE.
+    assert _revert(records, TOOL, key, current_value=z).action == RevertAction.REFUSE
+
+    # The other tool's cycle is still in flight → it must still RESTORE.
+    live = _revert(records, other, key, current_value=z)
+    assert live.action == RevertAction.RESTORE
+    assert live.prior_value == p
 
 
 def test_retired_journal_round_trips_through_disk(tmp_path):
