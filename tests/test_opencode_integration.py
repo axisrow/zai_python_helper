@@ -189,6 +189,46 @@ class TestApplyAndRevert:
         # The seed is left exactly as-is — no silent data loss.
         assert _read_doc(paths) == seed
 
+    def test_use_default_does_not_clear_duplicate_state(self, tool, tmp_path):
+        """Pins the documented recovery contract: ``use default`` does NOT
+        resolve a duplicate-state doc — a hand edit is the only exit.
+
+        The CLI's ``use default`` routes through the journal-aware
+        ``plan_revert``, which infers ONE region by first-match and therefore
+        only ever touches that entry. On an unowned duplicate seed every
+        decision is REFUSE, so the doc round-trips byte-identical and a
+        following ``use zai`` still hits the guard. This test exists so the
+        docstring/error-message claim cannot silently drift back to the false
+        'run use default then use zai' recovery."""
+        from zai_python_helper.errors import ConfigurationError
+
+        paths = Paths.from_home(tmp_path)
+        spec = _spec()
+        seed = {
+            "provider": {
+                GLOBAL_NAME: {"options": {"apiKey": "user-global-key"}},
+                CHINA_NAME: {"options": {"apiKey": "user-china-key"}},
+            },
+        }
+        JsonBackend.write(paths.opencode, seed)
+
+        with ProcessLock(paths.lock_file):
+            state = tool.read_state(paths)
+            journal_records = OwnershipJournal(paths.ownership_json).read()
+            decisions, _ = tool.revert_decisions(journal_records, state)
+            plan = tool.plan_revert(state=state, decisions=decisions)
+            apply_plan_locked(paths, plan)
+
+        # `use default` changed nothing — the duplicate state survives.
+        assert _read_doc(paths) == seed
+
+        # ...and `use zai` is therefore still refused: the user is not
+        # unstuck by `use default`, exactly as the error message now states.
+        with ProcessLock(paths.lock_file):
+            state = tool.read_state(paths)
+            with pytest.raises(ConfigurationError):
+                tool.plan_zai(spec, Region.GLOBAL, state=state, auth_token=TOKEN)
+
 
 # ---------------------------------------------------------------------------
 # helper: merge takeover records into the journal (mirrors cli._merge_takeover)

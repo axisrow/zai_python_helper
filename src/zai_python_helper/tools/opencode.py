@@ -28,9 +28,17 @@ from zai_python_helper.tools.base import ManagedField, StatusRow, Tool
 def _our_provider_name(doc: dict[str, Any] | None) -> str | None:
     """Return the coding-plan provider name in ``doc``, or None if absent.
 
-    At most one coding-plan provider exists at a time (``plan_zai`` removes
-    any prior one before adding the current region's), so the first match is
-    authoritative.
+    Normally at most one coding-plan provider exists at a time (``plan_zai``
+    removes any prior one before adding the current region's), so the first
+    match is authoritative.
+
+    That invariant is NOT guaranteed for a hand-edited or migrated config:
+    a duplicate-state doc carries both regional names at once (issue #50).
+    ``plan_zai`` refuses to activate from such a doc, but this helper also
+    feeds ``plan_revert`` (region inference), ``revert_decisions``,
+    ``_ProviderApiKeyField`` and ``status_row`` — and on a duplicate doc all
+    of those silently resolve to whichever name comes first in dict order.
+    Those paths are unguarded; see the known-gap note on ``oc.plan_zai``.
     """
     providers = (doc or {}).get("provider") or {}
     for name in providers:

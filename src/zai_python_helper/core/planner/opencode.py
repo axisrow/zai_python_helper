@@ -254,9 +254,23 @@ def plan_zai(
             mean to keep?) and a region switch would silently clobber one
             entry's distinct credentials because the journal's single
             ``provider.apiKey`` key cannot round-trip two regional names. We
-            refuse the activation rather than guess — the user resolves the
-            duplicate by hand. ``plan_default`` is unaffected: a blind
-            remove-both is non-destructive there.
+            refuse the activation rather than guess.
+
+            Recovery is a MANUAL edit of ``opencode.json`` — remove the
+            regional entry you no longer want. The ``use default`` CLI command
+            does NOT clear this state: it routes through
+            :func:`plan_revert` (journal-aware), which infers a single region
+            via first-match and therefore only ever touches that one entry;
+            when neither entry's value matches the journal ``set_hash`` the
+            apiKey decision is REFUSE and the doc round-trips unchanged. The
+            pure :func:`plan_default` library function does remove both, but
+            it is not what the CLI calls, and on a seed whose entries carry
+            USER credentials a blind remove-both would itself be destructive.
+
+            Known gap (tracked separately): when one of the two entries is
+            provably OURS (journal ``set_hash`` match) the doc is not really
+            ambiguous, yet this unconditional guard still refuses — and
+            ``use default`` REFUSEs too, leaving a hand-edit as the only exit.
     """
     if has_duplicate_regional_providers(opencode_doc):
         from zai_python_helper.errors import ConfigurationError
@@ -265,8 +279,11 @@ def plan_zai(
             "opencode.json carries BOTH regional providers "
             f"({ALL_PROVIDER_NAMES[0]} and {ALL_PROVIDER_NAMES[1]}) at once. "
             "This duplicate state is ambiguous and a region switch would "
-            "silently destroy one entry's credentials. Remove the entry you "
-            "no longer want, then run `use zai` again."
+            "silently destroy one entry's credentials. Edit opencode.json by "
+            f"hand and delete the `provider.{ALL_PROVIDER_NAMES[0]}` or "
+            f"`provider.{ALL_PROVIDER_NAMES[1]}` entry you no longer want, "
+            "then run `use zai` again. Note: `use default` will NOT clear "
+            "this state for you."
         )
     desired = _plan_zai_doc(opencode_doc, region=region, auth_token=auth_token)
     kind = DeltaKind.NOOP if opencode_doc == desired else DeltaKind.WRITE_JSON
