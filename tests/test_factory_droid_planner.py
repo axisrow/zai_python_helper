@@ -491,6 +491,19 @@ class TestFailClosedGuards:
         with pytest.raises(ValidationError, match="model"):
             fd.plan_zai(Region.GLOBAL, factory_doc=seed, auth_token=TOKEN)
 
+    def test_known_value_sets_contain_current_constants(self):
+        """Maintenance invariant for the drift allow-lists: the CURRENT
+        constants must always be members, and the model set must retain
+        history. If a MODEL_ID / MAX_OUTPUT_TOKENS bump drops the outgoing
+        value, every user still on it hits a refusal that wrongly reports
+        their stale helper value as user configuration — so append the
+        outgoing value when bumping either constant."""
+        assert fd.MODEL_ID in fd._KNOWN_MODEL_IDS
+        assert fd.MAX_OUTPUT_TOKENS in fd._KNOWN_MAX_OUTPUT_TOKENS
+        # History is the whole point of the set: a single-element model set
+        # means a past release's value was dropped.
+        assert len(fd._KNOWN_MODEL_IDS) > 1
+
     def test_canonical_name_with_user_custom_model_raises(self):
         """Round-2 regression: a canonical displayName proves the ENTRY is ours,
         not that the current field VALUES are. A user who customizes an existing

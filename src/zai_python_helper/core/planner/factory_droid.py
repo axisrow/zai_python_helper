@@ -253,7 +253,13 @@ def _assert_no_duplicates(models: list[Any], *, path: str) -> None:
             continue
         proto = _protocol_of(m)
         if proto is None:
-            continue  # marker + unknown provider — not ours, leave alone
+            # Marker + unrecognized provider: not one of our two protocols, so
+            # it cannot make a protocol ambiguous and is not counted here. It
+            # is NOT left intact, though — the merge loop in ``_plan_zai_doc``
+            # drops such an entry (it lands in neither ``kept`` nor
+            # ``existing_by_proto``). That drop is pre-existing and out of
+            # scope for these guards; see the PR notes.
+            continue
         seen[proto] = seen.get(proto, 0) + 1
     dups = sorted(p for p, n in seen.items() if n > 1)
     if dups:
@@ -535,10 +541,16 @@ def apply_revert_decisions(
     ]
     # Refuse ambiguous duplicates (F3): ``next(...)`` below resolves the FIRST
     # our-entry per protocol — with >1 present it could remove a foreign GLM
-    # entry inserted before ours instead of the helper's. No field-drift check
-    # here (no ``region`` available); revert only ever sets apiKey (RESTORE) or
-    # removes an entry (CLEAR/REFUSE), never model/baseUrl/limits, so F2 does
-    # not apply on this path.
+    # entry inserted before ours instead of the helper's.
+    #
+    # No field-drift check here: ``region`` is not available on this path, so
+    # the canonical baseUrl cannot be computed. NOTE this leaves an F2-class
+    # gap that is PRE-EXISTING and NOT closed by this PR: ``_remove_our_entry``
+    # strips every field in ``our_entry_fields`` (model/maxOutputTokens/baseUrl
+    # included), so a managed field the user edited in place AFTER activation
+    # is destroyed on revert with only the apiKey journaled. Verified identical
+    # on the pre-PR baseline. Closing it needs either a refusal here or a wider
+    # journal (ADR-004), both out of scope for these guards.
     _assert_no_duplicates(models, path="use default")
 
     for key, decision in decisions.items():
