@@ -103,14 +103,25 @@ def _protocol_of(entry: Any) -> str | None:
     return proto if proto in OUR_PROTOCOLS else None
 
 
+def _canonical_display_name(provider: str) -> str:
+    """The EXACT ``displayName`` the helper writes for ``provider``.
+
+    Used as the provenance discriminator by the drift guard: the helper always
+    writes this exact string, so an entry carrying it is one we wrote, while an
+    entry merely containing the ``_MARKER`` substring may be user-authored.
+    """
+    if provider == PROVIDER_ANTHROPIC:
+        return "Z.ai GLM Coding Plan (Anthropic)"
+    return "Z.ai GLM Coding Plan (OpenAI)"
+
+
 def _entry(provider: str, region: Region, auth_token: str) -> dict[str, Any]:
     """One desired customModels entry for ``use zai`` (pure)."""
     if provider == PROVIDER_ANTHROPIC:
         base_url = anthropic_base_url_for_region(region)
-        display = "Z.ai GLM Coding Plan (Anthropic)"
     else:  # PROVIDER_OPENAI
         base_url = paas_base_url_for_region(region)
-        display = "Z.ai GLM Coding Plan (OpenAI)"
+    display = _canonical_display_name(provider)
     return {
         "displayName": display,
         "provider": provider,
@@ -142,8 +153,11 @@ def _our_entries(region: Region, auth_token: str) -> list[dict[str, Any]]:
 #
 # F2 (field drift): activation deep-merges our managed fields over a pre-
 # existing GLM entry, but only the apiKey is journaled — so model/baseUrl/
-# limits would be lost on revert. Refuse when a pre-existing entry carries a
-# managed field at a value we would overwrite.
+# limits would be lost on revert. Refuse when a USER-authored entry carries a
+# managed field at a value we would overwrite. Provenance is decided by the
+# exact canonical displayName (see _assert_no_managed_field_drift): the marker
+# is a substring match a user's own entry can satisfy, so "looks like ours" is
+# not "is ours".
 #
 # F3 (duplicates): two GLM-marker entries for one protocol make "which is
 # ours" indeterminate — the merge keeps the first (dropping the rest) and
@@ -179,19 +193,6 @@ def _canonical_entry(provider: str, region: Region) -> dict[str, Any]:
         "maxOutputTokens": MAX_OUTPUT_TOKENS,
         "baseUrl": base_url,
     }
-
-
-def _known_base_urls(provider: str) -> set[str]:
-    """Every regional baseUrl the helper recognizes for ``provider``.
-
-    Used by the activation drift check to allow-list ``baseUrl``: a GLOBAL→CHINA
-    (or vice-versa) region switch leaves the OTHER region's URL in place, which
-    is still "us" — only a value outside this set is treated as user
-    customization that activation would irreversibly overwrite.
-    """
-    if provider == PROVIDER_ANTHROPIC:
-        return set(ZAI_ANTHROPIC_BASE_URL_BY_REGION_V2.values())
-    return set(ZAI_PAAS_BASE_URL_BY_REGION.values())
 
 
 def _assert_no_duplicates(models: list[Any], *, path: str) -> None:
@@ -231,20 +232,31 @@ def _assert_no_managed_field_drift(models: list[Any], region: Region) -> None:
     :func:`_assert_no_duplicates`). A managed field (``model`` /
     ``maxOutputTokens`` / ``baseUrl``) present at a value DIFFERENT from the
     canonical helper value trips the guard, because the journal restores only
-    the apiKey — that overwrite cannot round-trip. ``baseUrl`` drift is allowed
-    when the value is any KNOWN regional URL (a cross-region re-activation),
-    and only refused for a genuinely foreign endpoint. ``model`` and
-    ``maxOutputTokens`` are region-independent constants, so any drift is user
-    customization. A field that is simply ABSENT (not set) is not drift —
-    activation just adds it.
+    the apiKey — that overwrite cannot round-trip.
+
+    PROVENANCE is the discriminator. ``_is_our_entry`` matches the ``_MARKER``
+    substring, which a USER-authored entry can also carry ("My GLM Coding Plan
+    china"). The helper, by contrast, always writes the EXACT canonical
+    ``displayName``. So:
+
+    * **Helper-written** (canonical displayName) — rewriting it is us
+      overwriting us, never user data loss. Two relaxations apply, and ONLY
+      here: a ``baseUrl`` at any KNOWN regional URL is a cross-region
+      re-activation, and a stale ``model`` / ``maxOutputTokens`` is a value we
+      wrote under an earlier constant (so bumping ``MODEL_ID`` does not turn
+      routine activation into a refusal for every existing user).
+    * **User-authored** (marker substring, different displayName) — ANY managed
+      field at a non-canonical value is user config that activation would
+      irreversibly clobber, including a known regional URL: the user pointing
+      their own entry at a Z.ai endpoint is still their configuration, and both
+      that URL and their displayName are lost on revert.
+
+    A field that is ABSENT — or explicitly ``None``, which in JSON means unset
+    — is not drift; activation just writes it.
     """
     want = {
         PROVIDER_ANTHROPIC: _canonical_entry(PROVIDER_ANTHROPIC, region),
         PROVIDER_OPENAI: _canonical_entry(PROVIDER_OPENAI, region),
-    }
-    allowed_urls = {
-        PROVIDER_ANTHROPIC: _known_base_urls(PROVIDER_ANTHROPIC),
-        PROVIDER_OPENAI: _known_base_urls(PROVIDER_OPENAI),
     }
     first_by_proto: dict[str, dict[str, Any]] = {}
     for m in models:
@@ -255,16 +267,15 @@ def _assert_no_managed_field_drift(models: list[Any], region: Region) -> None:
             continue  # dups refused above; inspect only the first per protocol
         first_by_proto[proto] = m
         canonical = want[proto]
+        # Helper-written iff the displayName is EXACTLY what _entry writes.
+        helper_written = m.get("displayName") == _canonical_display_name(proto)
+        if helper_written:
+            continue  # ours to rewrite — region switch and stale constants alike
         drifted: list[str] = []
         for fld in _MANAGED_FIELDS:
-            if fld not in m:
-                continue  # absent → activation adds it, not a conflict
-            if fld == "baseUrl":
-                # A known regional URL is a cross-region re-activation, not
-                # user customization — allow it; only a foreign URL conflicts.
-                if m[fld] not in allowed_urls[proto]:
-                    drifted.append(fld)
-            elif m[fld] != canonical[fld]:
+            if m.get(fld) is None:
+                continue  # absent or explicit null → unset; activation adds it
+            if m[fld] != canonical[fld]:
                 drifted.append(fld)
         if drifted:
             raise ValidationError(

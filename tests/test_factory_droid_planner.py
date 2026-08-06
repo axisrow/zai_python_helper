@@ -430,17 +430,79 @@ class TestFailClosedGuards:
         assert anth["model"] == "glm-4.7"  # managed field added
 
     def test_known_china_baseurl_is_not_drift_under_global(self):
-        """A china baseUrl under a GLOBAL activation is a known regional URL
-        (cross-region state), so it must NOT trip the drift guard — only a
-        foreign URL does."""
+        """A china baseUrl under a GLOBAL activation is a known regional URL,
+        but the allow-list applies ONLY to an entry the helper itself wrote
+        (canonical displayName). Our own cross-region post-state must NOT trip
+        the guard — the region rewrite is us overwriting us."""
         seed = {"customModels": [{
-            "displayName": "GLM Coding Plan (Anthropic)", "provider": "anthropic",
+            "displayName": "Z.ai GLM Coding Plan (Anthropic)",  # canonical: ours
+            "provider": "anthropic",
             "model": "glm-4.7", "baseUrl": CHINA_ANTHROPIC, "apiKey": "USER",
         }]}
-        # No raise: CHINA url is in the known-regional allow-list.
+        # No raise: helper-written entry + known regional URL → cross-region.
         plan = fd.plan_zai(Region.GLOBAL, factory_doc=seed, auth_token=TOKEN)
         anth = _entry_for(
             fd.PROVIDER_ANTHROPIC,
             plan.delta_for(FileTag.FACTORY_DROID).content["customModels"],
         )
         assert anth["baseUrl"] == GLOBAL_ANTHROPIC  # rewritten to GLOBAL
+
+    def test_user_written_entry_on_known_regional_url_raises(self):
+        """F1 regression: the known-regional allow-list must NOT cover an entry
+        the USER hand-wrote (non-canonical displayName). Such an entry pointed
+        at a known regional endpoint is user config — activation would rewrite
+        baseUrl and displayName, and only the apiKey is journaled, so the
+        overwrite is irreversible. Must refuse."""
+        seed = {"customModels": [{
+            "displayName": "My GLM Coding Plan china",  # NOT our canonical name
+            "provider": "anthropic",
+            "model": "glm-4.7", "baseUrl": CHINA_ANTHROPIC, "apiKey": "USER_OWN_KEY",
+        }]}
+        with pytest.raises(ValidationError, match="baseUrl"):
+            fd.plan_zai(Region.GLOBAL, factory_doc=seed, auth_token=TOKEN)
+
+    def test_stale_helper_model_is_not_drift(self):
+        """F4 regression: an entry the helper wrote at a PREVIOUS MODEL_ID must
+        not be classified as user config. Otherwise the first bump of the
+        constant turns routine activation into a hard refusal for every
+        existing user."""
+        seed = {"customModels": [{
+            "displayName": "Z.ai GLM Coding Plan (Anthropic)",  # canonical: ours
+            "provider": "anthropic",
+            "model": "glm-4.6",  # a value the helper itself wrote earlier
+            "maxOutputTokens": fd.MAX_OUTPUT_TOKENS,
+            "baseUrl": GLOBAL_ANTHROPIC, "apiKey": "OLD",
+        }]}
+        # No raise: ours to rewrite; activation upgrades the model in place.
+        plan = fd.plan_zai(Region.GLOBAL, factory_doc=seed, auth_token=TOKEN)
+        anth = _entry_for(
+            fd.PROVIDER_ANTHROPIC,
+            plan.delta_for(FileTag.FACTORY_DROID).content["customModels"],
+        )
+        assert anth["model"] == fd.MODEL_ID
+
+    def test_user_written_entry_with_custom_model_still_raises(self):
+        """The F4 relaxation must not reopen F2: a USER-written entry carrying
+        its own model is still user config and must refuse."""
+        seed = {"customModels": [{
+            "displayName": "My GLM Coding Plan", "provider": "anthropic",
+            "model": "user-custom-model", "baseUrl": GLOBAL_ANTHROPIC,
+        }]}
+        with pytest.raises(ValidationError, match="model"):
+            fd.plan_zai(Region.GLOBAL, factory_doc=seed, auth_token=TOKEN)
+
+    def test_explicit_null_managed_field_is_not_drift(self):
+        """F5: an explicitly-null managed field means UNSET, not user config —
+        it takes the same path as an absent key (activation just writes it)."""
+        seed = {"customModels": [{
+            "displayName": "My GLM Coding Plan", "provider": "anthropic",
+            "model": None, "baseUrl": None, "maxOutputTokens": None,
+        }]}
+        # No raise: null == unset, so activation fills the fields in.
+        plan = fd.plan_zai(Region.GLOBAL, factory_doc=seed, auth_token=TOKEN)
+        anth = _entry_for(
+            fd.PROVIDER_ANTHROPIC,
+            plan.delta_for(FileTag.FACTORY_DROID).content["customModels"],
+        )
+        assert anth["model"] == fd.MODEL_ID
+        assert anth["baseUrl"] == GLOBAL_ANTHROPIC
