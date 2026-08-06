@@ -575,16 +575,27 @@ class OwnershipJournal:
             )
         return doc
 
+    @staticmethod
+    def render(records: dict[str, Any]) -> str:
+        """Serialize ``records`` to the exact on-disk journal text.
+
+        ``indent=2`` + insertion-order preservation + trailing newline. Split
+        out from :meth:`write` so a caller can hand the final text to the
+        transaction layer (:func:`~zai_python_helper.patchplan.apply_plan_locked`)
+        and have the journal committed ATOMICALLY with the config files it
+        describes, instead of writing it out-of-band (issue #60). A missing
+        record dict is normalized to ``{}``.
+        """
+        return json.dumps(records or {}, indent=2, ensure_ascii=False) + "\n"
+
     def write(self, records: dict[str, Any]) -> None:
         """Serialize ``records`` to pretty JSON and write atomically at 0600.
 
-        ``indent=2`` + insertion-order preservation + trailing newline. The
-        file is created mode ``0600`` (credentials may be present) via the
+        The file is created mode ``0600`` (credentials may be present) via the
         temp+fsync+``os.replace`` path, so a crash never leaves a partial or
-        world-readable journal. A missing record dict is normalized to ``{}``.
+        world-readable journal. Rendering is :meth:`render`.
         """
-        text = json.dumps(records or {}, indent=2, ensure_ascii=False) + "\n"
-        _atomic_write_secret(self.path, text.encode("utf-8"))
+        _atomic_write_secret(self.path, self.render(records).encode("utf-8"))
 
 
 def _atomic_write_secret(path: Path, data: bytes) -> None:

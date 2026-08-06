@@ -392,6 +392,140 @@ class TestApplyPlanUnderLock:
         assert not paths.claude_settings.exists()
         assert not paths.recovery_json.exists()
 
+    def test_journal_content_commits_with_the_files(self, tmp_path):
+        """``journal_content`` lands on disk together with the plan's files.
+
+        The journal is passed as TEXT (not written by the caller) so the commit
+        layer can fold it into the recovery manifest — issue #60.
+        """
+        paths = _paths(tmp_path)
+        plan = _plan(_write_json_delta(FileTag.SETTINGS, {"env": {"X": "1"}}))
+
+        apply_plan_under_lock(
+            paths, plan, journal_content=lambda: '{"tool": {}}\n'
+        )
+
+        assert paths.ownership_json.read_text() == '{"tool": {}}\n'
+        assert paths.claude_settings.exists()
+        assert not paths.recovery_json.exists()
+
+    def test_journal_is_written_after_the_config_files(self, tmp_path):
+        """The journal commits LAST — the retirement never precedes the RESTORE.
+
+        This is the ordering half of the issue #60 fix: if the journal landed
+        first, a crash between it and the config write would leave
+        ``active=False`` over an unreverted config (permanent REFUSE).
+        """
+        paths = _paths(tmp_path)
+        plan = _plan(_write_json_delta(FileTag.SETTINGS, {"env": {"X": "1"}}))
+
+        order: list[str] = []
+        import zai_python_helper.patchplan as patchplan
+
+        real = patchplan._apply_entry
+
+        def tracing(entry):
+            order.append(entry.tag)
+            real(entry)
+
+        patchplan._apply_entry = tracing
+        try:
+            apply_plan_under_lock(paths, plan, journal_content=lambda: "{}\n")
+        finally:
+            patchplan._apply_entry = real
+
+        assert order == ["settings", "ownership"]
+
+    def test_crash_mid_commit_leaves_journal_in_manifest_not_on_disk(self, tmp_path):
+        """A kill during the file writes must NOT have made the journal durable.
+
+        The manifest survives carrying the journal, so the next recover() rolls
+        both halves forward atomically (issue #60).
+        """
+        paths = _paths(tmp_path)
+        plan = _plan(_write_json_delta(FileTag.SETTINGS, {"env": {"X": "1"}}))
+        import zai_python_helper.patchplan as patchplan
+
+        real = patchplan._apply_entry
+
+        def crashing(_entry):
+            raise RuntimeError("killed")
+
+        patchplan._apply_entry = crashing
+        try:
+            with pytest.raises(RuntimeError):
+                apply_plan_under_lock(
+                    paths, plan, journal_content=lambda: '{"retired": true}\n'
+                )
+        finally:
+            patchplan._apply_entry = real
+
+        # Nothing durable yet — neither the config file nor the journal.
+        assert not paths.claude_settings.exists()
+        assert not paths.ownership_json.exists()
+        # But the manifest carries BOTH, so recovery completes the transaction.
+        assert has_pending_recovery(paths) is True
+        assert recover(paths) == ["settings"]
+        assert paths.ownership_json.read_text() == '{"retired": true}\n'
+        assert json.loads(paths.claude_settings.read_text())["env"]["X"] == "1"
+
+    def test_journal_only_transaction_commits_without_file_deltas(self, tmp_path):
+        """An all-NOOP plan with a journal still commits the journal.
+
+        A REFUSE-only ``use default`` writes no config file but may still need
+        to persist the (byte-identical) journal; the transaction must not
+        short-circuit past it.
+        """
+        paths = _paths(tmp_path)
+        plan = _plan(FileDelta(FileTag.SETTINGS, DeltaKind.NOOP, {}))
+
+        written = apply_plan_under_lock(paths, plan, journal_content=lambda: "{}\n")
+
+        assert written == []
+        assert paths.ownership_json.read_text() == "{}\n"
+        assert not paths.recovery_json.exists()
+
+    def test_journal_content_returning_none_touches_nothing(self, tmp_path):
+        """``journal_content`` may decline (``None``) — no journal file is created."""
+        paths = _paths(tmp_path)
+        plan = _plan(FileDelta(FileTag.SETTINGS, DeltaKind.NOOP, {}))
+
+        assert apply_plan_under_lock(paths, plan, journal_content=lambda: None) == []
+        assert not paths.ownership_json.exists()
+        assert not paths.recovery_json.exists()
+
+    def test_recover_replays_manifest_journal_last(self, tmp_path):
+        """recover() rolls a manifest journal forward, and not as a reported tag."""
+        paths = _paths(tmp_path)
+        paths.recovery_json.parent.mkdir(parents=True, exist_ok=True)
+        paths.recovery_json.write_text(
+            json.dumps(
+                {
+                    "entries": [
+                        {
+                            "tag": "settings",
+                            "path": str(paths.claude_settings),
+                            "kind": "json",
+                            "content": json.dumps({"env": {"A": "1"}}) + "\n",
+                        }
+                    ],
+                    "journal": {
+                        "tag": "ownership",
+                        "path": str(paths.ownership_json),
+                        "kind": "text",
+                        "content": '{"recovered": true}\n',
+                    },
+                }
+            )
+        )
+
+        applied = recover(paths)
+
+        # The journal is bookkeeping, not a managed config file → not reported.
+        assert applied == ["settings"]
+        assert paths.ownership_json.read_text() == '{"recovered": true}\n'
+        assert not paths.recovery_json.exists()
+
     def test_on_locked_runs_even_for_noop_plan(self, tmp_path):
         """An idempotent (NOOP) activation still refreshes the journal under lock.
 

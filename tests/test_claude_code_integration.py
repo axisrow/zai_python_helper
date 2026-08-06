@@ -17,6 +17,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from zai_python_helper.cli import build_parser
 from zai_python_helper.paths import Paths
 
@@ -549,6 +551,125 @@ class TestOwnershipJournalE2E:
         # The NEW activation's token wins (the manifest's settings was the
         # pre-empted run's intent; the new run replaces it).
         assert env["ANTHROPIC_AUTH_TOKEN"] == TOKEN
+
+
+# ---------------------------------------------------------------------------
+# Bug 7 (issue #60): journal retirement is ATOMIC with the revert commit
+# ---------------------------------------------------------------------------
+
+
+class TestRevertJournalAtomicity:
+    """A crash mid-revert must never strand the user's prior (issue #60).
+
+    Before the fix, ``use default`` persisted the retired journal
+    (``active=False``) BEFORE the recovery manifest and before any config
+    write. A kill in that window left ``active=False`` durable while the
+    config still held our value — and after the Bug 6 fix (#54/#55) the
+    inactive record makes every later ``use default`` REFUSE, so the prior
+    became permanently unreachable (data loss).
+
+    The fix folds the journal's final text into the recovery manifest, so the
+    retirement and the RESTORE it describes commit together or not at all.
+    """
+
+    @staticmethod
+    def _crash_on(monkeypatch, tag: str) -> None:
+        """Make the commit of the entry tagged ``tag`` raise (simulated kill)."""
+        from zai_python_helper import patchplan
+
+        real = patchplan._apply_entry
+
+        def crashing(entry):
+            if entry.tag == tag:
+                raise RuntimeError("simulated kill mid-commit")
+            real(entry)
+
+        monkeypatch.setattr(patchplan, "_apply_entry", crashing)
+
+    def test_crash_mid_revert_leaves_journal_active_and_manifest_pending(
+        self, tmp_path, monkeypatch
+    ):
+        """At the crash point: journal NOT yet retired, manifest carries it.
+
+        This is the state assertion the ordering bug got wrong. The retirement
+        must not be durable while the RESTORE is not.
+        """
+        monkeypatch.setenv("HOME", str(tmp_path))
+        prior = "sk-user-P"
+        _seed(tmp_path, settings={"env": {"ANTHROPIC_AUTH_TOKEN": prior}})
+        _run(["use", "zai", "--api-key", TOKEN])
+
+        paths = Paths.from_home(tmp_path)
+        self._crash_on(monkeypatch, "settings")
+        with pytest.raises(RuntimeError):
+            _run(["use", "default", "--region", "global"])
+
+        record = json.loads(paths.ownership_json.read_text())["claude_code"][
+            "ANTHROPIC_AUTH_TOKEN"
+        ]
+        # The on-disk journal still says the cycle is IN FLIGHT.
+        assert record["active"] is True
+        assert record["prior_value"] == prior
+        # And the pending manifest carries the retirement it would have made.
+        manifest = json.loads(paths.recovery_json.read_text())
+        assert "journal" in manifest
+        assert manifest["journal"]["path"] == str(paths.ownership_json)
+
+    def test_crash_mid_revert_recovers_prior_on_next_run(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """THE issue #60 regression: a killed revert must not strand the prior.
+
+        Kill ``use default`` between the (pre-fix) journal retirement and the
+        config write, then run ``use default`` again. The prior MUST come back
+        — not a permanent REFUSE.
+        """
+        monkeypatch.setenv("HOME", str(tmp_path))
+        prior = "sk-user-P"
+        _seed(tmp_path, settings={"env": {"ANTHROPIC_AUTH_TOKEN": prior}})
+        _run(["use", "zai", "--api-key", TOKEN])
+
+        paths = Paths.from_home(tmp_path)
+        self._crash_on(monkeypatch, "settings")
+        with pytest.raises(RuntimeError):
+            _run(["use", "default", "--region", "global"])
+        monkeypatch.undo()
+        monkeypatch.setenv("HOME", str(tmp_path))
+        capsys.readouterr()
+
+        _run(["use", "default", "--region", "global"])
+
+        env = json.loads(paths.claude_settings.read_text()).get("env", {})
+        # The user's ORIGINAL value is back (roll-forward completed the revert).
+        assert env.get("ANTHROPIC_AUTH_TOKEN") == prior
+        assert "ANTHROPIC_BASE_URL" not in env
+        # The cycle is now properly closed and the manifest consumed.
+        assert (
+            json.loads(paths.ownership_json.read_text())["claude_code"][
+                "ANTHROPIC_AUTH_TOKEN"
+            ]["active"]
+            is False
+        )
+        assert not paths.recovery_json.exists()
+
+    def test_clean_revert_still_retires_the_journal(self, tmp_path, monkeypatch):
+        """No regression on the happy path: a completed revert retires the record.
+
+        The Bug 6 fix (#54/#55) depends on the retirement actually landing —
+        moving it into the manifest must not drop it.
+        """
+        monkeypatch.setenv("HOME", str(tmp_path))
+        _seed(tmp_path, settings={"env": {"ANTHROPIC_AUTH_TOKEN": "sk-user-P"}})
+        _run(["use", "zai", "--api-key", TOKEN])
+        _run(["use", "default", "--region", "global"])
+
+        paths = Paths.from_home(tmp_path)
+        record = json.loads(paths.ownership_json.read_text())["claude_code"][
+            "ANTHROPIC_AUTH_TOKEN"
+        ]
+        assert record["active"] is False
+        assert not paths.recovery_json.exists()
+        assert paths.ownership_json.stat().st_mode & 0o777 == 0o600
 
 
 # ---------------------------------------------------------------------------
