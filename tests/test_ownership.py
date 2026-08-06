@@ -13,6 +13,7 @@ Covers the pure operations (:func:`take_over` / :func:`revert` /
 
 from __future__ import annotations
 
+import copy
 import json
 
 import pytest
@@ -442,6 +443,102 @@ def test_active_cycle_removal_re_removal_preserves_prior():
     records = take_over(records, TOOL, "ANTHROPIC_API_KEY", None, False, set_hash=None)
     assert records[TOOL]["ANTHROPIC_API_KEY"]["prior_value"] == p1  # kept
     assert records[TOOL]["ANTHROPIC_API_KEY"]["active"] is True
+
+
+# ---------------------------------------------------------------------------
+# Bug 6 (issue #54): revert must REFUSE on an INACTIVE record — a completed
+# cycle must not be re-RESTORE'd, or a repeat ``use default`` resurrects a
+# stale prior and destroys the user's (re)created config.
+# ---------------------------------------------------------------------------
+
+
+def test_revert_refuses_on_inactive_record_set_value():
+    """Bug 6 (set-value path): a retired record must NOT be re-RESTORE'd.
+
+    Sequence: ``use zai`` sets AUTH_TOKEN=Z (prior=P) → ``use default``
+    RESTORE's P and retires the record (active=False) → the user re-creates
+    their config with the SAME token Z we once wrote → a repeat ``use default``
+    sees current=Z still matching the retired ``set_hash``. Without the
+    active-check the stale prior=P would be RESTORE'd, silently destroying the
+    user's Z (data loss). The fix REFUSEs on the inactive record and leaves
+    everything untouched.
+    """
+    z, p = "sk-zai", "sk-user-P"
+    # ``use zai`` then ``use default``: a completed cycle, record retired.
+    records = take_over({}, TOOL, "ANTHROPIC_AUTH_TOKEN", p, True, hash_value(z))
+    records = revert(records, TOOL, "ANTHROPIC_AUTH_TOKEN", current_value=z)[1]
+    assert records[TOOL]["ANTHROPIC_AUTH_TOKEN"]["active"] is False
+
+    # User re-creates the config with the same Z; a repeat ``use default``
+    # current=Z still matches the retired set_hash, but the cycle is OVER.
+    # Deep-copy the baseline: a shallow ``dict(b)`` shares the inner record
+    # dicts with ``records``, so an in-place mutation by ``revert`` would
+    # mutate the baseline too and the equality assertion below would pass
+    # vacuously. The point is to prove ``revert`` is pure.
+    before = copy.deepcopy(records)
+    decision, retired = revert(records, TOOL, "ANTHROPIC_AUTH_TOKEN", current_value=z)
+    assert decision.action == RevertAction.REFUSE
+    assert "already completed" in decision.reason
+    # No stale RESTORE: the user's Z is not destroyed (prior_value carries the
+    # stale prior only for diagnostics, the action is REFUSE — caller must NOT
+    # write it).
+    assert retired == before  # journal byte-identical (no retirement flip)
+    assert retired[TOOL]["ANTHROPIC_AUTH_TOKEN"]["active"] is False
+
+
+def test_revert_refuses_on_inactive_record_removal_path():
+    """Bug 6 (removal path): a retired removal record must NOT resurrect.
+
+    Sequence: ``use zai`` removes API_KEY (prior=P1) → ``use default`` RESTORE's
+    P1 and retires (active=False) → the user DELETES the restored P1 → a repeat
+    ``use default`` sees current=None (key absent), which still looks like "our
+    removal is live". Without the active-check the stale prior=P1 would be
+    RESTORE'd, RESURRECTING the credential the user deleted. The fix REFUSEs.
+    """
+    p1 = "sk-user-P1"
+    records = take_over({}, TOOL, "ANTHROPIC_API_KEY", p1, True, set_hash=None)
+    records = revert(records, TOOL, "ANTHROPIC_API_KEY", current_value=None)[1]
+    assert records[TOOL]["ANTHROPIC_API_KEY"]["active"] is False
+
+    # User deletes the restored P1; repeat ``use default`` (current=None).
+    # Deep-copy so the purity assertion below is not vacuous (see the
+    # set-value test for why a shallow copy cannot detect in-place mutation).
+    before = copy.deepcopy(records)
+    decision, retired = revert(records, TOOL, "ANTHROPIC_API_KEY", current_value=None)
+    assert decision.action == RevertAction.REFUSE  # NOT a stale RESTORE of P1
+    assert retired == before  # no resurrection, no journal change
+
+
+def test_full_resurrection_scenario_is_per_tool_isolated():
+    """The headline Bug 6 scenario across TWO tools sharing one journal.
+
+    ``use zai`` → ``use default`` (retire) → user re-creates the SAME token →
+    repeat ``use default`` MUST be a no-op (REFUSE), never a stale RESTORE.
+
+    The single-tool set-value case is already covered above; what this adds is
+    that the completed-cycle gate is scoped PER TOOL. Two tools live in one
+    journal dict, so a retired record under one tool must neither gate nor be
+    gated by the other: the retired tool REFUSEs while the still-active tool
+    RESTOREs normally in the same journal.
+    """
+    z, p = "sk-zai-token", "sk-user-original"
+    other = "opencode"
+    key = "ANTHROPIC_AUTH_TOKEN"
+
+    # Both tools take ownership; only TOOL completes its cycle.
+    records = take_over({}, TOOL, key, p, True, hash_value(z))
+    records = take_over(records, other, key, p, True, hash_value(z))
+    records = revert(records, TOOL, key, current_value=z)[1]
+    assert records[TOOL][key]["active"] is False
+    assert records[other][key]["active"] is True  # untouched by TOOL's revert
+
+    # Retired tool: user re-created the config with the same token → REFUSE.
+    assert _revert(records, TOOL, key, current_value=z).action == RevertAction.REFUSE
+
+    # The other tool's cycle is still in flight → it must still RESTORE.
+    live = _revert(records, other, key, current_value=z)
+    assert live.action == RevertAction.RESTORE
+    assert live.prior_value == p
 
 
 def test_retired_journal_round_trips_through_disk(tmp_path):

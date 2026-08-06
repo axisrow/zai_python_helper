@@ -452,6 +452,17 @@ still attributable to us. The cases:
    attribute to ourselves. (This is the fix for the S3 blind-deletion
    regression: `use default` with no prior `use zai` must not wipe a
    key the user configured by hand.)
+4. **Entry exists but is INACTIVE (`active=False`)** → `REFUSE`. A
+   prior `revert` already restored the prior and retired this record —
+   the ownership cycle is OVER. The value live now belongs to whoever
+   (re)created it after our cycle ended, so a repeat `use default` must
+   NOT act again: re-matching the retired `set_hash` (e.g. the user
+   re-set the SAME token we once wrote) would otherwise RESTORE the STALE
+   prior and destroy their config, and the removal path would RESURRECT a
+   credential the user deleted after the first revert. The `active` flag
+   gates BOTH halves of the cycle (symmetric to the `take_over` check,
+   issue #48). This is the Bug 6 fix (issue #54): the journal is left
+   untouched (there is no in-flight ownership to retire).
 
 A `None` `set_hash` records ownership-by-removal (we deleted the key
 on activation, e.g. `ANTHROPIC_API_KEY`). The "value we set" is the
@@ -466,7 +477,9 @@ record starts a fresh restore point instead of preserving the stale
 prior, which is what prevents resurrecting a credential the user deleted
 after the revert. `REFUSE` and no-entry cases leave the journal
 untouched (REFUSE means we did NOT act, so the cycle is still in flight;
-no-entry means there was never a cycle to retire).
+no-entry means there was never a cycle to retire). The INACTIVE-record
+`REFUSE` (case 4) also leaves the journal untouched — the cycle was
+already completed by an earlier revert, so there is nothing to retire.
 
 ---
 
