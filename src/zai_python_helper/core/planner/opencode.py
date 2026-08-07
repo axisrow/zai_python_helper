@@ -128,21 +128,95 @@ def has_duplicate_regional_providers(doc: dict[str, Any] | None) -> bool:
     (``_plan_zai_doc`` removes any prior regional provider before adding the
     current one, leaving at most one).
 
-    It is genuinely ambiguous here WHICH entry the user means to keep, and a
-    region switch would silently clobber one entry's distinct
-    credentials/options (Bug 4 edge) because the ownership journal keys the
-    apiKey under a single fixed logical name (``provider.apiKey``) and so
-    cannot tell the two regional names apart through a revert. Rather than
-    guess (and lose data), :func:`plan_zai` refuses the activation — the
-    non-destructive, fail-closed choice (ADR-004: do not clobber state we
-    cannot safely switch). The guard is symmetric: it fires regardless of
-    content equivalence or insertion order, because two coexisting managed
-    names is itself the condition we cannot round-trip.
+    Detection alone does NOT decide the activation. The doc is only *ambiguous*
+    when neither entry can be attributed to us; when the journal proves one is
+    ours (:func:`owned_regional_provider_name`), the other is the user's and
+    there is nothing to guess. :func:`plan_zai` refuses only the ambiguous
+    case; see its docstring for the full contract.
+
+    The predicate is symmetric: it fires regardless of content equivalence or
+    insertion order, because the condition is purely "two coexisting managed
+    names".
     """
     if not doc:
         return False
     providers = doc.get("provider") or {}
     return all(name in providers for name in ALL_PROVIDER_NAMES)
+
+
+def _regional_provider_names_in(doc: dict[str, Any] | None) -> list[str]:
+    """Every managed regional provider name present in ``doc``, in doc order."""
+    providers = (doc or {}).get("provider") or {}
+    return [name for name in providers if _is_our_provider(name)]
+
+
+def _apikey_of(doc: dict[str, Any] | None, name: str) -> str | None:
+    """The ``options.apiKey`` of provider ``name`` in ``doc`` (None if absent).
+
+    Coerces non-string values via ``str()`` to match :func:`hash_value`'s
+    documented coercion contract — a bare JSON number (``12345``) in a
+    hand-edited config must hash-compare identically here and at activation
+    time.
+    """
+    entry = ((doc or {}).get("provider") or {}).get(name) or {}
+    options = entry.get("options") or {}
+    value = options.get("apiKey")
+    if value is None:
+        return None
+    return str(value)
+
+
+def owned_regional_provider_name(
+    doc: dict[str, Any] | None,
+    journal_records: dict[str, Any] | None,
+    *,
+    tool_name: str = "opencode",
+) -> str | None:
+    """The regional provider entry the journal PROVES is ours, or ``None``.
+
+    The discriminator is the ownership journal's ``set_hash`` for the logical
+    key ``provider.apiKey``: an entry is provably ours iff its current
+    ``options.apiKey`` still hashes to exactly the value we wrote at
+    activation, on an ACTIVE record (a retired record's cycle is over — see
+    :func:`zai_python_helper.ownership.revert` case 4 — so it proves nothing
+    about the value live now).
+
+    This is the *value* half of provenance, and it is the only half available
+    here: the journal keys the apiKey under one fixed logical name, so the
+    record cannot say WHICH regional name carried it. Matching the value is
+    what makes the attribution sound anyway — a name alone would be satisfied
+    by a user-authored entry under the same name.
+
+    Returns ``None`` when there is no active record, when no entry's value
+    matches (ours was rotated / both entries are user-authored), or — the
+    fail-closed case — when BOTH entries hash to our recorded value, since the
+    record cannot then single one out.
+
+    PURE: reads the passed-in journal dict; never touches disk.
+    """
+    if not journal_records:
+        return None
+    from zai_python_helper.ownership import OwnershipRecord, hash_value
+
+    raw = (journal_records.get(tool_name) or {}).get(JOURNAL_KEY_APIKEY)
+    if not isinstance(raw, dict):
+        return None
+    record = OwnershipRecord.from_dict(raw)
+    # Ownership-by-removal (set_hash None) records an ABSENT value — it can
+    # never attribute a present entry. A retired record proves nothing about
+    # the value live now.
+    if record.set_hash is None or not record.active:
+        return None
+
+    matches = [
+        name
+        for name in _regional_provider_names_in(doc)
+        if (value := _apikey_of(doc, name)) is not None
+        and hash_value(value) == record.set_hash
+    ]
+    # Exactly one match attributes the entry. Zero → unattributable. Two → the
+    # single logical record cannot say which is ours; fail closed.
+    return matches[0] if len(matches) == 1 else None
 
 
 # ---------------------------------------------------------------------------
@@ -155,6 +229,7 @@ def _plan_zai_doc(
     *,
     region: Region,
     auth_token: str,
+    seed_from: str | None = None,
 ) -> dict[str, Any]:
     """Return the desired ``opencode.json`` document after ``use zai``.
 
@@ -163,6 +238,13 @@ def _plan_zai_doc(
     coding-plan provider (so a global↔china switch leaves no stale entry);
     preserve ``$schema`` and every foreign provider / top-level key. Does NOT
     mutate the input.
+
+    ``seed_from`` names the prior regional entry whose foreign keys the new
+    entry inherits. The caller passes the entry the journal PROVES is ours
+    when a duplicate-state doc is being self-healed (issue #61) — inheriting
+    the USER's entry there would silently graft their options onto our entry.
+    ``None`` keeps the single-entry default: seed from the first (and, outside
+    duplicate state, only) regional entry.
     """
     new_doc: dict[str, Any] = dict(doc) if doc else {}
 
@@ -179,12 +261,11 @@ def _plan_zai_doc(
     # — at most one exists in normal flow, but a prior cross-region switch can
     # leave both; popping only the first (the old ``break``) left a stale
     # helper credential behind, surviving ``use default``.
-    entry: dict[str, Any] = {}
-    for prior in [n for n in list(providers) if _is_our_provider(n)]:
-        if not entry:
-            entry = dict(providers.pop(prior) or {})
-        else:
-            providers.pop(prior, None)
+    priors = [n for n in list(providers) if _is_our_provider(n)]
+    seed_name = seed_from if seed_from in priors else (priors[0] if priors else None)
+    entry: dict[str, Any] = dict(providers.get(seed_name) or {}) if seed_name else {}
+    for prior in priors:
+        providers.pop(prior, None)
     options = dict(entry.get("options") or {})
     options["apiKey"] = auth_token
     entry["options"] = options
@@ -234,6 +315,7 @@ def plan_zai(
     *,
     opencode_doc: dict[str, Any] | None = None,
     auth_token: str,
+    journal_records: dict[str, Any] | None = None,
 ) -> PatchPlan:
     """Plan the ``use zai`` activation for OpenCode (PURE).
 
@@ -242,62 +324,80 @@ def plan_zai(
         opencode_doc: Parsed ``opencode.json`` (or ``None`` if absent).
         auth_token: The Z.ai auth token for the provider ``options.apiKey``.
             Resolved by the caller — never read from env here.
+        journal_records: The ownership-journal dict, passed in by the caller
+            (the CLI reads it under the lock). It is what makes the
+            duplicate-state guard below OWNERSHIP-AWARE. ``None`` (the default
+            for pure-library callers) means no provenance is available, so a
+            duplicate-state doc can only be treated as ambiguous.
 
     Returns:
         A :class:`PatchPlan` with one delta for the OpenCode config file.
         Idempotent: a second ``use zai`` on the post-state is a NOOP.
 
     Raises:
-        ConfigurationError: If ``opencode_doc`` is a duplicate-state seed —
-            i.e. BOTH regional provider names are present at once (issue #50,
-            Bug 4 edge). Such a doc is ambiguous (which entry does the user
-            mean to keep?) and a region switch would silently clobber one
-            entry's distinct credentials because the journal's single
-            ``provider.apiKey`` key cannot round-trip two regional names. We
-            refuse the activation rather than guess.
+        ValidationError: If ``opencode_doc`` is an AMBIGUOUS duplicate-state
+            seed — BOTH regional provider names present at once (issue #50,
+            Bug 4 edge) and NEITHER attributable to us.
 
-            Recovery depends on whether one entry is still provably OURS.
-            ``use default`` routes through :func:`plan_revert` (journal-aware),
-            which infers a single region by first-match and only ever touches
-            that one entry; what it does there is decided by the journal:
+            .. note::
 
-            - **Value matches the journal ``set_hash``** (the entry still holds
-              exactly what we wrote): the apiKey decision is RESTORE, our entry
-              is restored away, the other entry is left untouched — the
-              duplicate is CLEARED and a following ``use zai`` succeeds. This
-              is the ordinary case after a helper activation plus a hand-added
-              second provider, and ``use default`` is the supported fix.
+                Prior to issue #61 this guard raised ``ConfigurationError``.
+                The exception type was changed to ``ValidationError`` to align
+                with the sibling factory_droid entry-identity guard.  This is a
+                **backward-incompatible change** for library callers that catch
+                ``ConfigurationError`` specifically — such handlers will no
+                longer intercept this path (both types are subclasses of
+                ``ZaiPythonHelperError``, so a broad handler is unaffected).
+
+            The two regional names cannot be told apart through a revert (the
+            journal keys the apiKey under a single fixed logical name,
+            ``provider.apiKey``), so activating over such a doc would silently
+            clobber one entry's distinct credentials/options. We refuse rather
+            than guess — the non-destructive, fail-closed choice (ADR-004).
+
+            The refusal is NOT unconditional (issue #61). When
+            :func:`owned_regional_provider_name` proves one entry is ours — its
+            ``options.apiKey`` still hashes to the ACTIVE journal record's
+            ``set_hash`` — the doc is not ambiguous: that entry is ours to
+            drop, the other is the user's. The activation then proceeds and
+            self-heals the duplicate in one shot (both regional entries are
+            replaced by the target region's single entry, seeded from ours).
+
+            Recovery from the ambiguous case, by the journal's own rules:
+
+            - **Value matches the journal ``set_hash``** — not reachable here
+              any more: that case now activates directly instead of refusing.
+              ``use default`` also still clears it (RESTORE removes our entry,
+              the user's survives).
             - **No entry's value matches** (both user-authored, or ours was
               rotated/edited so ownership can no longer be proved): every
-              decision is REFUSE, the doc round-trips byte-identical, and a
-              MANUAL edit of ``opencode.json`` — deleting the regional entry
-              you no longer want — is the only exit.
+              revert decision is REFUSE, the doc round-trips byte-identical,
+              and a MANUAL edit of ``opencode.json`` — deleting the regional
+              entry you no longer want — is the only exit.
 
             The pure :func:`plan_default` library function removes both
             unconditionally, but it is not what the CLI calls, and on a seed
             whose entries carry USER credentials a blind remove-both would
             itself be destructive.
-
-            Known gap (tracked separately): in the second case above the guard
-            refuses even when the doc could in principle be disambiguated,
-            leaving the hand edit as the only route.
     """
-    if has_duplicate_regional_providers(opencode_doc):
-        from zai_python_helper.errors import ConfigurationError
+    owned = owned_regional_provider_name(opencode_doc, journal_records)
+    if has_duplicate_regional_providers(opencode_doc) and owned is None:
+        from zai_python_helper.errors import ValidationError
 
-        raise ConfigurationError(
+        raise ValidationError(
             "opencode.json carries BOTH regional providers "
-            f"({ALL_PROVIDER_NAMES[0]} and {ALL_PROVIDER_NAMES[1]}) at once. "
-            "This duplicate state is ambiguous and a region switch would "
-            "silently destroy one entry's credentials. Try `use default` "
-            "first: if one of the two entries is still the one this tool "
-            "wrote, that removes it and leaves your own entry intact — then "
-            "`use zai` again. If `use default` reports it cannot revert "
-            "(neither entry is ours to remove), edit opencode.json by hand "
-            f"and delete the `provider.{ALL_PROVIDER_NAMES[0]}` or "
-            f"`provider.{ALL_PROVIDER_NAMES[1]}` entry you no longer want."
+            f"({ALL_PROVIDER_NAMES[0]} and {ALL_PROVIDER_NAMES[1]}) at once, "
+            "and neither entry can be attributed to this tool. This duplicate "
+            "state is ambiguous and a region switch would silently destroy "
+            "one entry's credentials. Edit opencode.json by hand and delete "
+            f"the `provider.{ALL_PROVIDER_NAMES[0]}` or "
+            f"`provider.{ALL_PROVIDER_NAMES[1]}` entry you no longer want; "
+            "`use default` will not do it for you (it refuses to touch "
+            "entries it cannot prove it owns)."
         )
-    desired = _plan_zai_doc(opencode_doc, region=region, auth_token=auth_token)
+    desired = _plan_zai_doc(
+        opencode_doc, region=region, auth_token=auth_token, seed_from=owned
+    )
     kind = DeltaKind.NOOP if opencode_doc == desired else DeltaKind.WRITE_JSON
     return PatchPlan(deltas=(FileDelta(FileTag.OPENCODE, kind, desired),))
 

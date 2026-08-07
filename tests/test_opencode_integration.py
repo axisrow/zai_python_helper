@@ -158,9 +158,12 @@ class TestApplyAndRevert:
         ``use zai``. A region switch would silently destroy one entry because
         the ownership journal keys the apiKey under a single fixed logical name
         and cannot round-trip two regional names. ``plan_zai`` refuses the
-        activation (ConfigurationError) instead of guessing; the on-disk doc is
-        left untouched (non-destructive). Both insertion orders refused."""
-        from zai_python_helper.errors import ConfigurationError
+        activation (ValidationError) instead of guessing; the on-disk doc is
+        left untouched (non-destructive). Both insertion orders refused.
+
+        Here the journal is empty, so NEITHER entry is attributable — the
+        ambiguous case the guard is for (issue #61)."""
+        from zai_python_helper.errors import ValidationError
 
         paths = Paths.from_home(tmp_path)
         spec = _spec()
@@ -184,8 +187,15 @@ class TestApplyAndRevert:
         for region in (Region.GLOBAL, Region.CHINA):
             with ProcessLock(paths.lock_file):
                 state = tool.read_state(paths)
-                with pytest.raises(ConfigurationError):
-                    tool.plan_zai(spec, region, state=state, auth_token=TOKEN)
+                journal_records = OwnershipJournal(paths.ownership_json).read()
+                with pytest.raises(ValidationError):
+                    tool.plan_zai(
+                        spec,
+                        region,
+                        state=state,
+                        auth_token=TOKEN,
+                        journal_records=journal_records,
+                    )
 
         # The seed is left exactly as-is — no silent data loss.
         assert _read_doc(paths) == seed
@@ -196,7 +206,9 @@ class TestApplyAndRevert:
             state = tool.read_state(paths)
             journal_records = OwnershipJournal(paths.ownership_json).read()
             decisions, _ = tool.revert_decisions(journal_records, state)
-            plan = tool.plan_revert(state=state, decisions=decisions)
+            plan = tool.plan_revert(
+                state=state, decisions=decisions, journal_records=journal_records
+            )
             apply_plan_locked(paths, plan)
             return decisions
 
@@ -249,7 +261,7 @@ class TestApplyAndRevert:
 
         This is the seed the guard exists for; pinning both branches keeps the
         docstring/error message from generalizing either one to the other."""
-        from zai_python_helper.errors import ConfigurationError
+        from zai_python_helper.errors import ValidationError
 
         paths = Paths.from_home(tmp_path)
         spec = _spec()
@@ -269,8 +281,174 @@ class TestApplyAndRevert:
         # ...and `use zai` is therefore still refused.
         with ProcessLock(paths.lock_file):
             state = tool.read_state(paths)
-            with pytest.raises(ConfigurationError):
-                tool.plan_zai(spec, Region.GLOBAL, state=state, auth_token=TOKEN)
+            journal_records = OwnershipJournal(paths.ownership_json).read()
+            with pytest.raises(ValidationError):
+                tool.plan_zai(
+                    spec,
+                    Region.GLOBAL,
+                    state=state,
+                    auth_token=TOKEN,
+                    journal_records=journal_records,
+                )
+
+    def test_duplicate_state_self_heals_when_our_entry_is_attributable(
+        self, tool, tmp_path
+    ):
+        """Issue #61, the behavior fix: a duplicate-state doc where the journal
+        PROVES one entry is ours is NOT ambiguous, so ``use zai`` proceeds and
+        self-heals it in ONE shot (this is what #41 shipped and #57's
+        unconditional guard removed).
+
+        Sequence mirrors the reproducer in the issue: clean GLOBAL activation
+        (journal owns provider.apiKey = hash of our token), then the user
+        hand-adds a china provider. Activating again must drop OUR entry, keep
+        going, and leave a single regional provider — no dead-end."""
+        paths = Paths.from_home(tmp_path)
+        spec = _spec()
+        journal = OwnershipJournal(paths.ownership_json)
+
+        # 1) Clean activation — the journal now attributes our entry by value.
+        with ProcessLock(paths.lock_file):
+            state = tool.read_state(paths)
+            plan = tool.plan_zai(spec, Region.GLOBAL, state=state, auth_token=TOKEN)
+            records = tool.extract_takeover(plan, prior_state=state, spec=spec)
+            apply_plan_locked(paths, plan)
+        journal.write(_merge(tool, journal.read(), records))
+
+        # 2) User hand-adds a china provider with their OWN credential.
+        doc = _read_doc(paths)
+        doc["provider"][CHINA_NAME] = {"options": {"apiKey": "user-china-key"}}
+        JsonBackend.write(paths.opencode, doc)
+        assert oc.has_duplicate_regional_providers(_read_doc(paths))
+
+        # 3) `use zai` again — no refusal, and the duplicate is healed.
+        with ProcessLock(paths.lock_file):
+            state = tool.read_state(paths)
+            journal_records = journal.read()
+            plan = tool.plan_zai(
+                spec,
+                Region.GLOBAL,
+                state=state,
+                auth_token=TOKEN,
+                journal_records=journal_records,
+            )
+            records = tool.extract_takeover(
+                plan, prior_state=state, spec=spec, journal_records=journal_records
+            )
+            apply_plan_locked(paths, plan)
+        journal.write(_merge(tool, journal.read(), records))
+
+        after = _read_doc(paths)
+        assert not oc.has_duplicate_regional_providers(after)
+        assert list(after["provider"].keys()) == [GLOBAL_NAME]
+        assert after["provider"][GLOBAL_NAME]["options"]["apiKey"] == TOKEN
+
+        # Verify the unattributed-entry detection logic used by the CLI warning.
+        # On this exact prior state, the warning must name CHINA_NAME as the
+        # entry that was removed (it is the one the journal does NOT own).
+        owned = oc.owned_regional_provider_name(doc, journal_records)
+        unattributed = [n for n in doc.get("provider", {}) if n != owned]
+        assert owned == GLOBAL_NAME
+        assert unattributed == [CHINA_NAME]
+
+    def test_self_heal_takeover_prior_is_our_value_not_the_users(
+        self, tool, tmp_path
+    ):
+        """The ownership capture on a self-heal must read the PRIOR apiKey off
+        OUR entry, not off whichever came first in dict order. If it recorded
+        the user's key as the prior, a later ``use default`` would RESTORE the
+        user's credential into our provider slot — writing their secret to a
+        place they never put it."""
+        from zai_python_helper.ownership import hash_value
+
+        paths = Paths.from_home(tmp_path)
+        spec = _spec()
+        journal = OwnershipJournal(paths.ownership_json)
+
+        with ProcessLock(paths.lock_file):
+            state = tool.read_state(paths)
+            plan = tool.plan_zai(spec, Region.GLOBAL, state=state, auth_token=TOKEN)
+            records = tool.extract_takeover(plan, prior_state=state, spec=spec)
+            apply_plan_locked(paths, plan)
+        journal.write(_merge(tool, journal.read(), records))
+
+        # The user's china entry is inserted FIRST in dict order, so a
+        # first-match resolution would read THEIR key as our prior.
+        doc = _read_doc(paths)
+        JsonBackend.write(
+            paths.opencode,
+            {
+                "provider": {
+                    CHINA_NAME: {"options": {"apiKey": "user-china-key"}},
+                    GLOBAL_NAME: doc["provider"][GLOBAL_NAME],
+                },
+                "model": doc["model"],
+                "small_model": doc["small_model"],
+            },
+        )
+
+        with ProcessLock(paths.lock_file):
+            state = tool.read_state(paths)
+            journal_records = journal.read()
+            plan = tool.plan_zai(
+                spec,
+                Region.GLOBAL,
+                state=state,
+                auth_token="sk-rotated-token",
+                journal_records=journal_records,
+            )
+            records = tool.extract_takeover(
+                plan, prior_state=state, spec=spec, journal_records=journal_records
+            )
+
+        prior_by_key = {key: prior for key, prior, _present, _h in records}
+        # The captured prior is OUR previous token, never the user's key.
+        assert prior_by_key["provider.apiKey"] == TOKEN
+        assert prior_by_key["provider.apiKey"] != "user-china-key"
+        # And the recorded set_hash is the new value we wrote.
+        set_hash_by_key = {key: h for key, _p, _pp, h in records}
+        assert set_hash_by_key["provider.apiKey"] == hash_value("sk-rotated-token")
+
+    def test_revert_acts_on_our_entry_on_a_duplicate_doc(self, tool, tmp_path):
+        """``use default`` on a duplicate doc must revert OUR entry, even when
+        the user's regional entry comes first in dict order (issue #61:
+        ``plan_revert`` inferred the region by first-match). The user's entry
+        must survive byte-identical."""
+        paths = Paths.from_home(tmp_path)
+        spec = _spec()
+        journal = OwnershipJournal(paths.ownership_json)
+
+        # Activate CHINA so our entry is the china name...
+        with ProcessLock(paths.lock_file):
+            state = tool.read_state(paths)
+            plan = tool.plan_zai(spec, Region.CHINA, state=state, auth_token=TOKEN)
+            records = tool.extract_takeover(plan, prior_state=state, spec=spec)
+            apply_plan_locked(paths, plan)
+        journal.write(_merge(tool, journal.read(), records))
+
+        # ...then hand-add a GLOBAL entry FIRST in dict order, so first-match
+        # resolution would infer GLOBAL and revert the wrong entry.
+        doc = _read_doc(paths)
+        JsonBackend.write(
+            paths.opencode,
+            {
+                "provider": {
+                    GLOBAL_NAME: {"options": {"apiKey": "user-global-key"}},
+                    CHINA_NAME: doc["provider"][CHINA_NAME],
+                },
+                "model": doc["model"],
+                "small_model": doc["small_model"],
+            },
+        )
+
+        decisions = self._use_default(tool, paths)
+        assert decisions["provider.apiKey"].action.name == "RESTORE"
+
+        after = _read_doc(paths)
+        # OUR china entry is gone; the user's global entry is untouched.
+        assert CHINA_NAME not in after.get("provider", {})
+        assert after["provider"][GLOBAL_NAME] == {"options": {"apiKey": "user-global-key"}}
+        assert not oc.has_duplicate_regional_providers(after)
 
 
 # ---------------------------------------------------------------------------
@@ -285,3 +463,106 @@ def _merge(tool, current, records):
     for key, prior_value, prior_present, set_hash in records:
         merged = take_over(merged, tool.name, key, prior_value, prior_present, set_hash)
     return merged
+
+
+class TestStatusRowOnDuplicateState:
+    """``status_row`` reads the journal so it reports OUR entry and surfaces
+    the duplicate state itself (issue #61). Previously it resolved the provider
+    by dict order and rendered a normal-looking row, so a user in a dead-end
+    state learned about it only when ``use zai`` errored."""
+
+    @staticmethod
+    def _seed(paths, *, first: str, second: str, keys: dict):
+        JsonBackend.write(
+            paths.opencode,
+            {
+                "provider": {
+                    first: {"options": {"apiKey": keys[first]}},
+                    second: {"options": {"apiKey": keys[second]}},
+                },
+                "model": f"{first}/glm-4.6",
+            },
+        )
+
+    def test_reports_our_provider_not_the_first_in_dict_order(self, tool, tmp_path):
+        from zai_python_helper.ownership import hash_value
+
+        paths = Paths.from_home(tmp_path)
+        # The USER's global entry comes first; OURS is the china one.
+        self._seed(
+            paths,
+            first=GLOBAL_NAME,
+            second=CHINA_NAME,
+            keys={GLOBAL_NAME: "user-global-key", CHINA_NAME: "helper-wrote-this"},
+        )
+        OwnershipJournal(paths.ownership_json).write(
+            {
+                "opencode": {
+                    "provider.apiKey": {
+                        "prior_value": None,
+                        "prior_present": False,
+                        "set_hash": hash_value("helper-wrote-this"),
+                        "active": True,
+                    }
+                }
+            }
+        )
+
+        row = tool.status_row(paths)
+        assert f"provider={CHINA_NAME}" in row.detail
+        assert row.region is Region.CHINA
+
+    def test_detail_flags_the_duplicate_state(self, tool, tmp_path):
+        paths = Paths.from_home(tmp_path)
+        self._seed(
+            paths,
+            first=GLOBAL_NAME,
+            second=CHINA_NAME,
+            keys={GLOBAL_NAME: "user-global-key", CHINA_NAME: "user-china-key"},
+        )
+
+        row = tool.status_row(paths)
+        assert "DUPLICATE-REGIONAL-PROVIDERS" in row.detail
+        # Unattributable → the row says a hand edit is required.
+        assert "hand edit required" in row.detail
+
+    def test_detail_omits_hand_edit_when_ours_is_attributable(self, tool, tmp_path):
+        from zai_python_helper.ownership import hash_value
+
+        paths = Paths.from_home(tmp_path)
+        self._seed(
+            paths,
+            first=GLOBAL_NAME,
+            second=CHINA_NAME,
+            keys={GLOBAL_NAME: "helper-wrote-this", CHINA_NAME: "user-china-key"},
+        )
+        OwnershipJournal(paths.ownership_json).write(
+            {
+                "opencode": {
+                    "provider.apiKey": {
+                        "prior_value": None,
+                        "prior_present": False,
+                        "set_hash": hash_value("helper-wrote-this"),
+                        "active": True,
+                    }
+                }
+            }
+        )
+
+        row = tool.status_row(paths)
+        assert "DUPLICATE-REGIONAL-PROVIDERS" in row.detail
+        # `use zai` self-heals this one — no hand edit to advertise.
+        assert "hand edit required" not in row.detail
+
+    def test_no_duplicate_marker_on_a_clean_doc(self, tool, tmp_path):
+        paths = Paths.from_home(tmp_path)
+        JsonBackend.write(
+            paths.opencode,
+            {
+                "provider": {GLOBAL_NAME: {"options": {"apiKey": "k"}}},
+                "model": f"{GLOBAL_NAME}/glm-4.6",
+            },
+        )
+        row = tool.status_row(paths)
+        assert "DUPLICATE" not in row.detail
+        assert row.zai_active is True

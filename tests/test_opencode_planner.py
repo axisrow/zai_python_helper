@@ -95,14 +95,16 @@ class TestPlanZai:
 
     def test_refuses_duplicate_regional_state_global(self):
         """Issue #50 / Bug 4 edge: a duplicate-state seed (BOTH regional
-        provider names present at once with distinct credentials) is
-        ambiguous, and a region switch would silently destroy one entry's
-        identity (the journal keys the apiKey under a single fixed logical
-        name and cannot round-trip two regional names through revert). So
-        ``plan_zai`` REFUSES the activation (fail-closed) rather than guess
-        and lose data. The user resolves the duplicate by hand. Both
-        insertion orders must trip the guard (issue #50 acceptance)."""
-        from zai_python_helper.errors import ConfigurationError
+        provider names present at once with distinct credentials) whose
+        entries are NEITHER attributable to us is ambiguous, and a region
+        switch would silently destroy one entry's identity (the journal keys
+        the apiKey under a single fixed logical name and cannot round-trip two
+        regional names through revert). So ``plan_zai`` REFUSES the activation
+        (fail-closed) rather than guess and lose data. The user resolves the
+        duplicate by hand. Both insertion orders must trip the guard (issue
+        #50 acceptance). Error type is ``ValidationError``, matching the
+        sibling factory_droid entry-identity guard (issue #61)."""
+        from zai_python_helper.errors import ValidationError
 
         seed = {
             "provider": {
@@ -111,7 +113,7 @@ class TestPlanZai:
             },
         }
         assert oc.has_duplicate_regional_providers(seed) is True
-        with pytest.raises(ConfigurationError):
+        with pytest.raises(ValidationError):
             oc.plan_zai(Region.GLOBAL, opencode_doc=seed, auth_token=TOKEN)
 
     def test_refuses_duplicate_regional_state_china(self):
@@ -119,7 +121,7 @@ class TestPlanZai:
         ambiguity is in the seed (two managed names), not in which name we
         are activating. Reversed insertion order too (issue #50 acceptance:
         both insertion orders)."""
-        from zai_python_helper.errors import ConfigurationError
+        from zai_python_helper.errors import ValidationError
 
         seed = {
             "provider": {
@@ -128,8 +130,151 @@ class TestPlanZai:
             },
         }
         assert oc.has_duplicate_regional_providers(seed) is True
-        with pytest.raises(ConfigurationError):
+        with pytest.raises(ValidationError):
             oc.plan_zai(Region.CHINA, opencode_doc=seed, auth_token=TOKEN)
+
+    def test_refuses_duplicate_regional_state_when_journal_does_not_attribute(self):
+        """A journal that exists but attributes NEITHER entry (our recorded
+        value was rotated away) leaves the seed ambiguous — still refused."""
+        from zai_python_helper.errors import ValidationError
+        from zai_python_helper.ownership import hash_value
+
+        seed = {
+            "provider": {
+                GLOBAL_NAME: {"options": {"apiKey": "rotated-away"}},
+                CHINA_NAME: {"options": {"apiKey": "user-china-key"}},
+            },
+        }
+        journal = {
+            "opencode": {
+                "provider.apiKey": {
+                    "prior_value": None,
+                    "prior_present": False,
+                    "set_hash": hash_value("what-we-once-wrote"),
+                    "active": True,
+                }
+            }
+        }
+        with pytest.raises(ValidationError):
+            oc.plan_zai(
+                Region.GLOBAL,
+                opencode_doc=seed,
+                auth_token=TOKEN,
+                journal_records=journal,
+            )
+
+    def test_removes_all_regional_providers_before_install(self):
+        """Restored from #41 (removed by #57's unconditional guard, issue #61).
+
+        With BOTH regional entries present AND the journal proving one is ours
+        (its apiKey still hashes to the active record's ``set_hash``), the doc
+        is not ambiguous: our entry is ours to drop and the other is the
+        user's. ``plan_zai`` proceeds and removes EVERY managed regional
+        provider before installing the target — not just the first one — so
+        no stale helper credential survives. This is the one-shot self-heal
+        #41 shipped."""
+        from zai_python_helper.ownership import hash_value
+
+        seed = {
+            "provider": {
+                GLOBAL_NAME: {"options": {"apiKey": "helper-old"}},
+                CHINA_NAME: {"options": {"apiKey": "helper-cn"}},
+            },
+        }
+        journal = {
+            "opencode": {
+                "provider.apiKey": {
+                    "prior_value": None,
+                    "prior_present": False,
+                    "set_hash": hash_value("helper-old"),
+                    "active": True,
+                }
+            }
+        }
+        plan = oc.plan_zai(
+            Region.GLOBAL,
+            opencode_doc=seed,
+            auth_token=TOKEN,
+            journal_records=journal,
+        )
+        doc = plan.delta_for(FileTag.OPENCODE).content
+        # Only the freshly-installed global entry remains; china is gone too.
+        assert list(doc["provider"].keys()) == [GLOBAL_NAME]
+        assert doc["provider"][GLOBAL_NAME] == {"options": {"apiKey": TOKEN}}
+
+    def test_self_heal_seeds_foreign_keys_from_our_entry_not_the_users(self):
+        """The self-healed entry inherits foreign options from the entry the
+        journal proves is OURS. Seeding from the user's entry (dict order)
+        would graft their configuration onto our provider — silent theft of
+        settings from an entry we are about to delete."""
+        from zai_python_helper.ownership import hash_value
+
+        seed = {
+            "provider": {
+                # The USER's entry comes FIRST in dict order.
+                CHINA_NAME: {
+                    "options": {"apiKey": "user-china-key"},
+                    "timeout": 999,
+                },
+                GLOBAL_NAME: {
+                    "options": {"apiKey": "helper-wrote-this"},
+                    "concurrency": 4,
+                },
+            },
+        }
+        journal = {
+            "opencode": {
+                "provider.apiKey": {
+                    "prior_value": None,
+                    "prior_present": False,
+                    "set_hash": hash_value("helper-wrote-this"),
+                    "active": True,
+                }
+            }
+        }
+        plan = oc.plan_zai(
+            Region.GLOBAL,
+            opencode_doc=seed,
+            auth_token=TOKEN,
+            journal_records=journal,
+        )
+        doc = plan.delta_for(FileTag.OPENCODE).content
+        entry = doc["provider"][GLOBAL_NAME]
+        assert entry["options"]["apiKey"] == TOKEN
+        # Ours carried `concurrency`; the user's `timeout` must NOT migrate.
+        assert entry["concurrency"] == 4
+        assert "timeout" not in entry
+
+    def test_self_heal_across_regions(self):
+        """Self-heal works when the target region differs from the region of
+        the entry we own — both regional entries go, the target is installed."""
+        from zai_python_helper.ownership import hash_value
+
+        seed = {
+            "provider": {
+                GLOBAL_NAME: {"options": {"apiKey": "helper-global"}},
+                CHINA_NAME: {"options": {"apiKey": "user-china-key"}},
+            },
+        }
+        journal = {
+            "opencode": {
+                "provider.apiKey": {
+                    "prior_value": None,
+                    "prior_present": False,
+                    "set_hash": hash_value("helper-global"),
+                    "active": True,
+                }
+            }
+        }
+        plan = oc.plan_zai(
+            Region.CHINA,
+            opencode_doc=seed,
+            auth_token=TOKEN,
+            journal_records=journal,
+        )
+        doc = plan.delta_for(FileTag.OPENCODE).content
+        assert list(doc["provider"].keys()) == [CHINA_NAME]
+        assert doc["model"] == f"{CHINA_NAME}/glm-4.6"
 
     def test_idempotent_on_post_state(self):
         """A second plan_zai on the first plan's post-state is a NOOP."""
@@ -354,3 +499,118 @@ class TestDuplicateRegionalState:
     def test_false_for_empty_or_absent_doc(self):
         assert oc.has_duplicate_regional_providers({}) is False
         assert oc.has_duplicate_regional_providers(None) is False
+
+
+class TestOwnedRegionalProviderName:
+    """``owned_regional_provider_name`` is the discriminator that makes the
+    duplicate-state guard ownership-aware (issue #61). It attributes an entry
+    to us ONLY on a value proof: the entry's current ``options.apiKey`` still
+    hashes to an ACTIVE journal record's ``set_hash``."""
+
+    @staticmethod
+    def _journal(set_hash, *, active=True):
+        return {
+            "opencode": {
+                "provider.apiKey": {
+                    "prior_value": None,
+                    "prior_present": False,
+                    "set_hash": set_hash,
+                    "active": active,
+                }
+            }
+        }
+
+    @staticmethod
+    def _dual(global_key: str, china_key: str):
+        return {
+            "provider": {
+                GLOBAL_NAME: {"options": {"apiKey": global_key}},
+                CHINA_NAME: {"options": {"apiKey": china_key}},
+            }
+        }
+
+    def test_attributes_the_entry_whose_value_matches(self):
+        from zai_python_helper.ownership import hash_value
+
+        doc = self._dual("ours", "theirs")
+        journal = self._journal(hash_value("ours"))
+        assert oc.owned_regional_provider_name(doc, journal) == GLOBAL_NAME
+
+    def test_attributes_regardless_of_dict_order(self):
+        """The proof is the VALUE, not the position: our entry wins even when
+        the user's comes first (which is what first-match would have picked)."""
+        from zai_python_helper.ownership import hash_value
+
+        doc = {
+            "provider": {
+                CHINA_NAME: {"options": {"apiKey": "theirs"}},
+                GLOBAL_NAME: {"options": {"apiKey": "ours"}},
+            }
+        }
+        journal = self._journal(hash_value("ours"))
+        assert oc.owned_regional_provider_name(doc, journal) == GLOBAL_NAME
+
+    def test_none_when_no_value_matches(self):
+        from zai_python_helper.ownership import hash_value
+
+        doc = self._dual("rotated", "theirs")
+        journal = self._journal(hash_value("what-we-wrote"))
+        assert oc.owned_regional_provider_name(doc, journal) is None
+
+    def test_none_when_record_is_retired(self):
+        """A retired (``active=False``) record's ownership cycle is OVER — it
+        proves nothing about the value live now (Bug 6 / issue #54 symmetry).
+        Matching it must NOT attribute the entry."""
+        from zai_python_helper.ownership import hash_value
+
+        doc = self._dual("ours", "theirs")
+        journal = self._journal(hash_value("ours"), active=False)
+        assert oc.owned_regional_provider_name(doc, journal) is None
+
+    def test_none_for_ownership_by_removal_record(self):
+        """A ``set_hash`` of None records ownership by REMOVAL — the value we
+        'set' was absence, so it can never attribute a PRESENT entry."""
+        doc = self._dual("ours", "theirs")
+        assert oc.owned_regional_provider_name(doc, self._journal(None)) is None
+
+    def test_none_when_both_entries_match(self):
+        """Fail-closed: if BOTH entries carry the value we recorded, the single
+        logical record cannot single one out, so nothing is attributed."""
+        from zai_python_helper.ownership import hash_value
+
+        doc = self._dual("same", "same")
+        journal = self._journal(hash_value("same"))
+        assert oc.owned_regional_provider_name(doc, journal) is None
+
+    def test_none_without_a_journal(self):
+        doc = self._dual("ours", "theirs")
+        assert oc.owned_regional_provider_name(doc, None) is None
+        assert oc.owned_regional_provider_name(doc, {}) is None
+
+    def test_none_when_journal_has_no_opencode_bucket(self):
+        doc = self._dual("ours", "theirs")
+        assert oc.owned_regional_provider_name(doc, {"crush": {}}) is None
+
+    def test_attributes_a_lone_entry_too(self):
+        """Not duplicate-specific: a single regional entry is attributed the
+        same way (the callers that care gate on duplicate state themselves)."""
+        from zai_python_helper.ownership import hash_value
+
+        doc = {"provider": {GLOBAL_NAME: {"options": {"apiKey": "ours"}}}}
+        journal = self._journal(hash_value("ours"))
+        assert oc.owned_regional_provider_name(doc, journal) == GLOBAL_NAME
+
+    def test_attributes_non_string_apikey_matching_hash(self):
+        """``hash_value`` coerces to ``str`` by documented design (e.g. a bare
+        JSON number ``12345`` → ``\"12345\"``). ``_apikey_of`` must match that
+        coercion so a hand-edited ``opencode.json`` with a non-string apiKey
+        is still attributable when its ``str(value)`` hashes to our record."""
+        from zai_python_helper.ownership import hash_value
+
+        bare_int = 12345
+        doc = self._dual(str(bare_int), "theirs")
+        # _dual wraps values in {"options": {"apiKey": value}}, so override
+        # the global entry to carry the bare int:
+        doc["provider"][GLOBAL_NAME]["options"]["apiKey"] = bare_int
+        journal = self._journal(hash_value(bare_int))  # hash_value coerces str()
+        assert oc.owned_regional_provider_name(doc, journal) == GLOBAL_NAME

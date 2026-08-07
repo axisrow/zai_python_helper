@@ -165,8 +165,19 @@ class Tool(ABC):
         *,
         state: dict[FileTag, Any],
         auth_token: str,
+        journal_records: dict[str, Any] | None = None,
     ) -> PatchPlan:
-        """Plan the ``use zai`` activation against the read ``state``."""
+        """Plan the ``use zai`` activation against the read ``state``.
+
+        ``journal_records`` is the ownership journal as read under the CLI's
+        lock, or ``None`` when the caller has no provenance to offer. It is
+        OPTIONAL context: a tool whose plan is decided entirely by the config
+        document ignores it. A tool whose config can reach a state that is
+        ambiguous *unless* prior ownership is known consults it, so it can
+        distinguish "an entry we wrote" from "an entry the user wrote" instead
+        of guessing or refusing outright (issue #61 — OpenCode's
+        duplicate-regional-provider seed).
+        """
         ...
 
     @abstractmethod
@@ -175,12 +186,17 @@ class Tool(ABC):
         *,
         state: dict[FileTag, Any],
         decisions: dict[str, RevertDecision],
+        journal_records: dict[str, Any] | None = None,
     ) -> PatchPlan:
         """Plan the journal-aware ``use default`` reversion.
 
         ``decisions`` is ``{field.key: RevertDecision}`` for every key in
         :meth:`revert_key_set`; the tool applies them back through its
         :class:`ManagedField` descriptors.
+
+        ``journal_records`` mirrors :meth:`plan_zai`'s: optional
+        prior-ownership context for tools that must locate WHICH occurrence of
+        an ambiguously-addressed field the decisions apply to.
         """
         ...
 
@@ -189,12 +205,22 @@ class Tool(ABC):
     # ------------------------------------------------------------------
 
     @abstractmethod
-    def managed_fields(self, spec: ProviderSpec) -> list[ManagedField]:
+    def managed_fields(
+        self,
+        spec: ProviderSpec,
+        journal_records: dict[str, Any] | None = None,
+    ) -> list[ManagedField]:
         """The closed set of fields this tool owns for ``spec``'s model mode.
 
         The set may depend on the mode (e.g. Claude Code DEFAULT contributes
         extra ``ANTHROPIC_DEFAULT_*_MODEL`` fields). The CLI journals exactly
         these.
+
+        ``journal_records`` is optional prior-ownership context for tools whose
+        descriptors address a field that a document can carry more than one
+        candidate for; such a descriptor uses it to pick the occurrence the
+        journal attributes to us (issue #61). Tools with unambiguous field
+        addresses ignore it.
         """
         ...
 
@@ -213,6 +239,8 @@ class Tool(ABC):
         plan: PatchPlan,
         prior_state: dict[FileTag, Any],
         spec: ProviderSpec,
+        *,
+        journal_records: dict[str, Any] | None = None,
     ) -> list[tuple[str, str | None, bool, str | None]]:
         """Compute ``(key, prior_value, prior_present, set_hash)`` per owned field.
 
@@ -222,6 +250,10 @@ class Tool(ABC):
         ``get``), or ``None`` when the plan REMOVES the field (ownership taken
         as a removal). A field the plan neither sets nor removes is skipped,
         so the journal never records a key we did not touch.
+
+        ``journal_records`` mirrors :meth:`plan_zai`'s: optional prior-ownership
+        context, needed only where reading a field's PRIOR value off an
+        ambiguous document requires knowing which occurrence was ours.
         """
         ...
 

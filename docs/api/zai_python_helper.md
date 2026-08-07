@@ -518,15 +518,24 @@ consistent snapshot. JSON tags yield a `dict | None`; text tags
 #### `plan_zai()`
 
 ```python
-plan_zai(self, spec: ProviderSpec, region: Region, state: dict[FileTag, Any], auth_token: str) -> PatchPlan
+plan_zai(self, spec: ProviderSpec, region: Region, state: dict[FileTag, Any], auth_token: str, journal_records: dict[str, Any] | None) -> PatchPlan
 ```
 
 Plan the `use zai` activation against the read `state`.
 
+`journal_records` is the ownership journal as read under the CLI's
+lock, or `None` when the caller has no provenance to offer. It is
+OPTIONAL context: a tool whose plan is decided entirely by the config
+document ignores it. A tool whose config can reach a state that is
+ambiguous *unless* prior ownership is known consults it, so it can
+distinguish "an entry we wrote" from "an entry the user wrote" instead
+of guessing or refusing outright (issue #61 — OpenCode's
+duplicate-regional-provider seed).
+
 #### `plan_revert()`
 
 ```python
-plan_revert(self, state: dict[FileTag, Any], decisions: dict[str, RevertDecision]) -> PatchPlan
+plan_revert(self, state: dict[FileTag, Any], decisions: dict[str, RevertDecision], journal_records: dict[str, Any] | None) -> PatchPlan
 ```
 
 Plan the journal-aware `use default` reversion.
@@ -535,10 +544,14 @@ Plan the journal-aware `use default` reversion.
 `revert_key_set`; the tool applies them back through its
 `ManagedField` descriptors.
 
+`journal_records` mirrors `plan_zai`'s: optional
+prior-ownership context for tools that must locate WHICH occurrence of
+an ambiguously-addressed field the decisions apply to.
+
 #### `managed_fields()`
 
 ```python
-managed_fields(self, spec: ProviderSpec) -> list[ManagedField]
+managed_fields(self, spec: ProviderSpec, journal_records: dict[str, Any] | None) -> list[ManagedField]
 ```
 
 The closed set of fields this tool owns for `spec`'s model mode.
@@ -546,6 +559,12 @@ The closed set of fields this tool owns for `spec`'s model mode.
 The set may depend on the mode (e.g. Claude Code DEFAULT contributes
 extra `ANTHROPIC_DEFAULT_*_MODEL` fields). The CLI journals exactly
 these.
+
+`journal_records` is optional prior-ownership context for tools whose
+descriptors address a field that a document can carry more than one
+candidate for; such a descriptor uses it to pick the occurrence the
+journal attributes to us (issue #61). Tools with unambiguous field
+addresses ignore it.
 
 #### `revert_key_set()`
 
@@ -561,7 +580,7 @@ mode, so a cross-mode revert is clean (no stale keys left behind).
 #### `extract_takeover()`
 
 ```python
-extract_takeover(self, plan: PatchPlan, prior_state: dict[FileTag, Any], spec: ProviderSpec) -> list[tuple[str, str | None, bool, str | None]]
+extract_takeover(self, plan: PatchPlan, prior_state: dict[FileTag, Any], spec: ProviderSpec, journal_records: dict[str, Any] | None) -> list[tuple[str, str | None, bool, str | None]]
 ```
 
 Compute `(key, prior_value, prior_present, set_hash)` per owned field.
@@ -572,6 +591,10 @@ plan writes (read back out of the planned delta via the field's
 `get`), or `None` when the plan REMOVES the field (ownership taken
 as a removal). A field the plan neither sets nor removes is skipped,
 so the journal never records a key we did not touch.
+
+`journal_records` mirrors `plan_zai`'s: optional prior-ownership
+context, needed only where reading a field's PRIOR value off an
+ambiguous document requires knowing which occurrence was ours.
 
 #### `revert_decisions()`
 
