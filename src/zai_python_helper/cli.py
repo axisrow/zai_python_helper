@@ -725,6 +725,45 @@ def _handle_use_zai(args: argparse.Namespace) -> int:
             journal_records=journal_records,
         )
 
+        # If the prior doc carried both regional providers and plan_zai did
+        # NOT refuse, a self-heal just replaced the user's non-attributed
+        # regional entry.  Warn prominently — the deletion is irreversible
+        # (the journal records only OUR apiKey, not the user's entry).
+        from zai_python_helper.core.planner.opencode import (
+            has_duplicate_regional_providers,
+        )
+
+        prior_doc = state.get(FileTag.OPENCODE)
+        if (
+            prior_doc
+            and has_duplicate_regional_providers(prior_doc)
+            and not plan.is_empty
+        ):
+            from zai_python_helper.core.planner.opencode import (
+                owned_regional_provider_name,
+            )
+
+            owned = owned_regional_provider_name(
+                prior_doc, journal_records
+            )
+            unattributed = [
+                n
+                for n in prior_doc.get("provider", {})
+                if n != owned
+            ]
+            print(
+                "  warning: opencode.json carried multiple regional "
+                "providers; the non-attributed entries"
+                + (
+                    f" ({', '.join(unattributed)})"
+                    if unattributed
+                    else ""
+                )
+                + " were removed to activate the selected region.  "
+                "This is irreversible — the removed entries are not "
+                "recoverable via `use default`."
+            )
+
         # Ownership journal (ADR-004): for every field we are about to
         # set/remove, record its PRIOR value/presence + a hash of what we set.
         # take_over is idempotent w.r.t. the restore point (a repeat

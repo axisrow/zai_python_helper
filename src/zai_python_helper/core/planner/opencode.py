@@ -151,11 +151,19 @@ def _regional_provider_names_in(doc: dict[str, Any] | None) -> list[str]:
 
 
 def _apikey_of(doc: dict[str, Any] | None, name: str) -> str | None:
-    """The ``options.apiKey`` of provider ``name`` in ``doc`` (None if absent)."""
+    """The ``options.apiKey`` of provider ``name`` in ``doc`` (None if absent).
+
+    Coerces non-string values via ``str()`` to match :func:`hash_value`'s
+    documented coercion contract — a bare JSON number (``12345``) in a
+    hand-edited config must hash-compare identically here and at activation
+    time.
+    """
     entry = ((doc or {}).get("provider") or {}).get(name) or {}
     options = entry.get("options") or {}
     value = options.get("apiKey")
-    return value if isinstance(value, str) else None
+    if value is None:
+        return None
+    return str(value)
 
 
 def owned_regional_provider_name(
@@ -330,6 +338,16 @@ def plan_zai(
         ValidationError: If ``opencode_doc`` is an AMBIGUOUS duplicate-state
             seed — BOTH regional provider names present at once (issue #50,
             Bug 4 edge) and NEITHER attributable to us.
+
+            .. note::
+
+                Prior to issue #61 this guard raised ``ConfigurationError``.
+                The exception type was changed to ``ValidationError`` to align
+                with the sibling factory_droid entry-identity guard.  This is a
+                **backward-incompatible change** for library callers that catch
+                ``ConfigurationError`` specifically — such handlers will no
+                longer intercept this path (both types are subclasses of
+                ``ZaiPythonHelperError``, so a broad handler is unaffected).
 
             The two regional names cannot be told apart through a revert (the
             journal keys the apiKey under a single fixed logical name,

@@ -343,6 +343,14 @@ class TestApplyAndRevert:
         assert list(after["provider"].keys()) == [GLOBAL_NAME]
         assert after["provider"][GLOBAL_NAME]["options"]["apiKey"] == TOKEN
 
+        # Verify the unattributed-entry detection logic used by the CLI warning.
+        # On this exact prior state, the warning must name CHINA_NAME as the
+        # entry that was removed (it is the one the journal does NOT own).
+        owned = oc.owned_regional_provider_name(doc, journal_records)
+        unattributed = [n for n in doc.get("provider", {}) if n != owned]
+        assert owned == GLOBAL_NAME
+        assert unattributed == [CHINA_NAME]
+
     def test_self_heal_takeover_prior_is_our_value_not_the_users(
         self, tool, tmp_path
     ):

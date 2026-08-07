@@ -599,3 +599,18 @@ class TestOwnedRegionalProviderName:
         doc = {"provider": {GLOBAL_NAME: {"options": {"apiKey": "ours"}}}}
         journal = self._journal(hash_value("ours"))
         assert oc.owned_regional_provider_name(doc, journal) == GLOBAL_NAME
+
+    def test_attributes_non_string_apikey_matching_hash(self):
+        """``hash_value`` coerces to ``str`` by documented design (e.g. a bare
+        JSON number ``12345`` → ``\"12345\"``). ``_apikey_of`` must match that
+        coercion so a hand-edited ``opencode.json`` with a non-string apiKey
+        is still attributable when its ``str(value)`` hashes to our record."""
+        from zai_python_helper.ownership import hash_value
+
+        bare_int = 12345
+        doc = self._dual(str(bare_int), "theirs")
+        # _dual wraps values in {"options": {"apiKey": value}}, so override
+        # the global entry to carry the bare int:
+        doc["provider"][GLOBAL_NAME]["options"]["apiKey"] = bare_int
+        journal = self._journal(hash_value(bare_int))  # hash_value coerces str()
+        assert oc.owned_regional_provider_name(doc, journal) == GLOBAL_NAME
