@@ -708,12 +708,16 @@ def _handle_use_zai(args: argparse.Namespace) -> int:
 
         journal = OwnershipJournal(paths.ownership_json)
 
-        def _persist_journal() -> None:
-            if records:
-                current = journal.read()
-                journal.write(_merge_takeover_records(tool, current, records))
+        # Hand the journal's FINAL TEXT to the transaction instead of writing
+        # it here: the commit layer folds it into the recovery manifest, so
+        # journal + config land together or not at all (issue #60).
+        def _journal_text() -> str | None:
+            if not records:
+                return None
+            current = journal.read()
+            return journal.render(_merge_takeover_records(tool, current, records))
 
-        written = apply_plan_locked(paths, plan, on_locked=_persist_journal)
+        written = apply_plan_locked(paths, plan, journal_content=_journal_text)
     if not written:
         print("(no changes — already in desired state)")
     else:
@@ -776,17 +780,23 @@ def _handle_use_default(args: argparse.Namespace) -> int:
         plan = tool.plan_revert(state=state, decisions=decisions)
         _print_refuse_warnings(decisions)
 
-        # Persist the retired journal ALONGSIDE the revert (issue #48
-        # cycle-state): every RESTORE retires its record to ``active=False`` so
-        # a later re-activation starts a fresh restore point instead of
-        # resurrecting a stale credential. The persist runs under the same lock
-        # and only when the revert actually commits (on_locked), mirroring how
-        # ``use zai`` persists its takeover journal. REFUSE-only reverts leave
-        # the journal byte-identical (a fresh copy with no retirement).
-        def _persist_retired_journal() -> None:
-            journal.write(retired_records)
+        # Persist the retired journal ATOMICALLY WITH the revert (issue #48
+        # cycle-state + issue #60 Bug 7): every RESTORE retires its record to
+        # ``active=False`` so a later re-activation starts a fresh restore
+        # point instead of resurrecting a stale credential. The retirement is
+        # handed to the commit layer as TEXT, not written here, so it enters
+        # the recovery manifest together with the config writes it describes:
+        # a crash mid-commit can no longer leave ``active=False`` on disk while
+        # the config still holds our value (which would strand the user's prior
+        # behind a permanent REFUSE). REFUSE-only reverts leave the journal
+        # byte-identical (a fresh copy with no retirement); when there is
+        # nothing at all to journal we skip it so no empty file is created.
+        def _journal_text() -> str | None:
+            if not retired_records and not journal.path.exists():
+                return None
+            return journal.render(retired_records)
 
-        written = apply_plan_locked(paths, plan, on_locked=_persist_retired_journal)
+        written = apply_plan_locked(paths, plan, journal_content=_journal_text)
     if not written:
         print("(no changes — already at default)")
     else:

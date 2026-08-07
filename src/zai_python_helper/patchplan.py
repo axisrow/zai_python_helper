@@ -236,35 +236,59 @@ def _tag_path(paths: Paths, tag: FileTag) -> Path:
     return resolve_path(paths, tag)
 
 
-def _write_manifest(path: Path, entries: list[_RecoveryEntry]) -> None:
-    """Persist the recovery manifest atomically at 0600 (may carry secrets)."""
-    payload = {"entries": [e.to_dict() for e in entries]}
+def _write_manifest(
+    path: Path,
+    entries: list[_RecoveryEntry],
+    journal: _RecoveryEntry | None = None,
+) -> None:
+    """Persist the recovery manifest atomically at 0600 (may carry secrets).
+
+    ``journal`` (if given) is the ownership journal's intended final content,
+    stored ALONGSIDE the config entries so a crash replays both or neither
+    (issue #60). It is kept in a separate key rather than appended to
+    ``entries`` because the journal is not a managed config file: it must not
+    be reported to the user as a recovered ``tag``.
+    """
+    payload: dict[str, Any] = {"entries": [e.to_dict() for e in entries]}
+    if journal is not None:
+        payload["journal"] = journal.to_dict()
     text = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
     from zai_python_helper.ownership import _atomic_write_secret
 
     _atomic_write_secret(path, text.encode("utf-8"))
 
 
-def _read_manifest(path: Path) -> list[_RecoveryEntry]:
-    """Parse a recovery manifest → entries, or ``[]`` if absent/corrupt.
+def _read_manifest(path: Path) -> tuple[list[_RecoveryEntry], _RecoveryEntry | None]:
+    """Parse a recovery manifest → ``(entries, journal)``.
 
-    A corrupt manifest is logged-as-empty rather than fatal: recovery is a
-    best-effort roll-forward, and a manifest we cannot parse cannot guide a
-    replay. (The caller has already warned the user that the prior run did
-    not finish cleanly.)
+    Returns ``([], None)`` if the manifest is absent or corrupt. A corrupt
+    manifest is logged-as-empty rather than fatal: recovery is a best-effort
+    roll-forward, and a manifest we cannot parse cannot guide a replay. (The
+    caller has already warned the user that the prior run did not finish
+    cleanly.)
+
+    ``journal`` is the ownership journal's intended final content when the
+    interrupted run carried one (issue #60), else ``None``.
     """
     if not path.exists():
-        return []
+        return [], None
     try:
         doc = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return []
-    raw_entries = doc.get("entries", []) if isinstance(doc, dict) else []
-    return [
+        return [], None
+    if not isinstance(doc, dict):
+        return [], None
+    raw_entries = doc.get("entries", [])
+    entries = [
         _RecoveryEntry.from_dict(e)
-        for e in raw_entries
+        for e in (raw_entries if isinstance(raw_entries, list) else [])
         if isinstance(e, dict)
     ]
+    raw_journal = doc.get("journal")
+    journal = (
+        _RecoveryEntry.from_dict(raw_journal) if isinstance(raw_journal, dict) else None
+    )
+    return entries, journal
 
 
 def _remove_manifest(path: Path) -> None:
@@ -316,8 +340,8 @@ def recover(paths: Paths) -> list[str]:
         wrote, in manifest order. Empty if no manifest existed.
     """
     with ProcessLock(paths.lock_file):
-        entries = _read_manifest(paths.recovery_json)
-        if not entries:
+        entries, journal = _read_manifest(paths.recovery_json)
+        if not entries and journal is None:
             # An absent/empty manifest means nothing to recover. Ensure no
             # stale (e.g. zero-byte) manifest lingers.
             _remove_manifest(paths.recovery_json)
@@ -326,6 +350,12 @@ def recover(paths: Paths) -> list[str]:
         for entry in entries:
             _apply_entry(entry)
             applied.append(entry.tag)
+        # Replay the ownership journal LAST, mirroring commit order: the
+        # journal's ``active=False`` retirement only becomes durable once the
+        # RESTORE it describes is durable (issue #60). It is not reported as a
+        # recovered tag — it is bookkeeping, not a managed config file.
+        if journal is not None:
+            _apply_entry(journal)
         _remove_manifest(paths.recovery_json)
         return applied
 
@@ -335,6 +365,7 @@ def apply_plan_locked(
     plan: PatchPlan,
     *,
     on_locked: Any = None,
+    journal_content: Any = None,
 ) -> list[FileTag]:
     """Commit ``plan`` assuming the caller already holds :class:`ProcessLock`.
 
@@ -345,16 +376,26 @@ def apply_plan_locked(
     process lock (and for running :func:`recover` first, also under that lock).
 
     Contract inside the held lock:
-    1. Invoke ``on_locked()`` (if given) — BEFORE the manifest is written. The
-       CLI uses this to persist the ownership journal under the same lock.
-    2. Write the recovery manifest (so an interrupted run can roll forward).
-    3. Write each file via its atomic primitive (the actual commit).
-    4. Delete the manifest ONLY after every write succeeds. On a partial
+    1. Invoke ``on_locked()`` (if given) — BEFORE the manifest is written, for
+       side effects that are NOT part of the transaction.
+    2. Resolve ``journal_content()`` (if given) into the manifest, so the
+       ownership journal commits ATOMICALLY with the config files.
+    3. Write the recovery manifest (so an interrupted run can roll forward).
+    4. Write each file via its atomic primitive, then the journal (the commit).
+    5. Delete the manifest ONLY after every write succeeds. On a partial
        failure, LEAVE it so the next :func:`recover` rolls forward.
 
-    Returns the tags actually written, in plan order. An all-NOOP plan still
-    runs ``on_locked`` (e.g. an idempotent activation that refreshes the
-    journal) and returns ``[]``.
+    ``journal_content`` is a zero-arg callable returning the journal's intended
+    final text, or ``None`` for "do not touch the journal". Passing the TEXT
+    (rather than letting the caller write the file itself, as ``on_locked``
+    does) is what makes the journal crash-atomic with the commit: a kill
+    anywhere leaves either the pre-transaction state or — via
+    :func:`recover` — the complete post-transaction state, never a retired
+    journal over an unrestored config (issue #60, Bug 7). An empty-string
+    result is written verbatim; an all-NOOP plan still commits the journal.
+
+    Returns the tags actually written, in plan order (the journal is not a
+    managed config file and never appears in the result).
     """
     entries: list[_RecoveryEntry] = []
     written: list[FileTag] = []
@@ -366,20 +407,37 @@ def apply_plan_locked(
 
     if on_locked is not None:
         on_locked()
-    if not entries:
+
+    journal_entry: _RecoveryEntry | None = None
+    if journal_content is not None:
+        text = journal_content()
+        if text is not None:
+            journal_entry = _RecoveryEntry(
+                tag="ownership",
+                path=str(paths.ownership_json),
+                kind="text",
+                content=text,
+            )
+
+    if not entries and journal_entry is None:
         # No file writes, but a side-effect may have run under the lock (e.g.
-        # an idempotent activation that still refreshed the journal).
+        # an idempotent activation with nothing to journal).
         return written
     # Persist the manifest BEFORE any managed-file write so a crash at any
     # later point is recoverable. The manifest holds final content, so
     # recovery is a pure replay (no re-read of live state).
-    _write_manifest(paths.recovery_json, entries)
+    _write_manifest(paths.recovery_json, entries, journal_entry)
     # Commit every file. On FULL success, drop the manifest (commit complete).
     # On a PARTIAL failure, LEAVE the manifest so the next invocation rolls
     # forward — deleting it here would strand mixed state with no recovery
     # path (S3 regression fix, Codex finding #4).
     for entry in entries:
         _apply_entry(entry)
+    # Journal LAST: its ``active=False`` retirement must not become durable
+    # before the RESTORE it describes (issue #60). If we die here, the manifest
+    # survives and recovery finishes both halves.
+    if journal_entry is not None:
+        _apply_entry(journal_entry)
     _remove_manifest(paths.recovery_json)
     return written
 
@@ -389,6 +447,7 @@ def apply_plan_under_lock(
     plan: PatchPlan,
     *,
     on_locked: Any = None,
+    journal_content: Any = None,
 ) -> list[FileTag]:
     """Apply ``plan`` as a locked, recoverable multi-file transaction.
 
@@ -402,6 +461,9 @@ def apply_plan_under_lock(
 
     ``on_locked`` (if given) is invoked while the lock is held and before any
     file write; if it raises, the lock is released and no manifest is written.
+    ``journal_content`` is forwarded unchanged (see :func:`apply_plan_locked`).
     """
     with ProcessLock(paths.lock_file):
-        return apply_plan_locked(paths, plan, on_locked=on_locked)
+        return apply_plan_locked(
+            paths, plan, on_locked=on_locked, journal_content=journal_content
+        )
