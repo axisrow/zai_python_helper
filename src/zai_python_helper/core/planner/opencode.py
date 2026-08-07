@@ -373,8 +373,7 @@ def plan_zai(
               rotated/edited so ownership can no longer be proved): every
               revert decision is REFUSE, the doc round-trips byte-identical,
               and a MANUAL edit of ``opencode.json`` — deleting the regional
-              entry you no longer want — is the only exit. ``doctor`` reports
-              this state so it is discoverable before ``use zai`` fails.
+              entry you no longer want — is the only exit.
 
             The pure :func:`plan_default` library function removes both
             unconditionally, but it is not what the CLI calls, and on a seed

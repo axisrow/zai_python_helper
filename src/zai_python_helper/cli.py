@@ -740,16 +740,19 @@ def _handle_use_zai(args: argparse.Namespace) -> int:
             and not plan.is_empty
         ):
             from zai_python_helper.core.planner.opencode import (
+                ALL_PROVIDER_NAMES,
                 owned_regional_provider_name,
             )
 
             owned = owned_regional_provider_name(
                 prior_doc, journal_records
             )
+            # Only managed regional providers are removed by the self-heal;
+            # foreign providers (e.g. "openai") are preserved untouched.
             unattributed = [
                 n
                 for n in prior_doc.get("provider", {})
-                if n != owned
+                if n in ALL_PROVIDER_NAMES and n != owned
             ]
             print(
                 "  warning: opencode.json carried multiple regional "
