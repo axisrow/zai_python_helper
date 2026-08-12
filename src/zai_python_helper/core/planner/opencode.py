@@ -196,7 +196,7 @@ def owned_regional_provider_name(
     """
     if not journal_records:
         return None
-    from zai_python_helper.ownership import OwnershipRecord, hash_value
+    from zai_python_helper.ownership import OwnershipRecord
 
     raw = (journal_records.get(tool_name) or {}).get(JOURNAL_KEY_APIKEY)
     if not isinstance(raw, dict):
@@ -208,15 +208,33 @@ def owned_regional_provider_name(
     if record.set_hash is None or not record.active:
         return None
 
-    matches = [
+    matches = matching_regional_provider_names(doc, journal_records, tool_name=tool_name)
+    # Exactly one match attributes the entry. Zero → unattributable. Two → the
+    # single logical record cannot say which is ours; fail closed.
+    return matches[0] if len(matches) == 1 else None
+
+
+def matching_regional_provider_names(
+    doc: dict[str, Any] | None,
+    journal_records: dict[str, Any] | None,
+    *,
+    tool_name: str = "opencode",
+) -> list[str]:
+    """Return regional entries whose current apiKey matches active ownership."""
+    from zai_python_helper.ownership import OwnershipRecord, hash_value
+
+    raw = (journal_records or {}).get(tool_name, {}).get(JOURNAL_KEY_APIKEY)
+    if not isinstance(raw, dict):
+        return []
+    record = OwnershipRecord.from_dict(raw)
+    if record.set_hash is None or not record.active:
+        return []
+    return [
         name
         for name in _regional_provider_names_in(doc)
         if (value := _apikey_of(doc, name)) is not None
         and hash_value(value) == record.set_hash
     ]
-    # Exactly one match attributes the entry. Zero → unattributable. Two → the
-    # single logical record cannot say which is ours; fail closed.
-    return matches[0] if len(matches) == 1 else None
 
 
 # ---------------------------------------------------------------------------
