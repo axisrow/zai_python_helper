@@ -74,12 +74,14 @@ zai-python-helper use zai \
 `customModels` 是 Factory Droid 的格式，不是 Claude Code 的格式。无头模式下可使用：
 
 ```bash
-chelper auth glm_coding_plan_global <token>
+chelper auth glm_coding_plan_global "$ZAI_API_KEY"
 chelper auth reload claude
 ```
 
 第一条命令验证并把令牌保存到 `~/.chelper/config.yaml`，第二条将配置应用到 Claude Code。
-`chelper enter claude-code` 需要交互式 TTY，不适合作为无头脚本的替代方案。
+`<token>` 是文档中的尖括号占位符，并非字面 shell 语法：未加引号的 `<token>` 会被 shell
+解析为输入重定向，因此应通过环境变量（如上面的 `ZAI_API_KEY`）传入真实值，而不要直接
+粘贴令牌本身。`chelper enter claude-code` 需要交互式 TTY，不适合作为无头脚本的替代方案。
 
 ## 区域
 

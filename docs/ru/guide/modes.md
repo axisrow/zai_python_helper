@@ -82,13 +82,17 @@ Black-box-тестирование оригинального пакета по�
 Factory Droid, а не Claude Code. Безголовая последовательность оригинала:
 
 ```bash
-chelper auth glm_coding_plan_global <token>
+chelper auth glm_coding_plan_global "$ZAI_API_KEY"
 chelper auth reload claude
 ```
 
 Первая команда проверяет и сохраняет токен в `~/.chelper/config.yaml`, вторая
-применяет его к Claude Code. `chelper enter claude-code` рассчитан на
-интерактивный TTY и не заменяет эту последовательность в скрипте.
+применяет его к Claude Code. `<token>` в прозе — это placeholder в угловых
+скобках, а не буквальный shell-синтаксис: неэкранированный `<token>` shell
+воспримет как редирект ввода, поэтому реальное значение нужно передавать через
+переменную окружения (`ZAI_API_KEY` выше), а не вставлять токен дословно.
+`chelper enter claude-code` рассчитан на интерактивный TTY и не заменяет эту
+последовательность в скрипте.
 
 ## Регионы
 
