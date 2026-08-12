@@ -58,9 +58,19 @@ _API_KEY_VARS = ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY")
 # + the paas/anthropic variants) so an endpoint written by ``use zai`` is
 # always recognized.
 _ZAI_HOSTS = {
-    Region.GLOBAL: ("z.ai",),
-    Region.CHINA: ("z.cn", "zai.cn"),
+    # Keep this list explicit.  Accepting arbitrary subdomains of a public
+    # suffix would allow a credential-shaped label (for example
+    # ``secret.api.z.ai``) to be echoed by the status report.
+    Region.GLOBAL: ("api.z.ai",),
+    Region.CHINA: ("api.z.cn", "api.zai.cn", "open.bigmodel.cn"),
 }
+
+# Non-Z.ai endpoints which status has historically displayed are also safe to
+# show, but only as exact known hosts.  In particular, do not accept arbitrary
+# hosts merely because they have a plausible-looking suffix.
+_SAFE_ENDPOINT_HOSTS = frozenset(
+    host for hosts in _ZAI_HOSTS.values() for host in hosts
+) | {"api.anthropic.com", "api.anthropic.cn"}
 
 # ANSI codes used by the renderer. Applied ONLY on a tty.
 _ANSI = {
@@ -133,7 +143,7 @@ def _classify_region(base_url: str) -> Region | None:
     """
     host = _host_of(base_url)
     for region, hosts in _ZAI_HOSTS.items():
-        if any(host == h or host.endswith("." + h) for h in hosts):
+        if host in hosts:
             return region
     return None
 
@@ -165,10 +175,10 @@ def safe_endpoint(url: object) -> str:
     try:
         parts = urlsplit(url.strip())
         scheme = parts.scheme.lower()
-        host = parts.hostname or ""
+        host = (parts.hostname or "").lower()
         # Only http(s) schemes carry an API endpoint worth showing; anything
         # else (file:, ftp:, empty, garbage) is not a Z.ai endpoint.
-        if scheme not in ("http", "https") or not host:
+        if scheme not in ("http", "https") or host not in _SAFE_ENDPOINT_HOSTS:
             return "(malformed endpoint)"
         # Show scheme + host + port ONLY. The path is deliberately omitted:
         # a credential can be embedded in the path (e.g. .../api/<key>), and
