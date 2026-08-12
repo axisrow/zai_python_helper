@@ -289,7 +289,24 @@ class OpenCodeTool(Tool):
         ):
             present, value = field.get(doc)
             current = value if present else None
-            decision, retired = revert(retired, self.name, field.key, current)
+            if (
+                field.key == oc.JOURNAL_KEY_APIKEY
+                and len(oc.matching_regional_provider_names(doc, journal_records)) > 1
+            ):
+                from zai_python_helper.ownership import RevertAction, RevertDecision
+
+                decision = RevertDecision(
+                    action=RevertAction.REFUSE,
+                    key=field.key,
+                    prior_value=None,
+                    prior_present=False,
+                    reason=(
+                        "both regional OpenCode providers match the active "
+                        "helper credential; refusing to guess which to clear"
+                    ),
+                )
+            else:
+                decision, retired = revert(retired, self.name, field.key, current)
             out[field.key] = decision
         return out, retired
 

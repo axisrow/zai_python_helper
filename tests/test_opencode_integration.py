@@ -254,6 +254,30 @@ class TestApplyAndRevert:
             state = tool.read_state(paths)
             tool.plan_zai(spec, Region.GLOBAL, state=state, auth_token=TOKEN)
 
+    def test_use_default_refuses_when_both_regional_entries_match_our_value(
+        self, tool, tmp_path
+    ):
+        """Two matching regional entries are ambiguous and must both survive."""
+        paths = Paths.from_home(tmp_path)
+        spec = _spec()
+        with ProcessLock(paths.lock_file):
+            state = tool.read_state(paths)
+            plan = tool.plan_zai(spec, Region.GLOBAL, state=state, auth_token=TOKEN)
+            records = tool.extract_takeover(plan, prior_state=state, spec=spec)
+            apply_plan_locked(paths, plan)
+        journal = OwnershipJournal(paths.ownership_json)
+        journal.write(_merge(tool, journal.read(), records))
+
+        doc = _read_doc(paths)
+        doc["provider"][CHINA_NAME] = {"options": {"apiKey": TOKEN}}
+        JsonBackend.write(paths.opencode, doc)
+
+        decisions = self._use_default(tool, paths)
+        assert decisions["provider.apiKey"].action.name == "REFUSE"
+        after = _read_doc(paths)
+        assert after["provider"][GLOBAL_NAME]["options"]["apiKey"] == TOKEN
+        assert after["provider"][CHINA_NAME]["options"]["apiKey"] == TOKEN
+
     def test_use_default_cannot_clear_duplicate_when_unowned(self, tool, tmp_path):
         """Recovery contract, branch 2: when NO entry's value matches the
         journal (both user-authored here), every decision is REFUSE, the doc
