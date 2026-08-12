@@ -187,7 +187,8 @@ class CrushTool(Tool):
         detail = ""
         if entry:
             # Infer region from the configured base_url, if it matches a known
-            # paas endpoint.
+            # paas endpoint. Compare the RAW base_url here — these are exact
+            # matches against known-good full URLs, not display text.
             base_url = entry.get("base_url")
             from zai_python_helper.regions import ZAI_PAAS_BASE_URL_BY_REGION
 
@@ -197,7 +198,14 @@ class CrushTool(Tool):
                     break
             active = "api_key" in entry and region is not None
             has_key = "api_key" in entry
-            detail = f"base_url={base_url or '-'} api_key={'set' if has_key else 'missing'}"
+            # Sanitize before display: base_url comes straight from the
+            # on-disk config and may carry embedded credentials (userinfo or
+            # a query-string secret). StatusRow.detail MUST NOT carry
+            # secrets, so rebuild a credential-free origin for display only.
+            from zai_python_helper.status import safe_endpoint
+
+            safe_url = safe_endpoint(base_url) if base_url else "-"
+            detail = f"base_url={safe_url} api_key={'set' if has_key else 'missing'}"
         return StatusRow(
             tool=self.name,
             configured=doc is not None,

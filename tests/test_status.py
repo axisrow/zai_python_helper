@@ -25,10 +25,10 @@ from zai_python_helper.status import (
     ZSHRC_BLOCK_END,
     ClaudeCodeStatus,
     ZshrcState,
-    _safe_endpoint,
     detect_status,
     mask_key,
     render_status,
+    safe_endpoint,
 )
 
 FORCE_PLAIN = {"use_color": False}
@@ -195,6 +195,44 @@ class TestDetectClaudeCode:
         assert "opencode" in rendered
         assert "Z.ai: active (region: global)" in rendered
 
+    def test_crush_status_row_sanitizes_secret_bearing_base_url(self, tmp_path):
+        """Regression: CrushTool.status_row() built its ``detail`` string
+        from the raw providers.zai.base_url read straight off disk. A
+        base_url with credentials embedded in the query string (or
+        userinfo) would leak in cleartext via ``detail``, violating the
+        StatusRow.detail invariant (MUST NOT carry secrets)."""
+        paths = Paths.from_home(tmp_path)
+        paths.crush.parent.mkdir(parents=True, exist_ok=True)
+        secret_url = "https://api.z.ai/api/paas/v4?api_key=SUPERSECRET123&token=abc"
+        paths.crush.write_text(
+            json.dumps(
+                {
+                    "providers": {
+                        "zai": {
+                            "api_key": "irrelevant-token",
+                            "base_url": secret_url,
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        report = detect_status(paths)
+        rows = {row.tool: row for row in report.tool_rows}
+        crush_row = rows["crush"]
+
+        # The secrets must never appear in the detail string.
+        assert "SUPERSECRET123" not in crush_row.detail
+        assert "abc" not in crush_row.detail
+        # The sanitized detail still shows a recognizable host.
+        assert "api.z.ai" in crush_row.detail
+
+        rendered = render_status(report, **FORCE_PLAIN)
+        assert "SUPERSECRET123" not in rendered
+        assert "abc" not in rendered
+        assert "api.z.ai" in rendered
+
     @pytest.mark.parametrize(
         "url,region",
         [
@@ -211,7 +249,7 @@ class TestDetectClaudeCode:
         assert cc.zai_active is True
         assert cc.region is region
         # base_url is the sanitized origin (scheme+host), not the raw URL.
-        assert cc.base_url == _safe_endpoint(url)
+        assert cc.base_url == safe_endpoint(url)
 
     def test_non_zai_endpoint_is_inactive(self, tmp_path):
         # The real Anthropic endpoint is "not Z.ai" → inactive, no region.

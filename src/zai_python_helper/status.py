@@ -138,7 +138,7 @@ def _classify_region(base_url: str) -> Region | None:
     return None
 
 
-def _safe_endpoint(url: str) -> str:
+def safe_endpoint(url: str) -> str:
     """Return a credential-free, recognizable form of a URL for status.
 
     **Whitelist approach (fail-closed for any malformed input).** Rather
@@ -150,6 +150,9 @@ def _safe_endpoint(url: str) -> str:
     echoed. If parsing fails or yields no valid hostname, return a
     placeholder — ``status`` must tolerate malformed config without leaking
     or crashing. Pure parsing — no network.
+
+    Public: also used by other tools' ``status_row()`` (e.g. Crush) to
+    sanitize a raw config value before it is embedded in displayed text.
     """
     try:
         parts = urlsplit(url.strip())
@@ -278,7 +281,7 @@ def _detect_claude_code(paths: Paths) -> ClaudeCodeStatus:
             # corrupt input).
             raw_url = env.get("ANTHROPIC_BASE_URL")
             if isinstance(raw_url, str):
-                base_url = _safe_endpoint(raw_url)
+                base_url = safe_endpoint(raw_url)
             for var in _API_KEY_VARS:
                 val = env.get(var)
                 if isinstance(val, str) and val:

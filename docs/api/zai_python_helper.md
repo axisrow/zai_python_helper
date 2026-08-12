@@ -999,7 +999,7 @@ Attributes:
 
 ### `detect_status()`
 
-*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/status.py#L303)*
+*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/status.py#L306)*
 
 ```python
 detect_status(paths: Paths) -> StatusReport
@@ -1016,7 +1016,7 @@ the other registered tools expose their generic `StatusRow` values.
 
 ### `render_status()`
 
-*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/status.py#L393)*
+*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/status.py#L396)*
 
 ```python
 render_status(report: StatusReport, stream, use_color: bool | None) -> str
