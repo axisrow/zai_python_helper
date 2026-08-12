@@ -116,6 +116,7 @@ class ClaudeCodeTool(Tool):
         *,
         state: dict[FileTag, Any],
         auth_token: str,
+        journal_records: dict[str, Any] | None = None,
     ) -> PatchPlan:
         return cc_plan_zai(
             spec,
@@ -131,6 +132,7 @@ class ClaudeCodeTool(Tool):
         *,
         state: dict[FileTag, Any],
         decisions: dict[str, Any],
+        journal_records: dict[str, Any] | None = None,
     ) -> PatchPlan:
         return cc_plan_revert(
             decisions,
@@ -142,7 +144,11 @@ class ClaudeCodeTool(Tool):
     # Ownership descriptor
     # ------------------------------------------------------------------
 
-    def managed_fields(self, spec: ProviderSpec) -> list[ManagedField]:
+    def managed_fields(
+        self,
+        spec: ProviderSpec,
+        journal_records: dict[str, Any] | None = None,
+    ) -> list[ManagedField]:
         # The always-managed ZAI keys plus whatever the model mode contributes.
         keys = set(MANAGED_ZAI_KEYS) | set(_all_managed_model_keys())
         return [_EnvField(k) for k in sorted(keys)]
@@ -155,6 +161,8 @@ class ClaudeCodeTool(Tool):
         plan: PatchPlan,
         prior_state: dict[FileTag, Any],
         spec: ProviderSpec,
+        *,
+        journal_records: dict[str, Any] | None = None,
     ) -> list[tuple[str, str | None, bool, str | None]]:
         from zai_python_helper.ownership import hash_value
 

@@ -621,6 +621,51 @@ def _handle_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def _warn_self_heal_destruction(
+    prior_doc: dict | None,
+    journal_records: dict,
+    plan: PatchPlan,
+) -> None:
+    """Warn when a self-heal is about to irreversibly drop a non-attributed
+    regional provider entry (issue #61 follow-up).
+
+    If the prior doc carried both regional providers and ``plan_zai`` did
+    NOT refuse, a self-heal just replaced the user's non-attributed regional
+    entry.  The deletion is irreversible — the journal records only OUR
+    apiKey, not the user's entry — so this must be surfaced in BOTH the
+    dry-run preview and the real activation, not only the latter.
+    """
+    from zai_python_helper.core.planner.opencode import (
+        ALL_PROVIDER_NAMES,
+        has_duplicate_regional_providers,
+        owned_regional_provider_name,
+    )
+
+    if not (
+        prior_doc
+        and has_duplicate_regional_providers(prior_doc)
+        and not plan.is_empty
+    ):
+        return
+
+    owned = owned_regional_provider_name(prior_doc, journal_records)
+    # Only managed regional providers are removed by the self-heal;
+    # foreign providers (e.g. "openai") are preserved untouched.
+    unattributed = [
+        n
+        for n in prior_doc.get("provider", {})
+        if n in ALL_PROVIDER_NAMES and n != owned
+    ]
+    print(
+        "  warning: opencode.json carried multiple regional "
+        "providers; the non-attributed entries"
+        + (f" ({', '.join(unattributed)})" if unattributed else "")
+        + " were removed to activate the selected region.  "
+        "This is irreversible — the removed entries are not "
+        "recoverable via `use default`."
+    )
+
+
 def _handle_use_zai(args: argparse.Namespace) -> int:
     """Make Z.ai the default provider for the selected tool.
 
@@ -671,11 +716,26 @@ def _handle_use_zai(args: argparse.Namespace) -> int:
 
     if dry_run:
         # Dry-run is read-only: read state, plan, preview. No lock, no write.
+        # The journal is read here too (read-only) so the preview reflects the
+        # SAME ownership-aware decision the real run would take — otherwise a
+        # doc that activates cleanly would preview as a refusal (issue #61).
+        from zai_python_helper.ownership import OwnershipJournal as _Journal
+
         state = tool.read_state(paths)
-        plan = tool.plan_zai(spec, region, state=state, auth_token=auth_token)
+        journal_records = _Journal(paths.ownership_json).read()
+        plan = tool.plan_zai(
+            spec,
+            region,
+            state=state,
+            auth_token=auth_token,
+            journal_records=journal_records,
+        )
         print("--dry-run: no files written")
         if plan.is_empty:
             print("(no changes — already in desired state)")
+        _warn_self_heal_destruction(
+            state.get(FileTag.OPENCODE), journal_records, plan
+        )
         _apply_plan(paths, plan, dry_run=True)
         return 0
 
@@ -697,16 +757,39 @@ def _handle_use_zai(args: argparse.Namespace) -> int:
         # commit (and so the takeover prior reflects exactly the pre-commit
         # state we are about to overwrite).
         state = tool.read_state(paths)
-        plan = tool.plan_zai(spec, region, state=state, auth_token=auth_token)
+
+        # Read the journal BEFORE planning, still under the lock: a tool may
+        # need prior ownership to plan at all — on a config state that is
+        # ambiguous by document alone, the journal is what distinguishes an
+        # entry we wrote from one the user wrote (issue #61). Reading it here
+        # keeps the snapshot consistent with the state we plan against.
+        journal = OwnershipJournal(paths.ownership_json)
+        journal_records = journal.read()
+
+        plan = tool.plan_zai(
+            spec,
+            region,
+            state=state,
+            auth_token=auth_token,
+            journal_records=journal_records,
+        )
+
+        # If the prior doc carried both regional providers and plan_zai did
+        # NOT refuse, a self-heal just replaced the user's non-attributed
+        # regional entry.  Warn prominently — the deletion is irreversible
+        # (the journal records only OUR apiKey, not the user's entry).
+        _warn_self_heal_destruction(
+            state.get(FileTag.OPENCODE), journal_records, plan
+        )
 
         # Ownership journal (ADR-004): for every field we are about to
         # set/remove, record its PRIOR value/presence + a hash of what we set.
         # take_over is idempotent w.r.t. the restore point (a repeat
         # activation of the same value preserves the ORIGINAL prior), so a
         # re-activation does not lose the user's first pre-activation value.
-        records = tool.extract_takeover(plan, prior_state=state, spec=spec)
-
-        journal = OwnershipJournal(paths.ownership_json)
+        records = tool.extract_takeover(
+            plan, prior_state=state, spec=spec, journal_records=journal_records
+        )
 
         # Hand the journal's FINAL TEXT to the transaction instead of writing
         # it here: the commit layer folds it into the recovery manifest, so
@@ -760,7 +843,9 @@ def _handle_use_default(args: argparse.Namespace) -> int:
         state = tool.read_state(paths)
         journal_records = OwnershipJournal(paths.ownership_json).read()
         decisions = tool.revert_decisions(journal_records, state)[0]
-        plan = tool.plan_revert(state=state, decisions=decisions)
+        plan = tool.plan_revert(
+            state=state, decisions=decisions, journal_records=journal_records
+        )
         _print_refuse_warnings(decisions)
         print("--dry-run: no files written")
         if plan.is_empty:
@@ -777,7 +862,9 @@ def _handle_use_default(args: argparse.Namespace) -> int:
         journal = OwnershipJournal(paths.ownership_json)
         journal_records = journal.read()
         decisions, retired_records = tool.revert_decisions(journal_records, state)
-        plan = tool.plan_revert(state=state, decisions=decisions)
+        plan = tool.plan_revert(
+            state=state, decisions=decisions, journal_records=journal_records
+        )
         _print_refuse_warnings(decisions)
 
         # Persist the retired journal ATOMICALLY WITH the revert (issue #48

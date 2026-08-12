@@ -87,6 +87,7 @@ class CrushTool(Tool):
         *,
         state: dict[FileTag, Any],
         auth_token: str,
+        journal_records: dict[str, Any] | None = None,
     ) -> PatchPlan:
         return cr.plan_zai(
             region, crush_doc=state.get(FileTag.CRUSH), auth_token=auth_token
@@ -97,6 +98,7 @@ class CrushTool(Tool):
         *,
         state: dict[FileTag, Any],
         decisions: dict[str, Any],
+        journal_records: dict[str, Any] | None = None,
     ) -> PatchPlan:
         # Crush's provider key is fixed ("zai"); region is unused by the planner.
         return cr.plan_revert(
@@ -107,7 +109,11 @@ class CrushTool(Tool):
     # Ownership descriptor
     # ------------------------------------------------------------------
 
-    def managed_fields(self, spec: ProviderSpec) -> list[ManagedField]:
+    def managed_fields(
+        self,
+        spec: ProviderSpec,
+        journal_records: dict[str, Any] | None = None,
+    ) -> list[ManagedField]:
         return [
             _ZaiField("api_key", cr.JOURNAL_KEY_APIKEY),
             _ZaiField("base_url", cr.JOURNAL_KEY_BASE_URL),
@@ -121,6 +127,8 @@ class CrushTool(Tool):
         plan: PatchPlan,
         prior_state: dict[FileTag, Any],
         spec: ProviderSpec,
+        *,
+        journal_records: dict[str, Any] | None = None,
     ) -> list[tuple[str, str | None, bool, str | None]]:
         from zai_python_helper.ownership import hash_value
 
