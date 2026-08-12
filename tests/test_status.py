@@ -25,10 +25,10 @@ from zai_python_helper.status import (
     ZSHRC_BLOCK_END,
     ClaudeCodeStatus,
     ZshrcState,
-    _safe_endpoint,
     detect_status,
     mask_key,
     render_status,
+    safe_endpoint,
 )
 
 FORCE_PLAIN = {"use_color": False}
@@ -167,6 +167,138 @@ class TestDetectClaudeCode:
         assert cc.zshrc.managed_block_present is False
         assert cc.zshrc.foreign_exports == []
 
+    def test_detects_registered_non_claude_tools(self, tmp_path):
+        """Status must include the S6 tools, not only the legacy CC block."""
+        paths = Paths.from_home(tmp_path)
+        paths.opencode.parent.mkdir(parents=True, exist_ok=True)
+        paths.opencode.write_text(
+            json.dumps(
+                {
+                    "provider": {
+                        "zai-coding-plan": {"options": {"apiKey": "token"}}
+                    },
+                    "model": "zai-coding-plan/glm-4.6",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        report = detect_status(paths)
+        rows = {row.tool: row for row in report.tool_rows}
+        assert set(rows) == {"opencode", "crush", "factory_droid"}
+        assert rows["opencode"].zai_active is True
+        assert rows["opencode"].region is Region.GLOBAL
+        assert rows["crush"].configured is False
+        assert rows["factory_droid"].configured is False
+
+        rendered = render_status(report, **FORCE_PLAIN)
+        assert "opencode" in rendered
+        assert "Z.ai: active (region: global)" in rendered
+
+    def test_crush_status_row_sanitizes_secret_bearing_base_url(self, tmp_path):
+        """Regression: CrushTool.status_row() built its ``detail`` string
+        from the raw providers.zai.base_url read straight off disk. A
+        base_url with credentials embedded in the query string (or
+        userinfo) would leak in cleartext via ``detail``, violating the
+        StatusRow.detail invariant (MUST NOT carry secrets)."""
+        paths = Paths.from_home(tmp_path)
+        paths.crush.parent.mkdir(parents=True, exist_ok=True)
+        secret_url = "https://api.z.ai/api/paas/v4?api_key=SUPERSECRET123&token=abc"
+        paths.crush.write_text(
+            json.dumps(
+                {
+                    "providers": {
+                        "zai": {
+                            "api_key": "irrelevant-token",
+                            "base_url": secret_url,
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        report = detect_status(paths)
+        rows = {row.tool: row for row in report.tool_rows}
+        crush_row = rows["crush"]
+
+        # The secrets must never appear in the detail string.
+        assert "SUPERSECRET123" not in crush_row.detail
+        assert "abc" not in crush_row.detail
+        # The sanitized detail still shows a recognizable host.
+        assert "api.z.ai" in crush_row.detail
+
+        rendered = render_status(report, **FORCE_PLAIN)
+        assert "SUPERSECRET123" not in rendered
+        assert "abc" not in rendered
+        assert "api.z.ai" in rendered
+
+    def test_crush_status_row_malformed_port_does_not_crash(self, tmp_path):
+        """Regression: a syntactically invalid port (e.g. from adversarial
+        or corrupted config) makes ``urlsplit(...).port`` raise ValueError
+        with the raw offending substring in its message. That access sat
+        OUTSIDE safe_endpoint's try/except, so it crashed the status
+        command and could leak a secret-shaped fragment via the exception
+        message. status_row() must degrade gracefully instead."""
+        paths = Paths.from_home(tmp_path)
+        paths.crush.parent.mkdir(parents=True, exist_ok=True)
+        bad_port_url = "https://api.z.ai:SUPERSECRET/path"
+        paths.crush.write_text(
+            json.dumps(
+                {
+                    "providers": {
+                        "zai": {
+                            "api_key": "irrelevant-token",
+                            "base_url": bad_port_url,
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        report = detect_status(paths)  # must not raise
+        rows = {row.tool: row for row in report.tool_rows}
+        crush_row = rows["crush"]
+
+        assert "SUPERSECRET" not in crush_row.detail
+
+        rendered = render_status(report, **FORCE_PLAIN)  # must not raise
+        assert "SUPERSECRET" not in rendered
+
+    @pytest.mark.parametrize("bad_value", [12345, ["a"], {"x": 1}, True])
+    def test_crush_status_row_non_string_base_url_does_not_crash(
+        self, tmp_path, bad_value
+    ):
+        """Regression: a non-string base_url (schema drift / malformed
+        config) crashed ``safe_endpoint`` on ``url.strip()`` with an
+        uncaught AttributeError, since that call sat outside the function's
+        try/except. status_row() must degrade, not crash."""
+        paths = Paths.from_home(tmp_path)
+        paths.crush.parent.mkdir(parents=True, exist_ok=True)
+        paths.crush.write_text(
+            json.dumps(
+                {
+                    "providers": {
+                        "zai": {
+                            "api_key": "irrelevant-token",
+                            "base_url": bad_value,
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        report = detect_status(paths)  # must not raise
+        rows = {row.tool: row for row in report.tool_rows}
+        crush_row = rows["crush"]
+
+        assert "(malformed endpoint)" in crush_row.detail
+
+        rendered = render_status(report, **FORCE_PLAIN)  # must not raise
+        assert "(malformed endpoint)" in rendered
+
     @pytest.mark.parametrize(
         "url,region",
         [
@@ -183,7 +315,7 @@ class TestDetectClaudeCode:
         assert cc.zai_active is True
         assert cc.region is region
         # base_url is the sanitized origin (scheme+host), not the raw URL.
-        assert cc.base_url == _safe_endpoint(url)
+        assert cc.base_url == safe_endpoint(url)
 
     def test_non_zai_endpoint_is_inactive(self, tmp_path):
         # The real Anthropic endpoint is "not Z.ai" → inactive, no region.
@@ -309,6 +441,23 @@ class TestDetectClaudeCode:
         out = render_status(detect_status(Paths.from_home(tmp_path)), **FORCE_PLAIN)
         assert "CREDENTIAL" not in out
         assert "secret" not in out
+
+    def test_safe_endpoint_malformed_port_fail_closed(self):
+        """Regression: ``urlsplit(...).port`` lazily validates and raises
+        ValueError for a syntactically invalid port, with the raw
+        offending substring embedded in the exception message. Must not
+        raise, must not leak the substring — fail closed to the
+        placeholder like every other malformed-input case."""
+        result = safe_endpoint("https://api.z.ai:SUPERSECRET/path")
+        assert result == "(malformed endpoint)"
+        assert "SUPERSECRET" not in result
+
+    @pytest.mark.parametrize("bad_value", [12345, ["a"], {"x": 1}, True, None])
+    def test_safe_endpoint_non_string_input_fail_closed(self, bad_value):
+        """Regression: a non-string input crashed on ``url.strip()`` with
+        an uncaught AttributeError, since that call sat outside the
+        try/except. Must not raise; must fail closed to the placeholder."""
+        assert safe_endpoint(bad_value) == "(malformed endpoint)"
 
     def test_credential_in_endpoint_path_not_disclosed(self, tmp_path):
         """Regression (review cycle 5): a credential embedded in the URL

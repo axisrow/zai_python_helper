@@ -962,7 +962,7 @@ Pure: the text this backend WOULD write to remove the block.
 
 ### `ClaudeCodeStatus`
 
-*dataclass — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/status.py#L93)*
+*dataclass — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/status.py#L94)*
 
 Detected state of the Claude Code integration.
 
@@ -983,13 +983,14 @@ Attributes:
 
 ### `StatusReport`
 
-*dataclass — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/status.py#L106)*
+*dataclass — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/status.py#L107)*
 
 The full read-only status of all detected tools.
 
 Attributes:
 
 - `claude_code`: `ClaudeCodeStatus | None`
+- `tool_rows`: `tuple[StatusRow, ...]`
 
 
 ---
@@ -998,7 +999,7 @@ Attributes:
 
 ### `detect_status()`
 
-*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/status.py#L299)*
+*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/status.py#L319)*
 
 ```python
 detect_status(paths: Paths) -> StatusReport
@@ -1006,8 +1007,8 @@ detect_status(paths: Paths) -> StatusReport
 
 Read all tool configs and return a `StatusReport`.
 
-Read-only and side-effect free. Today only Claude Code is detected;
-OpenCode/Crush/Factory Droid join after S6.
+Read-only and side-effect free. Claude Code keeps its rich legacy report;
+the other registered tools expose their generic `StatusRow` values.
 
 ---
 
@@ -1015,7 +1016,7 @@ OpenCode/Crush/Factory Droid join after S6.
 
 ### `render_status()`
 
-*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/status.py#L377)*
+*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/status.py#L409)*
 
 ```python
 render_status(report: StatusReport, stream, use_color: bool | None) -> str
