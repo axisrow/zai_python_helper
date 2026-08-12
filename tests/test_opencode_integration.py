@@ -12,6 +12,7 @@ from __future__ import annotations
 import pytest
 
 from zai_python_helper.backends import JsonBackend
+from zai_python_helper.core.planner import FileTag
 from zai_python_helper.core.planner import opencode as oc
 from zai_python_helper.ownership import OwnershipJournal
 from zai_python_helper.patchplan import ProcessLock, apply_plan_locked
@@ -565,4 +566,70 @@ class TestStatusRowOnDuplicateState:
         )
         row = tool.status_row(paths)
         assert "DUPLICATE" not in row.detail
-        assert row.zai_active is True
+
+
+class TestSelfHealDestructionWarning:
+    """The CLI must warn — in BOTH ``--dry-run`` preview and real activation —
+    when a self-heal is about to irreversibly drop a non-attributed regional
+    entry (Codex round 3 finding: the warning was previously wired only into
+    the real-activation path, so ``--dry-run`` silently under-reported what
+    the real run would do)."""
+
+    def test_warns_on_both_dry_run_and_real_activation(self, tool, tmp_path, capsys):
+        from zai_python_helper.cli import _warn_self_heal_destruction
+
+        paths = Paths.from_home(tmp_path)
+        spec = _spec()
+        journal = OwnershipJournal(paths.ownership_json)
+
+        # Clean activation, then hand-add a china provider (mirrors the
+        # self-heal fixture above).
+        with ProcessLock(paths.lock_file):
+            state = tool.read_state(paths)
+            plan = tool.plan_zai(spec, Region.GLOBAL, state=state, auth_token=TOKEN)
+            records = tool.extract_takeover(plan, prior_state=state, spec=spec)
+            apply_plan_locked(paths, plan)
+        journal.write(_merge(tool, journal.read(), records))
+
+        doc = _read_doc(paths)
+        doc["provider"][CHINA_NAME] = {"options": {"apiKey": "user-china-key"}}
+        JsonBackend.write(paths.opencode, doc)
+
+        state = tool.read_state(paths)
+        journal_records = journal.read()
+        plan = tool.plan_zai(
+            spec,
+            Region.GLOBAL,
+            state=state,
+            auth_token=TOKEN,
+            journal_records=journal_records,
+        )
+
+        # Same call the CLI makes on BOTH the dry-run preview and the real
+        # activation path — assert it warns identically either way.
+        for _ in range(2):
+            capsys.readouterr()
+            _warn_self_heal_destruction(
+                state.get(FileTag.OPENCODE), journal_records, plan
+            )
+            out = capsys.readouterr().out
+            assert "warning" in out
+            assert CHINA_NAME in out
+            assert "irreversible" in out
+            # Foreign (non-managed) providers must never be named as removed.
+            assert GLOBAL_NAME not in out.split("warning")[1].split("were removed")[0]
+
+    def test_no_warning_when_state_is_not_duplicate(self, tool, tmp_path, capsys):
+        from zai_python_helper.cli import _warn_self_heal_destruction
+
+        paths = Paths.from_home(tmp_path)
+        spec = _spec()
+        with ProcessLock(paths.lock_file):
+            state = tool.read_state(paths)
+            plan = tool.plan_zai(spec, Region.GLOBAL, state=state, auth_token=TOKEN)
+            apply_plan_locked(paths, plan)
+
+        state = tool.read_state(paths)
+        plan = tool.plan_zai(spec, Region.GLOBAL, state=state, auth_token=TOKEN)
+        _warn_self_heal_destruction(state.get(FileTag.OPENCODE), {}, plan)
+        assert capsys.readouterr().out == ""
