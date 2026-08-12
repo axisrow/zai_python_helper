@@ -27,6 +27,7 @@ from zai_python_helper.doctor import (
     run_doctor,
     urllib_post,
 )
+from zai_python_helper.ownership import hash_value
 from zai_python_helper.paths import Paths
 
 #: The auth-enforcing probe path doctor appends to the base URL.
@@ -87,6 +88,39 @@ def _write_settings(paths: Paths, env: dict[str, str] | None) -> None:
     paths.claude_settings.parent.mkdir(parents=True, exist_ok=True)
     doc = {"env": env} if env is not None else {}
     paths.claude_settings.write_text(json.dumps(doc))
+
+
+def _write_opencode_duplicate(
+    paths: Paths, *, global_key: str, china_key: str, journal_hash: str | None = None,
+    active: bool = True,
+) -> None:
+    paths.opencode.parent.mkdir(parents=True, exist_ok=True)
+    paths.opencode.write_text(
+        json.dumps(
+            {
+                "provider": {
+                    "zai-coding-plan": {"options": {"apiKey": global_key}},
+                    "zhipuai-coding-plan": {"options": {"apiKey": china_key}},
+                }
+            }
+        )
+    )
+    if journal_hash is not None:
+        paths.ownership_json.parent.mkdir(parents=True, exist_ok=True)
+        paths.ownership_json.write_text(
+            json.dumps(
+                {
+                    "opencode": {
+                        "provider.apiKey": {
+                            "prior_value": None,
+                            "prior_present": False,
+                            "set_hash": journal_hash,
+                            "active": active,
+                        }
+                    }
+                }
+            )
+        )
 
 
 def _run(paths: Paths, *, environ: dict[str, str] | None = None, **kwargs) -> tuple[int, str]:
@@ -153,6 +187,59 @@ def test_accepts_zai_endpoint(tmp_path):
     # (WARN). Exit 0 (WARNs don't fail).
     assert code == 0
     assert "[✓] Z.ai endpoint" in out
+
+
+# --------------------------------------------------------------------------- #
+# OpenCode duplicate regional providers (issue #65).
+# --------------------------------------------------------------------------- #
+
+
+def test_opencode_duplicate_check_skipped_when_absent(tmp_path):
+    paths = Paths.from_home(tmp_path)
+    _write_settings(paths, {"ANTHROPIC_BASE_URL": _ZAI_URL})
+    code, out = _run(paths, environ={})
+    assert code == 0
+    assert "OpenCode regional providers" not in out
+
+
+def test_opencode_duplicate_check_fails_when_unattributable(tmp_path):
+    paths = Paths.from_home(tmp_path)
+    _write_settings(paths, {"ANTHROPIC_BASE_URL": _ZAI_URL})
+    _write_opencode_duplicate(paths, global_key="user-global", china_key="user-china")
+    code, out = _run(paths, environ={})
+    assert code == 1
+    assert "[✗] OpenCode regional providers" in out
+    assert "use default" in out
+
+
+def test_opencode_duplicate_check_warns_when_helper_entry_is_attributable(tmp_path):
+    paths = Paths.from_home(tmp_path)
+    _write_settings(paths, {"ANTHROPIC_BASE_URL": _ZAI_URL})
+    _write_opencode_duplicate(
+        paths,
+        global_key="helper-key",
+        china_key="user-china",
+        journal_hash=hash_value("helper-key"),
+    )
+    code, out = _run(paths, environ={})
+    assert code == 0
+    assert "[!] OpenCode regional providers" in out
+    assert "use zai" in out
+
+
+def test_opencode_duplicate_check_fails_for_retired_record(tmp_path):
+    paths = Paths.from_home(tmp_path)
+    _write_settings(paths, {"ANTHROPIC_BASE_URL": _ZAI_URL})
+    _write_opencode_duplicate(
+        paths,
+        global_key="old-helper-key",
+        china_key="user-china",
+        journal_hash=hash_value("old-helper-key"),
+        active=False,
+    )
+    code, out = _run(paths, environ={})
+    assert code == 1
+    assert "[✗] OpenCode regional providers" in out
 
 
 # --------------------------------------------------------------------------- #

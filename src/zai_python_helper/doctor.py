@@ -647,6 +647,47 @@ def _check_mcp_installed(paths: Paths) -> CheckResult:
     )
 
 
+def _check_opencode_duplicate_providers(paths: Paths) -> CheckResult | None:
+    """Report an OpenCode duplicate-provider state, when one is present.
+
+    This is deliberately an informational, read-only check.  A duplicate
+    whose one entry is provably ours can be repaired by ``use zai``; an
+    unattributable (including retired-journal) duplicate requires a hand
+    edit, because ``use default`` must not guess which credential to remove.
+    Any read or parse failure skips the check so ``doctor`` never turns an
+    unreadable optional OpenCode config into an unrelated failure.
+    """
+    try:
+        from zai_python_helper.backends import JsonBackend
+        from zai_python_helper.core.planner import opencode
+        from zai_python_helper.ownership import OwnershipJournal
+
+        doc = JsonBackend.read(paths.opencode)
+        if not opencode.has_duplicate_regional_providers(doc):
+            return None
+        journal = OwnershipJournal(paths.ownership_json).read()
+        owned = opencode.owned_regional_provider_name(doc, journal)
+    except Exception:
+        return None
+
+    if owned is not None:
+        return CheckResult(
+            name="OpenCode regional providers",
+            verdict="warn",
+            detail=f"duplicate state; helper owns {owned}",
+            hint="run `zai-python-helper use zai` to self-heal the duplicate",
+        )
+    return CheckResult(
+        name="OpenCode regional providers",
+        verdict="fail",
+        detail="duplicate state; neither entry is attributable to the helper",
+        hint=(
+            "edit opencode.json by hand and delete the unwanted regional "
+            "provider entry; `use default` will not clear it"
+        ),
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Public entry point.
 # --------------------------------------------------------------------------- #
@@ -731,5 +772,11 @@ def run_doctor(
     # PASS (installing a preset is an explicit opt-in, never a broken link), so
     # it contributes nothing to the exit code; it surfaces what IS installed.
     _emit(_check_mcp_installed(paths))
+
+    # 7. OpenCode duplicate regional providers — optional, READ-ONLY, and only
+    # emitted when the problematic state is actually present.
+    duplicate = _check_opencode_duplicate_providers(paths)
+    if duplicate is not None:
+        _emit(duplicate)
 
     return 1 if any(r.verdict == "fail" for r in results) else 0
