@@ -58,8 +58,8 @@ between English / Русский / 中文.
 
 ## Human-docs i18n rules
 
-- **English is the source of truth** (`docs/human/en/`). Translate into
-  `docs/human/ru/` and `docs/human/zh/`.
+- **English is the source of truth** (`docs/en/`). Translate into `docs/ru/`
+  and `docs/zh/`.
 - **Structure is synchronized.** A CI check verifies `ru/` and `zh/` contain the
   same set of `.md` files as `en/`. If you add a page to `en/`, add the matching
   page (even a stub) to `ru/` and `zh/` in the same PR.
