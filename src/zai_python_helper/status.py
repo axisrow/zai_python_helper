@@ -29,6 +29,7 @@ from urllib.parse import urlsplit
 
 from zai_python_helper.paths import Paths
 from zai_python_helper.regions import Region
+from zai_python_helper.tools.base import StatusRow
 
 # ADR-003: the owned marker-fenced block we install in ~/.zshrc. We detect
 # its presence to report "managed block installed" — we do NOT parse or
@@ -108,6 +109,9 @@ class StatusReport:
     """The full read-only status of all detected tools."""
 
     claude_code: ClaudeCodeStatus | None = None
+    # Generic rows for the S6 tools.  ``claude_code`` remains as the rich,
+    # backwards-compatible report used by the original status API.
+    tool_rows: tuple[StatusRow, ...] = ()
 
 
 def _host_of(url: str) -> str:
@@ -299,10 +303,22 @@ def _detect_claude_code(paths: Paths) -> ClaudeCodeStatus:
 def detect_status(paths: Paths) -> StatusReport:
     """Read all tool configs and return a :class:`StatusReport`.
 
-    Read-only and side-effect free. Today only Claude Code is detected;
-    OpenCode/Crush/Factory Droid join after S6.
+    Read-only and side-effect free. Claude Code keeps its rich legacy report;
+    the other registered tools expose their generic ``StatusRow`` values.
     """
-    return StatusReport(claude_code=_detect_claude_code(paths))
+    claude_code = _detect_claude_code(paths)
+
+    # Import lazily to keep this read-only module's legacy import surface
+    # lightweight and to avoid making the ClaudeCodeTool -> status_row adapter
+    # recursive.
+    from zai_python_helper.tools import REGISTRY
+
+    rows = tuple(
+        REGISTRY[name].status_row(paths)
+        for name in sorted(REGISTRY)
+        if name != "claude_code"
+    )
+    return StatusReport(claude_code=claude_code, tool_rows=rows)
 
 
 # ---------------------------------------------------------------------------
@@ -403,6 +419,16 @@ def render_status(
     if cc is not None:
         blocks.append(
             "\n".join(_render_claude_code(cc, use_color=use_color))
+        )
+
+    for row in report.tool_rows:
+        region = row.region.value if row.region is not None else "-"
+        state = "active" if row.zai_active else "inactive"
+        detail = f" {row.detail}" if row.detail else ""
+        blocks.append(
+            f"{row.tool}\n"
+            f"{'-' * len(row.tool)}\n"
+            f"  Z.ai: {state} (region: {region}){detail}"
         )
 
     if not blocks:

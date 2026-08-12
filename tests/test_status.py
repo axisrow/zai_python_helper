@@ -167,6 +167,34 @@ class TestDetectClaudeCode:
         assert cc.zshrc.managed_block_present is False
         assert cc.zshrc.foreign_exports == []
 
+    def test_detects_registered_non_claude_tools(self, tmp_path):
+        """Status must include the S6 tools, not only the legacy CC block."""
+        paths = Paths.from_home(tmp_path)
+        paths.opencode.parent.mkdir(parents=True, exist_ok=True)
+        paths.opencode.write_text(
+            json.dumps(
+                {
+                    "provider": {
+                        "zai-coding-plan": {"options": {"apiKey": "token"}}
+                    },
+                    "model": "zai-coding-plan/glm-4.6",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        report = detect_status(paths)
+        rows = {row.tool: row for row in report.tool_rows}
+        assert set(rows) == {"opencode", "crush", "factory_droid"}
+        assert rows["opencode"].zai_active is True
+        assert rows["opencode"].region is Region.GLOBAL
+        assert rows["crush"].configured is False
+        assert rows["factory_droid"].configured is False
+
+        rendered = render_status(report, **FORCE_PLAIN)
+        assert "opencode" in rendered
+        assert "Z.ai: active (region: global)" in rendered
+
     @pytest.mark.parametrize(
         "url,region",
         [
