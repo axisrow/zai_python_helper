@@ -54,6 +54,33 @@ zai-python-helper use zai \
   --capabilities "effort,thinking"
 ```
 
+## 上游参考（`@z_ai/coding-helper` 0.0.7）
+
+对上游包的黑盒测试确认：Claude Code **不会读取** `customModels` 数组。上游工具在
+`~/.claude/settings.json` 中通过环境变量配置 Claude Code：
+
+```json
+{
+  "env": {
+    "ANTHROPIC_AUTH_TOKEN": "<token>",
+    "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
+    "API_TIMEOUT_MS": "3000000",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": 1
+  }
+}
+```
+
+它还会将 `"hasCompletedOnboarding": true` 合并到 `~/.claude.json`，并保留无关设置。
+`customModels` 是 Factory Droid 的格式，不是 Claude Code 的格式。无头模式下可使用：
+
+```bash
+chelper auth glm_coding_plan_global <token>
+chelper auth reload claude
+```
+
+第一条命令验证并把令牌保存到 `~/.chelper/config.yaml`，第二条将配置应用到 Claude Code。
+`chelper enter claude-code` 需要交互式 TTY，不适合作为无头脚本的替代方案。
+
 ## 区域
 
 每个模式都接受 `--region`。区域选择 Z.ai 端点：

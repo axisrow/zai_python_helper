@@ -60,6 +60,36 @@ zai-python-helper use zai \
   --capabilities "effort,thinking"
 ```
 
+## Эталон оригинала (`@z_ai/coding-helper` 0.0.7)
+
+Black-box-тестирование оригинального пакета подтверждает: Claude Code **не
+читает** массив `customModels`. Оригинал настраивает Claude Code переменными
+окружения в `~/.claude/settings.json`:
+
+```json
+{
+  "env": {
+    "ANTHROPIC_AUTH_TOKEN": "<token>",
+    "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
+    "API_TIMEOUT_MS": "3000000",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": 1
+  }
+}
+```
+
+Также он добавляет слиянием `"hasCompletedOnboarding": true` в
+`~/.claude.json`, сохраняя несвязанные настройки. `customModels` — формат
+Factory Droid, а не Claude Code. Безголовая последовательность оригинала:
+
+```bash
+chelper auth glm_coding_plan_global <token>
+chelper auth reload claude
+```
+
+Первая команда проверяет и сохраняет токен в `~/.chelper/config.yaml`, вторая
+применяет его к Claude Code. `chelper enter claude-code` рассчитан на
+интерактивный TTY и не заменяет эту последовательность в скрипте.
+
 ## Регионы
 
 Любой режим принимает `--region`. Регион выбирает эндпоинт Z.ai:
