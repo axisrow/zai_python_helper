@@ -197,6 +197,18 @@ def test_install_into_doc_uses_correct_section_per_tool():
     assert "mcpServers" in claude and "mcp" not in claude
 
 
+def test_install_into_doc_rejects_malformed_section_without_overwriting_it():
+    """A non-object MCP section must fail closed rather than lose user data."""
+    with pytest.raises(ValueError, match="mcpServers.*JSON object"):
+        install_into_doc(
+            {"mcpServers": ["user-owned-value"]},
+            Tool.CLAUDE_CODE,
+            "zread",
+            _KEY,
+            Region.GLOBAL,
+        )
+
+
 def test_uninstall_from_doc_removes_only_its_id_and_drops_empty_section():
     """uninstall removes ONLY the named id; siblings survive; empty section dropped."""
     doc = {
@@ -491,5 +503,4 @@ def test_cli_mcp_uninstall_dry_run_does_not_mutate(_isolate_home):
     # And the preview must NOT claim it was removed.
     assert "removed" not in out
     assert "would remove" in out or "dry-run" in out.lower()
-
 
