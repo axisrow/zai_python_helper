@@ -327,6 +327,20 @@ class TestDetectClaudeCode:
         assert cc.region is None
         assert cc.base_url == "https://api.anthropic.com"
 
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://supersecret.api.z.ai/api/coding/paas/v4",
+            "https://token.open.bigmodel.cn/api/anthropic",
+        ],
+    )
+    def test_unrecognized_host_is_not_echoed(self, url):
+        """A secret-shaped hostname must fail closed, not be rendered."""
+        result = safe_endpoint(url)
+        assert result == "(malformed endpoint)"
+        assert "supersecret" not in result
+        assert "token" not in result
+
     def test_auth_token_key_masked(self, tmp_path):
         _write_settings(
             tmp_path,
@@ -417,6 +431,18 @@ class TestDetectClaudeCode:
         assert cc.base_url == "https://api.z.ai"
         assert "secretPass" not in (cc.base_url or "")
         assert "sk-hiddenkey" not in (cc.base_url or "")
+
+    def test_secret_bearing_hostname_is_not_disclosed(self, tmp_path):
+        """Unknown endpoint hosts are replaced before status rendering."""
+        secret_url = "https://supersecret.api.z.ai/api/anthropic"
+        _write_settings(tmp_path, {"ANTHROPIC_BASE_URL": secret_url})
+
+        cc = _cc(tmp_path)
+        assert cc.zai_active is False
+        assert cc.region is None
+        assert cc.base_url == "(malformed endpoint)"
+        out = render_status(detect_status(Paths.from_home(tmp_path)), **FORCE_PLAIN)
+        assert "supersecret" not in out
 
     @pytest.mark.parametrize(
         "malformed",
