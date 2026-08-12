@@ -480,6 +480,31 @@ def test_cli_mcp_install_unknown_preset_errors(_isolate_home):
     assert "Unknown MCP preset" in err
 
 
+def test_cli_mcp_install_malformed_section_errors_cleanly(_isolate_home):
+    """A malformed MCP section surfaces as a clean error, not a traceback.
+
+    install_into_doc fails closed with a ValueError to avoid overwriting the
+    user's malformed-but-owned section; the CLI must translate that into the
+    project's ZaiPythonHelperError contract (`error: <msg>` + exit 1), not let
+    a bare ValueError escape __main__'s error boundary as an uncaught
+    traceback. Reproduces the malformed section directly on disk (the pure
+    install_into_doc test above does not exercise this CLI path).
+    """
+    path = tool_config_path(Tool.CLAUDE_CODE, _isolate_home)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"mcpServers": ["not-an-object"]}), encoding="utf-8")
+
+    rc, _out, err = _run_cli(
+        ["mcp", "install", "zread", "--tool", "claude-code", "--api-key", _KEY]
+    )
+    assert rc != 0
+    assert "must be a JSON object" in err
+    # Fail-closed: the malformed section must be left untouched, not replaced.
+    assert json.loads(path.read_text(encoding="utf-8")) == {
+        "mcpServers": ["not-an-object"]
+    }
+
+
 def test_cli_mcp_uninstall_dry_run_does_not_mutate(_isolate_home):
     """`mcp uninstall --dry-run` must be read-only (cycle-review regression).
 

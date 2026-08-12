@@ -965,7 +965,7 @@ def _handle_mcp_install(args: argparse.Namespace) -> int:
     ``--dry-run`` is read-only: it shows the entry that WOULD be written,
     writes nothing.
     """
-    from zai_python_helper.errors import ValidationError
+    from zai_python_helper.errors import ConfigurationError, ValidationError
     from zai_python_helper.mcp import (
         PRESET_MCP_SERVICES,
         build_mcp_entry,
@@ -1004,7 +1004,14 @@ def _handle_mcp_install(args: argparse.Namespace) -> int:
     from zai_python_helper.io.secrets import resolve_key
 
     key = resolve_key(getattr(args, "api_key", None))
-    changed = install_mcp(tool, mcp_id, key, region)
+    try:
+        changed = install_mcp(tool, mcp_id, key, region)
+    except ValueError as e:
+        # install_mcp/install_into_doc fail closed with a bare ValueError on a
+        # malformed (non-object) MCP section to avoid overwriting user-owned
+        # data. Translate it into the project's error contract here so the
+        # CLI reports a one-line message instead of an uncaught traceback.
+        raise ConfigurationError(str(e)) from e
     label = "installed" if changed else "already installed (no change)"
     print(f"  {mcp_id}: {label} for {tool.value}")
     return 0
