@@ -423,7 +423,19 @@ def install_into_doc(
     # alias the input's nested mapping.
     out: dict[str, Any] = dict(doc) if doc else {}
     section_key = _MCP_SECTION[tool]
-    section = dict(out.get(section_key) or {})
+    existing_section = out.get(section_key)
+    if existing_section is None:
+        section: dict[str, Any] = {}
+    elif isinstance(existing_section, dict):
+        section = dict(existing_section)
+    else:
+        # Never replace a malformed user-owned section with a new mapping.
+        # That would silently discard its contents instead of preserving the
+        # deep-merge contract; fail closed so the caller can repair it first.
+        raise ValueError(
+            f"MCP section {section_key!r} must be a JSON object, "
+            f"got {type(existing_section).__name__}"
+        )
     section[mcp_id] = entry
     out[section_key] = section
     return out

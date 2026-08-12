@@ -197,6 +197,18 @@ def test_install_into_doc_uses_correct_section_per_tool():
     assert "mcpServers" in claude and "mcp" not in claude
 
 
+def test_install_into_doc_rejects_malformed_section_without_overwriting_it():
+    """A non-object MCP section must fail closed rather than lose user data."""
+    with pytest.raises(ValueError, match="mcpServers.*JSON object"):
+        install_into_doc(
+            {"mcpServers": ["user-owned-value"]},
+            Tool.CLAUDE_CODE,
+            "zread",
+            _KEY,
+            Region.GLOBAL,
+        )
+
+
 def test_uninstall_from_doc_removes_only_its_id_and_drops_empty_section():
     """uninstall removes ONLY the named id; siblings survive; empty section dropped."""
     doc = {
@@ -468,6 +480,31 @@ def test_cli_mcp_install_unknown_preset_errors(_isolate_home):
     assert "Unknown MCP preset" in err
 
 
+def test_cli_mcp_install_malformed_section_errors_cleanly(_isolate_home):
+    """A malformed MCP section surfaces as a clean error, not a traceback.
+
+    install_into_doc fails closed with a ValueError to avoid overwriting the
+    user's malformed-but-owned section; the CLI must translate that into the
+    project's ZaiPythonHelperError contract (`error: <msg>` + exit 1), not let
+    a bare ValueError escape __main__'s error boundary as an uncaught
+    traceback. Reproduces the malformed section directly on disk (the pure
+    install_into_doc test above does not exercise this CLI path).
+    """
+    path = tool_config_path(Tool.CLAUDE_CODE, _isolate_home)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"mcpServers": ["not-an-object"]}), encoding="utf-8")
+
+    rc, _out, err = _run_cli(
+        ["mcp", "install", "zread", "--tool", "claude-code", "--api-key", _KEY]
+    )
+    assert rc != 0
+    assert "must be a JSON object" in err
+    # Fail-closed: the malformed section must be left untouched, not replaced.
+    assert json.loads(path.read_text(encoding="utf-8")) == {
+        "mcpServers": ["not-an-object"]
+    }
+
+
 def test_cli_mcp_uninstall_dry_run_does_not_mutate(_isolate_home):
     """`mcp uninstall --dry-run` must be read-only (cycle-review regression).
 
@@ -491,5 +528,4 @@ def test_cli_mcp_uninstall_dry_run_does_not_mutate(_isolate_home):
     # And the preview must NOT claim it was removed.
     assert "removed" not in out
     assert "would remove" in out or "dry-run" in out.lower()
-
 
