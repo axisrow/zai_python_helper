@@ -138,7 +138,7 @@ def _classify_region(base_url: str) -> Region | None:
     return None
 
 
-def safe_endpoint(url: str) -> str:
+def safe_endpoint(url: object) -> str:
     """Return a credential-free, recognizable form of a URL for status.
 
     **Whitelist approach (fail-closed for any malformed input).** Rather
@@ -147,30 +147,43 @@ def safe_endpoint(url: str) -> str:
     displayed endpoint is REBUILT only from a small set of validated
     components: a known scheme, the parsed hostname, an optional port, and
     a path that is truncated to a short prefix. The raw value is never
-    echoed. If parsing fails or yields no valid hostname, return a
-    placeholder — ``status`` must tolerate malformed config without leaking
-    or crashing. Pure parsing — no network.
+    echoed. If parsing fails, yields no valid hostname, or any component
+    (including the port) fails validation, return a placeholder — ``status``
+    must tolerate malformed config without leaking or crashing. Pure
+    parsing — no network.
+
+    Accepts any value, not just ``str`` — config read from disk (JSON,
+    zshrc, etc.) is untrusted and may hold an int/list/dict/bool where a
+    URL string is expected. Always returns a safe string; never raises.
 
     Public: also used by other tools' ``status_row()`` (e.g. Crush) to
     sanitize a raw config value before it is embedded in displayed text.
     """
-    try:
-        parts = urlsplit(url.strip())
-    except ValueError:
-        # NFKC-invalid netloc / other malformed authority — urlsplit raises.
+    if not isinstance(url, str):
         return "(malformed endpoint)"
 
-    scheme = parts.scheme.lower()
-    host = parts.hostname or ""
-    # Only http(s) schemes carry an API endpoint worth showing; anything
-    # else (file:, ftp:, empty, garbage) is not a Z.ai endpoint.
-    if scheme not in ("http", "https") or not host:
+    try:
+        parts = urlsplit(url.strip())
+        scheme = parts.scheme.lower()
+        host = parts.hostname or ""
+        # Only http(s) schemes carry an API endpoint worth showing; anything
+        # else (file:, ftp:, empty, garbage) is not a Z.ai endpoint.
+        if scheme not in ("http", "https") or not host:
+            return "(malformed endpoint)"
+        # Show scheme + host + port ONLY. The path is deliberately omitted:
+        # a credential can be embedded in the path (e.g. .../api/<key>), and
+        # the status report needs only the origin to identify the endpoint —
+        # the full path is not diagnostic and is never echoed. ``.port`` is
+        # a lazily-validated property and can itself raise ValueError for a
+        # syntactically invalid port (e.g. non-numeric) — kept inside this
+        # same try so a bad port falls back to the placeholder rather than
+        # leaking the raw offending substring via an uncaught exception.
+        port = f":{parts.port}" if parts.port else ""
+    except ValueError:
+        # NFKC-invalid netloc, invalid port, or other malformed authority —
+        # urlsplit()/`.port` raises. No partial result is returned: a
+        # malformed component means the whole endpoint is unsafe to show.
         return "(malformed endpoint)"
-    # Show scheme + host + port ONLY. The path is deliberately omitted: a
-    # credential can be embedded in the path (e.g. .../api/<key>), and the
-    # status report needs only the origin to identify the endpoint — the
-    # full path is not diagnostic and is never echoed.
-    port = f":{parts.port}" if parts.port else ""
     return f"{scheme}://{host}{port}"
 
 

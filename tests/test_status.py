@@ -233,6 +233,72 @@ class TestDetectClaudeCode:
         assert "abc" not in rendered
         assert "api.z.ai" in rendered
 
+    def test_crush_status_row_malformed_port_does_not_crash(self, tmp_path):
+        """Regression: a syntactically invalid port (e.g. from adversarial
+        or corrupted config) makes ``urlsplit(...).port`` raise ValueError
+        with the raw offending substring in its message. That access sat
+        OUTSIDE safe_endpoint's try/except, so it crashed the status
+        command and could leak a secret-shaped fragment via the exception
+        message. status_row() must degrade gracefully instead."""
+        paths = Paths.from_home(tmp_path)
+        paths.crush.parent.mkdir(parents=True, exist_ok=True)
+        bad_port_url = "https://api.z.ai:SUPERSECRET/path"
+        paths.crush.write_text(
+            json.dumps(
+                {
+                    "providers": {
+                        "zai": {
+                            "api_key": "irrelevant-token",
+                            "base_url": bad_port_url,
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        report = detect_status(paths)  # must not raise
+        rows = {row.tool: row for row in report.tool_rows}
+        crush_row = rows["crush"]
+
+        assert "SUPERSECRET" not in crush_row.detail
+
+        rendered = render_status(report, **FORCE_PLAIN)  # must not raise
+        assert "SUPERSECRET" not in rendered
+
+    @pytest.mark.parametrize("bad_value", [12345, ["a"], {"x": 1}, True])
+    def test_crush_status_row_non_string_base_url_does_not_crash(
+        self, tmp_path, bad_value
+    ):
+        """Regression: a non-string base_url (schema drift / malformed
+        config) crashed ``safe_endpoint`` on ``url.strip()`` with an
+        uncaught AttributeError, since that call sat outside the function's
+        try/except. status_row() must degrade, not crash."""
+        paths = Paths.from_home(tmp_path)
+        paths.crush.parent.mkdir(parents=True, exist_ok=True)
+        paths.crush.write_text(
+            json.dumps(
+                {
+                    "providers": {
+                        "zai": {
+                            "api_key": "irrelevant-token",
+                            "base_url": bad_value,
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        report = detect_status(paths)  # must not raise
+        rows = {row.tool: row for row in report.tool_rows}
+        crush_row = rows["crush"]
+
+        assert "(malformed endpoint)" in crush_row.detail
+
+        rendered = render_status(report, **FORCE_PLAIN)  # must not raise
+        assert "(malformed endpoint)" in rendered
+
     @pytest.mark.parametrize(
         "url,region",
         [
@@ -375,6 +441,23 @@ class TestDetectClaudeCode:
         out = render_status(detect_status(Paths.from_home(tmp_path)), **FORCE_PLAIN)
         assert "CREDENTIAL" not in out
         assert "secret" not in out
+
+    def test_safe_endpoint_malformed_port_fail_closed(self):
+        """Regression: ``urlsplit(...).port`` lazily validates and raises
+        ValueError for a syntactically invalid port, with the raw
+        offending substring embedded in the exception message. Must not
+        raise, must not leak the substring — fail closed to the
+        placeholder like every other malformed-input case."""
+        result = safe_endpoint("https://api.z.ai:SUPERSECRET/path")
+        assert result == "(malformed endpoint)"
+        assert "SUPERSECRET" not in result
+
+    @pytest.mark.parametrize("bad_value", [12345, ["a"], {"x": 1}, True, None])
+    def test_safe_endpoint_non_string_input_fail_closed(self, bad_value):
+        """Regression: a non-string input crashed on ``url.strip()`` with
+        an uncaught AttributeError, since that call sat outside the
+        try/except. Must not raise; must fail closed to the placeholder."""
+        assert safe_endpoint(bad_value) == "(malformed endpoint)"
 
     def test_credential_in_endpoint_path_not_disclosed(self, tmp_path):
         """Regression (review cycle 5): a credential embedded in the URL
