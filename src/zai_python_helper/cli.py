@@ -920,7 +920,9 @@ def _handle_doctor(args: argparse.Namespace) -> int:
     """
     from zai_python_helper.doctor import run_doctor
 
-    return run_doctor(Paths.default())
+    import sys
+
+    return run_doctor(Paths.default(), progress_stream=sys.stderr)
 
 
 # --------------------------------------------------------------------------- #
