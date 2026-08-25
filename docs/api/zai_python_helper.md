@@ -770,7 +770,7 @@ Value: `{Region.GLOBAL: 'https://api.z.ai/api/coding/paas/v4', Region.CHINA: 'ht
 
 ### `ZAI_ANTHROPIC_BASE_URL_BY_REGION_V2`
 
-*constant — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/regions.py#L52) (`dict[Region, str]`)*
+*constant — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/regions.py#L50) (`dict[Region, str]`)*
 
 Value: `{Region.GLOBAL: 'https://api.z.ai/api/anthropic', Region.CHINA: 'https://open.bigmodel.cn/api/anthropic'}`
 
