@@ -449,8 +449,10 @@ def uninstall_from_doc(
     Pure. Removes ONLY ``<section>[mcp_id]`` — every other entry and every
     foreign top-level key is preserved. A missing doc, missing section, or
     absent ``mcp_id`` is a no-op (idempotent), returning a copy of the input.
-    The section is dropped entirely when uninstalling leaves it empty, so we
-    never write a stray ``"mcpServers": {}`` skeleton into a user's file.
+    The section is retained as an empty object when uninstalling removes its
+    last entry.  Upstream keeps the section key present, and preserving it
+    avoids semantic drift for parsers that distinguish an absent section from
+    an intentionally empty one.
     """
     if not doc:
         return {}
@@ -461,11 +463,10 @@ def uninstall_from_doc(
         return out
     section = dict(section)
     section.pop(mcp_id, None)
-    if section:
-        out[section_key] = section
-    else:
-        # An empty section would be noise in the user's config — drop it.
-        out.pop(section_key, None)
+    # Keep an intentionally empty section.  This matches upstream uninstall
+    # behavior for all four adapters and makes the result unambiguous to
+    # third-party config readers.
+    out[section_key] = section
     return out
 
 
