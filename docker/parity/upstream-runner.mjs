@@ -1,11 +1,11 @@
 // Non-interactive adapter for the pinned @z_ai/coding-helper 0.0.7.
 // The upstream exposes activate/revert/MCP operations through its wizard, so
 // this adapter calls the same manager methods without a TTY or network.
-import { claudeCodeManager } from '@z_ai/coding-helper/dist/lib/claude-code-manager.js';
-import { openCodeManager } from '@z_ai/coding-helper/dist/lib/opencode-manager.js';
-import { crushManager } from '@z_ai/coding-helper/dist/lib/crush-manager.js';
-import { factoryDroidManager } from '@z_ai/coding-helper/dist/lib/factory-droid-manager.js';
-import { PRESET_MCP_SERVICES } from '@z_ai/coding-helper/dist/lib/mcp-manager.js';
+import { claudeCodeManager } from '/usr/local/lib/node_modules/@z_ai/coding-helper/dist/lib/claude-code-manager.js';
+import { openCodeManager } from '/usr/local/lib/node_modules/@z_ai/coding-helper/dist/lib/opencode-manager.js';
+import { crushManager } from '/usr/local/lib/node_modules/@z_ai/coding-helper/dist/lib/crush-manager.js';
+import { factoryDroidManager } from '/usr/local/lib/node_modules/@z_ai/coding-helper/dist/lib/factory-droid-manager.js';
+import { PRESET_MCP_SERVICES } from '/usr/local/lib/node_modules/@z_ai/coding-helper/dist/lib/mcp-manager.js';
 
 const [tool, region, action, mcpId, token] = process.argv.slice(2);
 const plan = region === 'china' ? 'glm_coding_plan_china' : 'glm_coding_plan_global';
