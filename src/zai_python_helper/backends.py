@@ -132,11 +132,14 @@ class JsonBackend:
     def write(path: Path, doc: dict[str, Any]) -> None:
         """Serialize ``doc`` to pretty JSON and write it atomically to ``path``.
 
-        ``indent=2`` + ``sort_keys=False`` (preserve insertion order) + a
-        trailing newline. Sorted keys would shuffle user-owned keys on every
-        write, producing noisy diffs, so we keep insertion order.
+        ``indent=2`` + ``sort_keys=False`` (preserve insertion order), without
+        a trailing newline (matching the upstream JSON writers). Sorted keys
+        would shuffle user-owned keys on every write, producing noisy diffs,
+        so we keep insertion order. Config files remain mode ``0600`` because
+        they may carry authentication credentials; this is an intentional
+        security deviation from upstream's default ``0644`` mode.
         """
-        text = json.dumps(doc, indent=2, ensure_ascii=False) + "\n"
+        text = json.dumps(doc, indent=2, ensure_ascii=False)
         atomic_write_bytes(Path(path), text.encode("utf-8"))
 
     @staticmethod
@@ -145,7 +148,7 @@ class JsonBackend:
 
         Pure: the bytes this backend WOULD write, without touching the FS.
         """
-        return json.dumps(doc, indent=2, ensure_ascii=False) + "\n"
+        return json.dumps(doc, indent=2, ensure_ascii=False)
 
 
 class ShellBackend:
