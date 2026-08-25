@@ -1,36 +1,30 @@
-"""Phase-1 parity: our ``use zai`` config output must match the upstream tool.
+"""Full-HOME Phase-1 parity for the upstream Claude Code configuration path.
 
-Issue #17. This is the FULL behavior-parity test for the Claude Code config path,
-built on the headless equivalent of the upstream's interactive ``enter
-claude-code`` flow pinned by research issue #9:
+The compared flows run in fresh, mounted ``HOME`` directories inside one Docker
+image containing both tools:
 
-    upstream:  chelper auth glm_coding_plan_global <key>   # validates + saves
-               chelper auth reload claude                   # patches Claude Code
-    ours:      zai-python-helper use zai --mode original --api-key <key>
+    upstream: chelper auth glm_coding_plan_global <key>
+              chelper auth reload claude
+    ours:     zai-python-helper use zai --mode original --api-key <key>
 
-Both run INSIDE the parity image (``zai-parity:smoke``) in a fresh isolated HOME
-per tool; we then diff the resulting ``~/.claude/settings.json`` env block and
-``~/.claude.json``. Phase-1 is strict byte-for-byte after token redaction.
+The assertion snapshots every regular file created below ``HOME``.  The file
+set is deliberately closed: an unlisted extra or missing artifact fails.  Four
+intentional, directional exceptions are documented in the constants below:
 
-Why the upstream run needs two fixtures baked into the image (see
-``docker/parity/Dockerfile``):
+* upstream-only ``.chelper/config.yaml`` persists the upstream auth plan/key;
+* ours-only ``.zshrc`` is the headless-first shell warning block (Phase 2);
+* ours-only ownership journal and lock implement ADR-004/ADR-005 (Phase 2).
 
-- ``claude-shim`` on PATH: ``chelper auth reload claude`` probes for a ``claude``
-  binary; a no-op shim satisfies the probe without shipping the real package.
-- ``fetch-mock.cjs`` via ``NODE_OPTIONS=--require``: the upstream VALIDATES the
-  key over the network (``GET api.z.ai/api/coding/paas/v4/models``) and refuses
-  to save on non-200. The shim returns ``200 []`` for that one call so a FAKE
-  key validates fully offline — no real Z.ai endpoint is ever hit, no real key
-  is ever used.
+The two common files use a documented normalized-JSON contract: parse UTF-8,
+replace the hard-coded fake token, then serialize with sorted object keys.
+Values, JSON types, array order, and key presence are parity-significant;
+object-key order, whitespace, and final newlines are not.  No real token is
+read or sent: the image's fetch mock validates the fake token offline.
 
-Out of parity scope (Phase-2 / our own features — asserted elsewhere, not here):
-``.zshrc`` (the upstream's headless path does not write it), MCP install,
-``use default``/restore (the upstream has no headless restore), our model modes,
-the ownership journal, and the headless CLI surface.
-
-If no Docker daemon is available, the parity assertions SKIP (not fail) — the
-``normalize_text`` contract is still unit-tested directly so the module always
-asserts something.
+``default``, ``select``, and ``custom`` are intentionally not driven here:
+upstream 0.0.7 has no equivalent model-selection surface.  They are Phase-2
+extensions covered by this project's model-mode tests, not invented upstream
+comparisons.
 """
 
 from __future__ import annotations
@@ -68,6 +62,27 @@ _RUN_TIMEOUT = 120
 # readable by the (non-root) pytest process on Linux CI. See _docker_run.
 _HOST_UID = str(os.getuid())
 _HOST_GID = str(os.getgid())
+_CONTAINER_LABEL = f"ao.session={os.environ.get('AO_SESSION_ID', 'parity-tests')}"
+
+
+# Full expected artifact sets. These are intentionally exact path lists, not
+# globs: any newly-created file on either side must make the parity test fail.
+COMMON_HOME_FILES = frozenset(
+    {
+        ".claude/settings.json",
+        ".claude.json",
+    }
+)
+UPSTREAM_ONLY_HOME_FILES = {
+    ".chelper/config.yaml": "upstream persists its saved auth plan and token",
+}
+OURS_ONLY_HOME_FILES = {
+    ".zshrc": "Phase-2 headless-first shell warning block",
+    ".zai-python-helper/ownership.json": "Phase-2 ADR-004 ownership journal",
+    ".zai-python-helper/lock": "Phase-2 ADR-005 PatchPlan process lock",
+}
+UPSTREAM_EXPECTED_HOME_FILES = COMMON_HOME_FILES | frozenset(UPSTREAM_ONLY_HOME_FILES)
+OURS_EXPECTED_HOME_FILES = COMMON_HOME_FILES | frozenset(OURS_ONLY_HOME_FILES)
 
 
 # --------------------------------------------------------------------------- #
@@ -103,7 +118,7 @@ def _image_present() -> bool:
 
 
 def _ensure_image() -> None:
-    """Build the parity image if it is missing (CI smoke job builds it first)."""
+    """Build the parity image if it is missing (CI parity job builds it first)."""
     if _image_present():
         return
     subprocess.run(
@@ -113,71 +128,84 @@ def _ensure_image() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# normalize(): redact the token, then canonically re-serialize.
-#
-# Comparing the RE-SERIALIZED text (not just parsed dicts) is deliberate: it is
-# type-robust. ``json.loads`` round-trips JSON ``1`` as Python ``int 1`` and
-# ``"1"`` as ``str "1"``; ``json.dumps`` then renders them differently. So an
-# int-vs-string drift (the exact regression that once existed on
-# CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC) survives normalize and fails the
-# equality — which is the whole point. Whitespace/indent differences also
-# collapse, so only semantic value/key/order drift can fail the test.
+# Normalized-JSON comparison and full-HOME snapshots.
 # --------------------------------------------------------------------------- #
-def _redact(doc: dict) -> dict:
-    """Non-mutating copy with ``env.ANTHROPIC_AUTH_TOKEN`` -> ``<REDACTED>``."""
-    out = dict(doc)
-    env = out.get("env")
-    if isinstance(env, dict) and "ANTHROPIC_AUTH_TOKEN" in env:
-        env = dict(env)
-        env["ANTHROPIC_AUTH_TOKEN"] = "<REDACTED>"
-        out["env"] = env
-    return out
+def _redact_fake_token(value):
+    """Return a JSON-compatible value with the fixed fake token redacted."""
+    if isinstance(value, dict):
+        return {key: _redact_fake_token(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact_fake_token(item) for item in value]
+    if isinstance(value, str):
+        return value.replace(FAKE_TOKEN, "<REDACTED>")
+    return value
 
 
-def normalize_text(raw: str | None) -> str:
-    """Redact the token and canonically re-serialize a JSON config document.
-
-    ``sort_keys=False`` preserves insertion order, matching our backend
-    (``json.dumps(indent=2)``) and the upstream's key order. Returns ``""`` for a
-    missing file so an absent-vs-present mismatch surfaces as a clear diff.
-    """
-    if not raw:
+def normalize_json(raw: bytes | None) -> str:
+    """Canonicalize JSON after token redaction, ignoring only formatting/order."""
+    if raw is None:
         return ""
-    doc = json.loads(raw)
-    redacted = _redact(doc)
-    return json.dumps(redacted, indent=2, ensure_ascii=False) + "\n"
+    value = json.loads(raw.decode("utf-8"))
+    return json.dumps(
+        _redact_fake_token(value),
+        indent=2,
+        ensure_ascii=False,
+        sort_keys=True,
+    ) + "\n"
+
+
+def snapshot_home(home: Path) -> dict[str, bytes]:
+    """Return every regular file below ``home`` keyed by its POSIX-relative path."""
+    return {
+        path.relative_to(home).as_posix(): path.read_bytes()
+        for path in sorted(home.rglob("*"))
+        if path.is_file()
+    }
+
+
+def _file_set_drift(actual: set[str], expected: frozenset[str]) -> str | None:
+    """Describe missing/unexpected paths, or return ``None`` for an exact set."""
+    missing = sorted(expected - actual)
+    unexpected = sorted(actual - expected)
+    if not missing and not unexpected:
+        return None
+    parts: list[str] = []
+    if missing:
+        parts.append(f"missing: {', '.join(missing)}")
+    if unexpected:
+        parts.append(f"unexpected: {', '.join(unexpected)}")
+    return "; ".join(parts)
+
+
+def _assert_expected_file_set(
+    tool: str, snapshot: dict[str, bytes], expected: frozenset[str]
+) -> None:
+    drift = _file_set_drift(set(snapshot), expected)
+    if drift:
+        pytest.fail(f"Phase-1 parity artifact-set drift for {tool}: {drift}")
+
+
+def _fail_with_diff(label: str, original: bytes | None, ours: bytes | None) -> None:
+    """Print a token-redacted normalized-JSON unified diff and fail."""
+    original_text = normalize_json(original)
+    ours_text = normalize_json(ours)
+    diff = "\n".join(
+        difflib.unified_diff(
+            original_text.splitlines(),
+            ours_text.splitlines(),
+            fromfile=f"original/{label}",
+            tofile=f"ours/{label}",
+            lineterm="",
+        )
+    )
+    pytest.fail(f"Phase-1 normalized-JSON parity drift in {label}:\n{diff}")
 
 
 # --------------------------------------------------------------------------- #
 # Tool runners: each drives `docker run` with a fresh mounted HOME.
 # --------------------------------------------------------------------------- #
-def _read_files(home: Path) -> dict[str, str | None]:
-    """Read the two parity-relevant files back from the mounted host HOME.
-
-    The ``-v <home>:<home>`` mount makes container writes visible on the host at
-    the same absolute path, so we read them here directly. Missing files -> None.
-    """
-    settings = home / ".claude" / "settings.json"
-    claude_json = home / ".claude.json"
-    return {
-        "settings.json": settings.read_text() if settings.exists() else None,
-        ".claude.json": claude_json.read_text() if claude_json.exists() else None,
-    }
-
-
 def _docker_run(home: Path, extra_env: dict[str, str], command: list[str]) -> None:
-    """Run ``command`` inside the parity image with an isolated mounted HOME.
-
-    Asserts exit 0; the last 500 chars of stderr are attached to the failure so a
-    misconfigured fixture is debuggable. The token is fake + the fetch-mock
-    guarantees no real key ever leaves the container, so stderr is safe to show.
-
-    ``--user $(id -u):$(id -g)`` makes the container run as the HOST user so the
-    files it writes into the mounted HOME are owned by the host pytest process.
-    Without it, on Linux CI the container (running as root) creates root-owned
-    files that the non-root pytest runner then cannot read (PermissionError). On
-    macOS Docker Desktop the UID is mapped either way, so this is a no-op there.
-    """
+    """Run ``command`` inside the parity image with an isolated mounted HOME."""
     home_abs = str(home.resolve())
     env_args: list[str] = []
     for key, value in {"HOME": home_abs, "PATH": _CONTAINER_PATH, **extra_env}.items():
@@ -188,6 +216,8 @@ def _docker_run(home: Path, extra_env: dict[str, str], command: list[str]) -> No
             "docker",
             "run",
             "--rm",
+            "--label",
+            _CONTAINER_LABEL,
             "--user",
             f"{_HOST_UID}:{_HOST_GID}",
             *env_args,
@@ -206,14 +236,8 @@ def _docker_run(home: Path, extra_env: dict[str, str], command: list[str]) -> No
     )
 
 
-def run_original(home: Path) -> dict[str, str | None]:
-    """Drive the upstream's headless path: auth set, then reload claude.
-
-    Two ``docker run`` invocations share the mounted HOME so the saved plan/key
-    state from step 1 persists into step 2. ``NODE_OPTIONS=--require`` loads the
-    fetch-mock so the validation call succeeds offline; the claude-shim on PATH
-    satisfies the reload's tool-presence probe.
-    """
+def run_original(home: Path) -> dict[str, bytes]:
+    """Drive upstream's headless auth+reload path and snapshot every HOME file."""
     node_env = {"NODE_OPTIONS": f"--require {FETCH_MOCK_IN_IMAGE}"}
     _docker_run(
         home,
@@ -221,11 +245,11 @@ def run_original(home: Path) -> dict[str, str | None]:
         ["chelper", "auth", "glm_coding_plan_global", FAKE_TOKEN],
     )
     _docker_run(home, node_env, ["chelper", "auth", "reload", "claude"])
-    return _read_files(home)
+    return snapshot_home(home)
 
 
-def run_ours(home: Path) -> dict[str, str | None]:
-    """Drive OUR tool's ``use zai --mode original`` in the parity image."""
+def run_ours(home: Path) -> dict[str, bytes]:
+    """Drive our original-mode path and snapshot every HOME file."""
     _docker_run(
         home,
         {},
@@ -241,16 +265,15 @@ def run_ours(home: Path) -> dict[str, str | None]:
             FAKE_TOKEN,
         ],
     )
-    return _read_files(home)
+    return snapshot_home(home)
 
 
 # --------------------------------------------------------------------------- #
-# Module fixture: run BOTH tools once, share the results. Skips (not fails) when
-# docker is unavailable so a no-daemon CI matrix still passes cleanly.
+# Module fixture: run BOTH tools once, share the snapshots. Skips (not fails)
+# when Docker is unavailable so no-daemon runners report honestly.
 # --------------------------------------------------------------------------- #
 @pytest.fixture(scope="module")
 def parity_pair(tmp_path_factory):
-    """Run both tools in fresh isolated HOMEs; return (original, ours) file maps."""
     if not _docker_available():
         pytest.skip("no docker daemon; full parity test requires the image")
     _ensure_image()
@@ -259,84 +282,82 @@ def parity_pair(tmp_path_factory):
     return run_original(home_original), run_ours(home_ours)
 
 
-def _fail_with_diff(label: str, original: str | None, ours: str | None) -> None:
-    """Print a redacted unified diff and fail. Token is already redacted by normalize."""
-    o = normalize_text(original).splitlines()
-    n = normalize_text(ours).splitlines()
-    diff = "\n".join(
-        difflib.unified_diff(
-            o,
-            n,
-            fromfile=f"original/{label}",
-            tofile=f"ours/{label}",
-            lineterm="",
-        )
-    )
-    pytest.fail(f"Phase-1 parity drift in {label}:\n{diff}")
-
-
 # --------------------------------------------------------------------------- #
 # Phase-1 parity assertions.
 # --------------------------------------------------------------------------- #
 @pytest.mark.smoke
-def test_use_zai_settings_matches_original(parity_pair):
-    """Our ``settings.json`` env block must match the upstream's byte-for-byte.
-
-    After token redaction + canonical re-serialization, the two documents must be
-    identical: same keys (ANTHROPIC_AUTH_TOKEN, ANTHROPIC_BASE_URL, API_TIMEOUT_MS,
-    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC), same VALUES, same VALUE TYPES
-    (int vs string is caught), same order. Any drift fails with a unified diff.
-    """
+def test_use_zai_artifact_sets_match_the_closed_contract(parity_pair):
+    """Both full-HOME snapshots contain only their explicitly allowed files."""
     original, ours = parity_pair
-    if normalize_text(original["settings.json"]) != normalize_text(
-        ours["settings.json"]
-    ):
-        _fail_with_diff("settings.json", original["settings.json"], ours["settings.json"])
+    _assert_expected_file_set("upstream", original, UPSTREAM_EXPECTED_HOME_FILES)
+    _assert_expected_file_set("ours", ours, OURS_EXPECTED_HOME_FILES)
 
 
 @pytest.mark.smoke
-def test_use_zai_claude_json_matches_original(parity_pair):
-    """Our ``.claude.json`` must equal the upstream's ``{"hasCompletedOnboarding": true}``."""
+@pytest.mark.parametrize("path", sorted(COMMON_HOME_FILES))
+def test_use_zai_common_files_match_upstream_normalized_json(parity_pair, path):
+    """Common config files match after documented JSON normalization."""
     original, ours = parity_pair
-    if normalize_text(original[".claude.json"]) != normalize_text(ours[".claude.json"]):
-        _fail_with_diff(".claude.json", original[".claude.json"], ours[".claude.json"])
+    if normalize_json(original.get(path)) != normalize_json(ours.get(path)):
+        _fail_with_diff(path, original.get(path), ours.get(path))
 
 
 # --------------------------------------------------------------------------- #
-# normalize() contract — unit-tested directly so the module asserts something
-# even when docker is absent, and to HONESTLY prove the parity comparison catches
-# drift (the "remove API_TIMEOUT_MS -> RED" acceptance criterion).
+# Pure contract tests: they run even without Docker and prove that normalization
+# and the closed file-set guard reject the intended drift classes.
 # --------------------------------------------------------------------------- #
+def test_normalize_ignores_formatting_and_object_key_order():
+    """Whitespace, trailing newlines, and object-key order are not significant."""
+    assert normalize_json(b'{"env": {"A": 1, "B": 2}}') == normalize_json(
+        b'{\n  "env": {"B": 2, "A": 1}\n}\n'
+    )
+
+
 def test_normalize_catches_value_type_drift():
-    """An int-vs-string value drift must survive normalize and fail equality.
-
-    This is the exact regression that once existed on
-    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC (upstream int ``1`` vs our string
-    ``"1"``). Proving drift survives ``normalize_text`` proves the main parity
-    test fails on it — by direct analogy, removing a key or changing any value
-    also fails.
-    """
-    golden = '{"env": {"ANTHROPIC_AUTH_TOKEN": "tok", "X": 1}}'
-    drifted = '{"env": {"ANTHROPIC_AUTH_TOKEN": "tok", "X": "1"}}'
-    assert normalize_text(golden) != normalize_text(drifted)
+    """An int-vs-string value drift survives JSON normalization."""
+    assert normalize_json(b'{"env":{"X":1}}') != normalize_json(
+        b'{"env":{"X":"1"}}'
+    )
 
 
 def test_normalize_catches_missing_key_drift():
-    """A missing key (e.g. API_TIMEOUT_MS removed) must survive normalize."""
-    full = '{"env": {"A": "1", "B": "2"}}'
-    missing = '{"env": {"A": "1"}}'
-    assert normalize_text(full) != normalize_text(missing)
+    """A missing config key remains a normalized-JSON difference."""
+    assert normalize_json(b'{"env":{"A":"1","B":"2"}}') != normalize_json(
+        b'{"env":{"A":"1"}}'
+    )
 
 
-def test_normalize_redacts_token():
-    """The fake token must NEVER appear in normalized output (diffs/logs)."""
-    raw = json.dumps({"env": {"ANTHROPIC_AUTH_TOKEN": FAKE_TOKEN, "X": 1}})
-    out = normalize_text(raw)
+def test_normalize_preserves_array_order():
+    """Array order remains significant under canonical object serialization."""
+    assert normalize_json(b'{"items":[1,2]}') != normalize_json(
+        b'{"items":[2,1]}'
+    )
+
+
+def test_normalize_redacts_fake_token_recursively():
+    """The fake token cannot leak from nested JSON into diffs or logs."""
+    raw = json.dumps({"items": [{"token": FAKE_TOKEN}], "other": "keep"}).encode()
+    out = normalize_json(raw)
     assert FAKE_TOKEN not in out
-    assert "<REDACTED>" in out
+    assert '"token": "<REDACTED>"' in out
+    assert '"other": "keep"' in out
 
 
 def test_normalize_empty_is_empty():
-    """A missing file normalizes to '' so absence surfaces as a diff, not a crash."""
-    assert normalize_text(None) == ""
-    assert normalize_text("") == ""
+    assert normalize_json(None) == ""
+
+
+def test_file_set_contract_rejects_unlisted_artifact():
+    """A newly-created file cannot silently enter either side's allowlist."""
+    actual = set(UPSTREAM_EXPECTED_HOME_FILES) | {".new-unlisted-artifact"}
+    assert _file_set_drift(actual, UPSTREAM_EXPECTED_HOME_FILES) == (
+        "unexpected: .new-unlisted-artifact"
+    )
+
+
+def test_file_set_contract_rejects_missing_artifact():
+    """A required common or directional artifact cannot silently disappear."""
+    actual = set(UPSTREAM_EXPECTED_HOME_FILES) - {".claude.json"}
+    assert _file_set_drift(actual, UPSTREAM_EXPECTED_HOME_FILES) == (
+        "missing: .claude.json"
+    )
