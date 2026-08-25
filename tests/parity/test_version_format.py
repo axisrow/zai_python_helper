@@ -34,6 +34,8 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DOCKERFILE = REPO_ROOT / "docker" / "parity" / "Dockerfile"
 IMAGE_TAG = "zai-parity:smoke"
+UPSTREAM_PACKAGE = "@z_ai/coding-helper@0.0.7"
+_CONTAINER_LABEL = f"ao.session={os.environ.get('AO_SESSION_ID', 'parity-tests')}"
 
 # A semver token (optionally with a leading 'v' and a pre-release/build suffix),
 # anchored to word boundaries so it matches a standalone number AND a number
@@ -117,7 +119,7 @@ def _npx_available() -> bool:
 
 
 def _ensure_image() -> None:
-    """Build the parity image if it is missing (CI smoke job calls this first)."""
+    """Build the parity image if it is missing (CI parity job calls this first)."""
     if _image_present():
         return
     subprocess.run(
@@ -137,23 +139,42 @@ def upstream_version_outputs():
     """
     if _docker_available():
         _ensure_image()
-        return {
-            flag: subprocess.run(
-                ["docker", "run", "--rm", IMAGE_TAG, "coding-helper", flag],
+        out: dict[str, str] = {}
+        for flag in ("-v", "--version"):
+            res = subprocess.run(
+                [
+                    "docker",
+                    "run",
+                    "--rm",
+                    "--label",
+                    _CONTAINER_LABEL,
+                    IMAGE_TAG,
+                    "coding-helper",
+                    flag,
+                ],
                 check=True,
                 capture_output=True,
                 text=True,
                 timeout=60,
-            ).stdout
-            for flag in ("-v", "--version")
-        }
+            )
+            assert res.stderr == "", (
+                f"`coding-helper {flag}` wrote to stderr: {res.stderr!r}"
+            )
+            out[flag] = res.stdout
+        return out
 
     if _npx_available():
-        env = dict(os.environ, NPX_INSTALL_FORCE="1")
+        # Suppress npx/npm installer chatter while preserving the child tool's
+        # stderr, which is itself a Phase-1 assertion below.
+        env = dict(
+            os.environ,
+            NPX_INSTALL_FORCE="1",
+            NPM_CONFIG_LOGLEVEL="silent",
+        )
         out: dict[str, str] = {}
         for flag in ("-v", "--version"):
             res = subprocess.run(
-                ["npx", "--yes", "@z_ai/coding-helper", flag],
+                ["npx", "--yes", UPSTREAM_PACKAGE, flag],
                 capture_output=True,
                 text=True,
                 timeout=120,
@@ -164,6 +185,9 @@ def upstream_version_outputs():
                     f"npx could not reach upstream coding-helper ({flag}): "
                     f"exit {res.returncode}, stderr: {res.stderr[:200]}"
                 )
+            assert res.stderr == "", (
+                f"`npx {UPSTREAM_PACKAGE} {flag}` wrote to stderr: {res.stderr!r}"
+            )
             out[flag] = res.stdout
         return out
 
