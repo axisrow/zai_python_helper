@@ -22,7 +22,7 @@ class Region(Enum):
 # URL literal. Pure data — no side effects.
 ZAI_ANTHROPIC_BASE_URL_BY_REGION: dict[Region, str] = {
     Region.GLOBAL: "https://api.z.ai/api/anthropic",
-    Region.CHINA: "https://api.zai.cn/api/anthropic",
+    Region.CHINA: "https://open.bigmodel.cn/api/anthropic",
 }
 
 
@@ -45,10 +45,8 @@ ZAI_PAAS_BASE_URL_BY_REGION: dict[Region, str] = {
 # Z.ai Anthropic-compatible base URLs per epic #1's endpoint matrix. The S6
 # tools (OpenCode / Factory Droid Anthropic-proto entries) write Anthropic-
 # protocol endpoints; per epic #1 the china anthropic endpoint is
-# ``https://open.bigmodel.cn/api/anthropic``. This DIFFERS from
-# :data:`ZAI_ANTHROPIC_BASE_URL_BY_REGION` (Claude Code's china URL, in main).
-# We keep BOTH rather than disturb Claude Code's working behavior; reconciling
-# the two is a tracked follow-up (issue #7 comment).
+# ``https://open.bigmodel.cn/api/anthropic``. This is also the endpoint used by
+# Claude Code's China configuration.
 ZAI_ANTHROPIC_BASE_URL_BY_REGION_V2: dict[Region, str] = {
     Region.GLOBAL: "https://api.z.ai/api/anthropic",
     Region.CHINA: "https://open.bigmodel.cn/api/anthropic",

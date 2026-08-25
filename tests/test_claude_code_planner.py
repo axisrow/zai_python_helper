@@ -21,7 +21,7 @@ from zai_python_helper.regions import Region
 
 TOKEN = "sk-test-token-abc"
 GLOBAL_URL = "https://api.z.ai/api/anthropic"
-CHINA_URL = "https://api.zai.cn/api/anthropic"
+CHINA_URL = "https://open.bigmodel.cn/api/anthropic"
 
 
 def _spec(mode: ModelMode = ModelMode.DEFAULT, **kw) -> ProviderSpec:

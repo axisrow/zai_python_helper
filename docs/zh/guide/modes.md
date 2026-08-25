@@ -88,7 +88,7 @@ chelper auth reload claude
 每个模式都接受 `--region`。区域选择 Z.ai 端点：
 
 - `global`（默认）—— `https://api.z.ai/api/anthropic`
-- `china` —— `https://api.zai.cn/api/anthropic`
+- `china` —— `https://open.bigmodel.cn/api/anthropic`
 
 ```bash
 zai-python-helper use zai --mode select --model glm-4-plus --region china

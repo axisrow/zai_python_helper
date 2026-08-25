@@ -87,7 +87,7 @@ zai-python-helper use default
 | Регион | Эндпоинт |
 |--------|----------|
 | `global` (по умолчанию) | `https://api.z.ai/api/anthropic` |
-| `china` | `https://api.zai.cn/api/anthropic` |
+| `china` | `https://open.bigmodel.cn/api/anthropic` |
 
 ```bash
 zai-python-helper use zai --region china
