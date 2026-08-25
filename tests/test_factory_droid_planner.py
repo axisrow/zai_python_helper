@@ -42,6 +42,10 @@ class TestPlanZai:
             assert e["apiKey"] == TOKEN
         assert anth["baseUrl"] == GLOBAL_ANTHROPIC
         assert oai["baseUrl"] == GLOBAL_PAAS
+        assert anth["displayName"] == "GLM-4.7 [GLM Coding Plan Global] - Anthropic"
+        assert anth["provider"] == "anthropic"
+        assert oai["displayName"] == "GLM-4.7 [GLM Coding Plan Global] - Openai"
+        assert oai["provider"] == "generic-chat-completion-api"
 
     def test_china_uses_china_endpoints(self):
         plan = fd.plan_zai(Region.CHINA, factory_doc=None, auth_token=TOKEN)
@@ -313,7 +317,7 @@ class TestPlanRevert:
         assert delta.kind == DeltaKind.WRITE_JSON, "plan_revert emitted a false NOOP"
         restored = delta.content["customModels"]
         assert _entry_for("anthropic", restored)["apiKey"] == "PRIOR-ANTHROPIC"
-        assert _entry_for("openai", restored)["apiKey"] == "PRIOR-OPENAI"
+        assert _entry_for(fd.PROVIDER_OPENAI, restored)["apiKey"] == "PRIOR-OPENAI"
 
     def test_revert_refuses_duplicate_marker_protocol(self):
         """F3: apply_revert_decisions with duplicate GLM entries → raise.
