@@ -70,6 +70,7 @@ RUN python -m pip install --no-cache-dir /wheels/zai_python_helper-*.whl \
 COPY docker/parity/fixtures/claude-shim /usr/local/bin/claude
 RUN chmod +x /usr/local/bin/claude
 COPY tests/parity/fixtures/fetch-mock.cjs /opt/parity/fetch-mock.cjs
+COPY docker/parity/upstream-runner.mjs /opt/parity/upstream-runner.mjs
 
 # Smoke entrypoints for the parity test (and ad-hoc `docker run` checks).
 CMD ["coding-helper", "--version"]
