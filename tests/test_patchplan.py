@@ -122,6 +122,14 @@ class TestProcessLock:
             pass
         assert state_home.stat().st_mode & 0o777 == 0o755
 
+    def test_lock_rejects_lexical_parent_traversal(self, tmp_path):
+        """Validation and later bookkeeping must use identical path semantics."""
+        link = tmp_path / "link"
+        link.symlink_to(tmp_path, target_is_directory=True)
+        with pytest.raises(ValueError, match="must not contain"):
+            with ProcessLock(link / ".." / "lock"):
+                pass
+
     def test_lock_validation_closes_fd_when_chmod_fails(self, tmp_path, monkeypatch):
         """A failed lock hardening operation must not leak its descriptor."""
         from zai_python_helper import patchplan

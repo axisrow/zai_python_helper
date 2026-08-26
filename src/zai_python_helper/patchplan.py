@@ -51,6 +51,8 @@ _SECURE_FILE_MODE = 0o600
 
 def _ensure_private_parent(path: Path) -> int:
     """Create the state parent without following attacker-controlled entries."""
+    if ".." in Path(path.parent).parts:
+        raise ValueError(f"state path must not contain '..': {path.parent}")
     parent = Path(os.path.abspath(path.parent))
     parts = parent.parts
     state_root = parent.parent.parent
