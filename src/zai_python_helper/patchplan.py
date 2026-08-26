@@ -347,7 +347,13 @@ def _read_at(root_fd: int, name: str) -> str:
     fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=root_fd)
     # ``fdopen`` owns and closes ``fd`` when the context exits. Do not close
     # it again: the descriptor number may already have been reused.
-    with os.fdopen(fd, "r", encoding="utf-8") as stream:
+    try:
+        stream = os.fdopen(fd, "r", encoding="utf-8")
+    except OSError:
+        # If construction fails, fdopen did not acquire ownership.
+        os.close(fd)
+        raise
+    with stream:
         return stream.read()
 
 
