@@ -8,6 +8,7 @@ extensions without an upstream 0.0.7 analogue and are not matrix actions.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import stat
@@ -94,6 +95,12 @@ def snapshot_home(home: Path) -> dict[str, tuple[bytes, int]]:
 
 def _docker_run(home: Path, command: list[str]) -> subprocess.CompletedProcess[bytes]:
     home_abs = str(home.resolve())
+    # The application state is intentionally outside HOME. Mount a persistent
+    # host-side state root so activate and revert, which are separate
+    # containers, exercise the same journal as a real installation.
+    state_root = home.parent / ".zai-parity-state"
+    state_root.mkdir(mode=0o700, exist_ok=True)
+    state_abs = str(state_root.resolve())
     return subprocess.run(
         [
             "docker",
@@ -106,9 +113,13 @@ def _docker_run(home: Path, command: list[str]) -> subprocess.CompletedProcess[b
             "-e",
             f"HOME={home_abs}",
             "-e",
+            f"XDG_STATE_HOME={state_abs}",
+            "-e",
             f"PATH={_CONTAINER_PATH}",
             "-v",
             f"{home_abs}:{home_abs}",
+            "-v",
+            f"{state_abs}:{state_abs}",
             IMAGE_TAG,
             *command,
         ],
@@ -224,6 +235,38 @@ def test_pinned_upstream_raw_tool_config_parity(
 ) -> None:
     """Every tool-config cell has one raw, byte-for-byte verdict."""
     _assert_raw_parity(tmp_path_factory, tool, region, action, MCP_IDS[0])
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("tool", TOOLS)
+@pytest.mark.parametrize("region", REGIONS)
+def test_docker_revert_semantic_parity_across_processes(
+    tmp_path_factory, tool: str, region: str
+) -> None:
+    """Activation state survives the separate Docker process used by revert."""
+    if not _docker_available():
+        pytest.skip("no docker daemon; Docker state persistence requires the image")
+    _ensure_image()
+    upstream_home = tmp_path_factory.mktemp(f"upstream-revert-{tool}-{region}")
+    ours_home = tmp_path_factory.mktemp(f"ours-revert-{tool}-{region}")
+    _prepare(upstream_home, tool, region, "revert", MCP_IDS[0], _upstream)
+    _prepare(ours_home, tool, region, "revert", MCP_IDS[0], _ours)
+    upstream = _upstream(upstream_home, tool, region, "revert", MCP_IDS[0])
+    ours = _ours(ours_home, tool, region, "revert", MCP_IDS[0])
+    assert upstream.exit_code == 0, upstream.stderr.decode(errors="replace")
+    assert ours.exit_code == 0, ours.stderr.decode(errors="replace")
+
+    def semantic(files: dict[str, tuple[bytes, int]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for name, (content, _mode) in files.items():
+            result[name] = (
+                json.loads(content)
+                if name.endswith(".json")
+                else content
+            )
+        return result
+
+    assert semantic(upstream.files) == semantic(ours.files)
 
 
 @pytest.mark.smoke

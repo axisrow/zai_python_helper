@@ -63,6 +63,22 @@ def test_migrate_legacy_state_moves_journal_and_recovery(tmp_path):
     assert not (legacy / "recovery.json").exists()
 
 
+def test_migrate_legacy_state_rewrites_recovery_journal_path(tmp_path):
+    """Migrated recovery manifests must point at the new journal location."""
+    paths = _paths(tmp_path)
+    legacy = tmp_path / ".zai-python-helper"
+    legacy.mkdir()
+    (legacy / "ownership.json").write_text('{"legacy": true}\n')
+    (legacy / "recovery.json").write_text(json.dumps({
+        "entries": [],
+        "journal": {"tag": "ownership", "path": str(legacy / "ownership.json"), "content": "{}\n"},
+    }))
+
+    migrate_legacy_state(paths)
+    manifest = json.loads(paths.recovery_json.read_text())
+    assert manifest["journal"]["path"] == str(paths.ownership_json)
+
+
 # ---------------------------------------------------------------------------
 # ProcessLock: serialization
 # ---------------------------------------------------------------------------

@@ -32,6 +32,8 @@ import contextlib
 import fcntl
 import json
 import os
+import shutil
+import tempfile
 import threading as _threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -77,9 +79,56 @@ def migrate_legacy_state(paths: Paths) -> list[str]:
         ):
             source = legacy_dir / name
             if source.exists() and not destination.exists():
-                source.replace(destination)
+                _copy_then_remove(source, destination)
                 moved.append(name)
+        # A recovery manifest stores the journal's absolute path.  Rewrite
+        # that reference while migrating, otherwise recovery would replay
+        # config but silently discard the journal retirement/update.
+        if paths.recovery_json.exists():
+            _rewrite_legacy_journal_path(
+                paths.recovery_json,
+                legacy_dir / "ownership.json",
+                paths.ownership_json,
+            )
     return moved
+
+
+def _copy_then_remove(source: Path, destination: Path) -> None:
+    """Migrate a file safely even when source and destination cross devices."""
+    destination.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(
+        prefix=f".{destination.name}.", dir=destination.parent
+    )
+    try:
+        with os.fdopen(fd, "wb") as output, source.open("rb") as input_file:
+            shutil.copyfileobj(input_file, output)
+            output.flush()
+            os.fsync(output.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, destination)
+        source.unlink()
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(temporary)
+        raise
+
+
+def _rewrite_legacy_journal_path(
+    manifest_path: Path, legacy_journal: Path, current_journal: Path
+) -> None:
+    """Update a migrated manifest's stale absolute journal reference."""
+    try:
+        document = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    journal = document.get("journal") if isinstance(document, dict) else None
+    if not isinstance(journal, dict) or journal.get("path") != str(legacy_journal):
+        return
+    journal["path"] = str(current_journal)
+    text = json.dumps(document, indent=2, ensure_ascii=False) + "\n"
+    from zai_python_helper.ownership import _atomic_write_secret
+
+    _atomic_write_secret(manifest_path, text.encode("utf-8"))
 
 
 # ---------------------------------------------------------------------------
