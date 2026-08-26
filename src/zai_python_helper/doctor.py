@@ -48,6 +48,7 @@ pytest-httpserver: production uses :mod:`urllib` from the stdlib — no
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import urllib.error
 import urllib.request
@@ -61,6 +62,84 @@ from zai_python_helper.io.settings import resolve_effective_env
 from zai_python_helper.paths import Paths
 
 __all__ = ["CheckResult", "HttpProbe", "ProbeResult", "render_check", "run_doctor"]
+
+
+def run_cli_doctor(paths: Paths, *, progress_stream=None) -> int:
+    """Render the pinned upstream CLI doctor contract.
+
+    The rich :func:`run_doctor` pipeline is the Python API and intentionally
+    has more diagnostics than upstream.  The public CLI, however, is also a
+    parity surface; keep its non-TTY output byte-compatible with chelper 0.0.7.
+    This deliberately performs only the checks exposed by that CLI.
+    """
+    if progress_stream is not None:
+        print("- Running health check...", file=progress_stream)
+
+    def _configured() -> tuple[str | None, str | None]:
+        home = paths.claude_settings.parent.parent
+        path = home / ".chelper" / "config.yaml"
+        try:
+            text = path.read_text()
+        except OSError:
+            return None, None
+        values = {}
+        for line in text.splitlines():
+            if ":" in line and not line[:1].isspace():
+                key, value = line.split(":", 1)
+                values[key.strip()] = value.strip()
+        return values.get("plan"), values.get("api_key")
+
+    plan, api_key = _configured()
+    results: list[tuple[bool, str, str | None]] = [
+        (
+            bool(os.environ.get("PATH")),
+            "PATH",
+            None if os.environ.get("PATH") else "PATH is empty",
+        ),
+        (
+            bool(plan and api_key),
+            "API Key & Network",
+            "API key not configured" if not (plan and api_key) else None,
+        ),
+    ]
+    settings = paths.claude_settings
+    detected_plan = plan
+    try:
+        import json
+
+        env = json.loads(settings.read_text()).get("env", {})
+        base_url = env.get("ANTHROPIC_BASE_URL", "")
+        if "open.bigmodel.cn" in base_url:
+            detected_plan = "glm_coding_plan_china"
+        elif "api.z.ai" in base_url:
+            detected_plan = "glm_coding_plan_global"
+    except (OSError, ValueError, AttributeError):
+        pass
+    results.append(
+        (
+            bool(detected_plan),
+            "GLM Coding Plan",
+            None
+            if detected_plan
+            else "GLM Coding Plan not configured. Run 'chelper init' to configure.",
+        )
+    )
+    tools = (("claude", "Claude Code", "claude-code"), ("opencode", "OpenCode", "opencode"),
+             ("crush", "Crush", "crush"), ("droid", "Factory Droid", "factory-droid"))
+    for command, display, name in tools:
+        installed = shutil.which(command) is not None
+        results.append((installed, f"Tool: {display} ({name})", None if installed else f"Tool not found: {display}"))
+
+    print("\n=== Health Check Results ===\n")
+    for passed, name, message in results:
+        print(f"{'✓' if passed else '✗'} {name}")
+        if message:
+            print(f"  {message}")
+    print("\n\nSuggestions:")
+    print('- Run "chelper init" to configure missing settings')
+    print("- Check your network connection")
+    print("- Ensure required tools are installed")
+    return 0
 
 
 def _host_of(url: str) -> str:
@@ -752,7 +831,8 @@ def run_doctor(
     results: list[CheckResult] = []
 
     if progress_stream is not None:
-        print("Running health check...", file=progress_stream)
+        # Match the pinned upstream CLI's non-TTY spinner completion prefix.
+        print("- Running health check...", file=progress_stream)
 
     def _emit(result: CheckResult) -> CheckResult:
         results.append(result)

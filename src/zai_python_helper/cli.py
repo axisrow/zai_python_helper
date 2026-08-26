@@ -724,11 +724,6 @@ def _handle_use_zai(args: argparse.Namespace) -> int:
     else:
         auth_token = resolve_key(getattr(args, "api_key", None))
 
-    print(
-        f"Configuring Z.ai provider (tool: {tool.name}, "
-        f"mode: {mode.value}, region: {region.value})"
-    )
-
     if dry_run:
         # Dry-run is read-only: read state, plan, preview. No lock, no write.
         # The journal is read here too (read-only) so the preview reflects the
@@ -815,17 +810,18 @@ def _handle_use_zai(args: argparse.Namespace) -> int:
             current = journal.read()
             return journal.render(_merge_takeover_records(tool, current, records))
 
-        written = apply_plan_locked(paths, plan, journal_content=_journal_text)
-    if not written:
-        print("(no changes — already in desired state)")
-    else:
-        for tag in written:
-            print(f"  updated: {resolve_path(paths, tag)}")
-        print(f"  {_RESTART_NOTICE}")
-
-    # Echo the tool-owned summary (the Tool masks its own secrets).
-    for line in tool.echo_lines(plan, region):
-        print(line)
+        apply_plan_locked(paths, plan, journal_content=_journal_text)
+    # Match the pinned upstream `chelper auth reload <tool>` CLI.  File
+    # changes remain observable through the filesystem contract; stdout is a
+    # stable process contract and must not expose paths or configuration.
+    display_name = {
+        "claude_code": "Claude Code",
+        "opencode": "OpenCode",
+        "crush": "Crush",
+        "factory_droid": "Factory Droid",
+    }[tool.name]
+    print(f"Reloading GLM configuration to {display_name}...")
+    print(f"GLM configuration reloaded to {display_name} successfully")
     return 0
 
 
@@ -935,9 +931,9 @@ def _handle_doctor(args: argparse.Namespace) -> int:
     """
     import sys
 
-    from zai_python_helper.doctor import run_doctor
+    from zai_python_helper.doctor import run_cli_doctor
 
-    return run_doctor(Paths.default(), progress_stream=sys.stderr)
+    return run_cli_doctor(Paths.default(), progress_stream=sys.stderr)
 
 
 # --------------------------------------------------------------------------- #
