@@ -323,6 +323,31 @@ class TestProcessLock:
 
 
 class TestRecover:
+    def test_recover_accepts_legacy_lexical_journal_path(self, tmp_path):
+        """Canonical state roots must preserve pending pre-upgrade journals."""
+        target = tmp_path / "state-target"
+        target.mkdir()
+        state_link = tmp_path / "state-link"
+        state_link.symlink_to(target, target_is_directory=True)
+        paths = Paths.from_home(tmp_path, state_home=state_link)
+        paths.recovery_json.parent.mkdir(parents=True)
+        old_journal = state_link / paths.ownership_json.relative_to(target)
+        paths.recovery_json.write_text(
+            json.dumps(
+                {
+                    "entries": [],
+                    "journal": {
+                        "tag": "ownership",
+                        "path": str(old_journal),
+                        "content": '{"restored": true}\n',
+                    },
+                }
+            )
+        )
+
+        assert recover(paths) == []
+        assert json.loads(paths.ownership_json.read_text()) == {"restored": True}
+
     def test_no_manifest_is_noop(self, tmp_path):
         """recover() with no manifest writes nothing and returns []."""
         paths = _paths(tmp_path)

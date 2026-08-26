@@ -81,3 +81,11 @@ def test_paths_rejects_dangling_configured_state_symlink(tmp_path):
     state_link.symlink_to(tmp_path / "unmounted-state", target_is_directory=True)
     with pytest.raises(ValueError, match="dangling symlink"):
         Paths.from_home(tmp_path, state_home=state_link)
+
+
+def test_paths_rejects_dangling_symlink_in_state_ancestor(tmp_path):
+    """A missing volume symlink in an existing prefix must fail closed."""
+    state_link = tmp_path / "state-link"
+    state_link.symlink_to(tmp_path / "unmounted-state", target_is_directory=True)
+    with pytest.raises(ValueError, match="dangling symlink"):
+        Paths.from_home(tmp_path, state_home=state_link / "app")

@@ -36,7 +36,7 @@ import shutil
 import stat
 import tempfile
 import threading as _threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -459,12 +459,22 @@ def _read_manifest(
         and str(e.get("path", "")) == allowed.get(str(e.get("tag", "")))
     ]
     raw_journal = doc.get("journal")
+    raw_journal_path = (
+        str(raw_journal.get("path", "")) if isinstance(raw_journal, dict) else ""
+    )
+    journal_path_matches = raw_journal_path == str(paths.ownership_json) or (
+        bool(raw_journal_path)
+        and os.path.realpath(raw_journal_path)
+        == os.path.realpath(paths.ownership_json)
+    )
     journal = (
         _RecoveryEntry.from_dict(raw_journal)
         if isinstance(raw_journal, dict)
-        and str(raw_journal.get("path", "")) == str(paths.ownership_json)
+        and journal_path_matches
         else None
     )
+    if journal is not None and journal.path != str(paths.ownership_json):
+        journal = replace(journal, path=str(paths.ownership_json))
     return entries, journal
 
 

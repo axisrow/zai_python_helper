@@ -37,6 +37,24 @@ def _state_home_from_env() -> tuple[str, bool]:
     return f"/var/tmp/zai-python-helper-{os.getuid()}", True
 
 
+def _canonical_configured_state_root(path: Path) -> Path:
+    """Resolve the existing prefix strictly and allow a nonexistent suffix."""
+    missing: list[str] = []
+    probe = path
+    while not os.path.lexists(probe):
+        if probe == probe.parent:
+            break
+        missing.append(probe.name)
+        probe = probe.parent
+    try:
+        resolved = probe.resolve(strict=True)
+    except (FileNotFoundError, OSError) as exc:
+        raise ValueError(f"configured state root has a dangling symlink: {path}") from exc
+    for part in reversed(missing):
+        resolved /= part
+    return resolved
+
+
 @dataclass(frozen=True)
 class Paths:
     """Frozen bundle of every resolved filesystem path the tool touches.
@@ -113,12 +131,6 @@ class Paths:
             # is created and ownership-checked by ProcessLock before use.
             state_home, is_fallback = _state_home_from_env()
         configured_state_home = Path(state_home)
-        if (
-            not is_fallback
-            and configured_state_home.is_symlink()
-            and not configured_state_home.exists()
-        ):
-            raise ValueError(f"configured state root is a dangling symlink: {state_home}")
         home_id = hashlib.sha256(str(h).encode()).hexdigest()[:16]
         # Pin the state root's current symlink target.  All transaction files
         # then use the same canonical tree as the lock, even if the user-level
@@ -129,7 +141,7 @@ class Paths:
         state_root = (
             configured_state_home
             if is_fallback
-            else Path(os.path.realpath(configured_state_home))
+            else _canonical_configured_state_root(configured_state_home)
         )
         helper_dir = state_root / "zai-python-helper" / home_id
         state_dir = helper_dir / "state"
