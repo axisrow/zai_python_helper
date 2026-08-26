@@ -1,9 +1,8 @@
 """Tests for the tools layer (S6 foundation): Tool ABC, registry, and the
 ClaudeCodeTool adapter that wraps the existing pure planner.
 
-These tests prove the Tool-ABC migration is behavior-preserving: Claude Code
-planned/reverted THROUGH the Tool interface matches the pure planner called
-directly, and the registry/ManagedField/resolve_path machinery works.
+These tests prove the Tool adapter preserves the execution contract while the
+pure planner remains available for explicit shell-block planning.
 """
 
 from __future__ import annotations
@@ -85,9 +84,11 @@ class TestClaudeCodePlanParity:
             auth_token=TOKEN,
         )
 
-        # Same number of deltas, same tags, same kinds, same desired content.
-        assert len(via_tool.deltas) == len(direct.deltas)
-        for vt, dt in zip(via_tool.deltas, direct.deltas, strict=True):
+        # Phase 1 deliberately excludes the optional .zshrc delta; config
+        # deltas remain byte-for-byte identical to the pure planner.
+        direct_deltas = [d for d in direct.deltas if d.tag != FileTag.ZSHRC]
+        assert len(via_tool.deltas) == len(direct_deltas)
+        for vt, dt in zip(via_tool.deltas, direct_deltas, strict=True):
             assert vt.tag == dt.tag
             assert vt.kind == dt.kind
             assert vt.content == dt.content
@@ -103,7 +104,7 @@ class TestClaudeCodePlanParity:
         post_state = {
             FileTag.SETTINGS: first.delta_for(FileTag.SETTINGS).content,
             FileTag.CLAUDE_JSON: first.delta_for(FileTag.CLAUDE_JSON).content,
-            FileTag.ZSHRC: first.delta_for(FileTag.ZSHRC).content,
+            FileTag.ZSHRC: "",
         }
         second = tool.plan_zai(spec, Region.GLOBAL, state=post_state, auth_token=TOKEN)
         assert second.is_empty
