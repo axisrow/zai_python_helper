@@ -99,7 +99,7 @@ chelper auth reload claude
 Любой режим принимает `--region`. Регион выбирает эндпоинт Z.ai:
 
 - `global` (по умолчанию) — `https://api.z.ai/api/anthropic`
-- `china` — `https://api.zai.cn/api/anthropic`
+- `china` — `https://open.bigmodel.cn/api/anthropic`
 
 ```bash
 zai-python-helper use zai --mode select --model glm-4-plus --region china

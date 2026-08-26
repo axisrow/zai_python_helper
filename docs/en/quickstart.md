@@ -87,7 +87,7 @@ Two regions are supported (see [Model modes](guide/modes.md)):
 | Region | Endpoint |
 |--------|----------|
 | `global` (default) | `https://api.z.ai/api/anthropic` |
-| `china` | `https://api.zai.cn/api/anthropic` |
+| `china` | `https://open.bigmodel.cn/api/anthropic` |
 
 ```bash
 zai-python-helper use zai --region china

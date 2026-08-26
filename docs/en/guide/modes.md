@@ -97,7 +97,7 @@ claude-code` is interactive-first and is not a substitute in a non-TTY script.
 Every mode accepts `--region`. The region selects the Z.ai endpoint:
 
 - `global` (default) — `https://api.z.ai/api/anthropic`
-- `china` — `https://api.zai.cn/api/anthropic`
+- `china` — `https://open.bigmodel.cn/api/anthropic`
 
 ```bash
 zai-python-helper use zai --mode select --model glm-4-plus --region china
