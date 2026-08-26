@@ -53,6 +53,17 @@ def _ensure_private_parent(path: Path) -> None:
     """Create the state parent without following attacker-controlled entries."""
     parent = Path(os.path.abspath(path.parent))
     parts = parent.parts
+    state_root = parent.parent.parent
+    private_paths = {parent, parent.parent}
+    protected_paths = private_paths | {state_root}
+    # The fallback root itself is predictable and therefore must also be
+    # protected.  Do not infer this from a basename: XDG_STATE_HOME may
+    # legitimately live below a user directory with that name.
+    if (
+        state_root.parent == Path("/var/tmp")
+        and state_root.name == f"zai-python-helper-{os.getuid()}"
+    ):
+        private_paths.add(state_root)
     fd = os.open(parts[0] or os.sep, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     current = Path(parts[0] or os.sep)
     try:
@@ -65,19 +76,16 @@ def _ensure_private_parent(path: Path) -> None:
             # macOS exposes /var as a system symlink.  Permit such trusted
             # ancestors, but never follow symlinks once entering our state
             # directory (the predictable attacker-controlled component).
-            private = (
-                part == "zai-python-helper"
-                or part.startswith("zai-python-helper-")
-                or current == parent
-            )
+            protected = current in protected_paths
+            private = current in private_paths
             flags = os.O_RDONLY | os.O_DIRECTORY
-            if private:
+            if protected:
                 flags |= os.O_NOFOLLOW
             next_fd = os.open(part, flags, dir_fd=fd)
             try:
                 st = os.fstat(next_fd)
-                # Only state directories are tightened; arbitrary existing
-                # ancestors such as /tmp or a user's XDG root are untouched.
+                # Only application state directories are tightened; arbitrary
+                # existing ancestors such as /tmp or a user's XDG root are untouched.
                 if private and st.st_uid != os.getuid():
                     raise PermissionError(f"insecure state directory: {current}")
                 if private and st.st_mode & 0o077:

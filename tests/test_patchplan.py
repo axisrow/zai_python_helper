@@ -112,6 +112,16 @@ class TestProcessLock:
             with ProcessLock(lock_path):
                 pass
 
+    def test_unrelated_xdg_ancestor_is_not_rehardened(self, tmp_path):
+        """State setup must not chmod a user-owned XDG ancestor by its name."""
+        state_home = tmp_path / "zai-python-helper-user"
+        state_home.mkdir(mode=0o755)
+        paths = Paths.from_home(tmp_path, state_home=state_home)
+
+        with ProcessLock(paths.lock_file):
+            pass
+        assert state_home.stat().st_mode & 0o777 == 0o755
+
     def test_lock_validation_closes_fd_when_chmod_fails(self, tmp_path, monkeypatch):
         """A failed lock hardening operation must not leak its descriptor."""
         from zai_python_helper import patchplan
