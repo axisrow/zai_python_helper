@@ -182,3 +182,16 @@ See [issue #10](../../issues/10) for full specification and CLI examples.
 - v2 policy engine: pluggable strategies vs fixed enum? → decide at v2.
 - v3 desktop: Tauri (Rust+web) confirmed; IPC = subprocess-to-CLI vs HTTP-to-proxy? → decide at v3, leans HTTP once v2 exists.
 - (Resolved by architecture review, recorded above: two pure cores — ADR-001; `.zshrc` owned block — ADR-003; ownership journal — ADR-004; multi-file PatchPlan + lock + restart notice — ADR-005; v2 live state = SQLite-WAL durable + in-memory transient + `instance.json` + no bidirectional sync; control plane = loopback Starlette/Uvicorn, not JSON-RPC.)
+
+## Phase-1 parity contract (issue #78)
+
+The Docker parity job compares the pinned `@z_ai/coding-helper@0.0.7` against
+this package for every `tool × region × action` cell: four tools, global and
+China, and activate/revert/MCP install/MCP uninstall. The verdict is raw
+byte-for-byte process and HOME parity: exit code, stdout bytes, stderr bytes,
+complete regular-file set, file bytes, and POSIX mode. JSON is not parsed or
+canonicalized; formatting and final newlines are part of the contract.
+
+`--dry-run` and `status`, plus the Python ownership journal/backup bookkeeping,
+are explicit Python-port extensions without an upstream 0.0.7 analogue. They
+are not parity matrix actions and must not be used as parity expectations.
