@@ -751,6 +751,10 @@ def apply_plan_locked(
     Returns the tags actually written, in plan order (the journal is not a
     managed config file and never appears in the result).
     """
+    if state.path != paths.lock_file.parent:
+        raise ValueError(
+            f"transaction state {state.path} does not match {paths.lock_file.parent}"
+        )
     entries: list[_RecoveryEntry] = []
     written: list[FileTag] = []
     for delta in plan.deltas:

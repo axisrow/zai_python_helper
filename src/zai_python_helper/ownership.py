@@ -552,6 +552,10 @@ class OwnershipJournal:
         self, state: PinnedStateDirectory | None, *, create: bool
     ) -> tuple[PinnedStateDirectory | None, bool]:
         if state is not None:
+            if state.path != self.path.parent:
+                raise ValueError(
+                    f"journal {self.path} does not belong to pinned root {state.path}"
+                )
             return state, False
         from zai_python_helper.patchplan import PinnedStateDirectory
 

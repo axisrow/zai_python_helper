@@ -33,6 +33,7 @@ from zai_python_helper.core.planner import DeltaKind, FileDelta, FileTag, PatchP
 from zai_python_helper.patchplan import (
     ProcessLock,
     _read_at,
+    apply_plan_locked,
     apply_plan_under_lock,
     has_pending_recovery,
     migrate_legacy_state,
@@ -605,6 +606,16 @@ class TestRecover:
 
 
 class TestApplyPlanUnderLock:
+    def test_rejects_pinned_state_from_a_different_transaction(self, tmp_path):
+        """An explicit capability cannot be rebound to another Paths bundle."""
+        paths = _paths(tmp_path / "outer")
+        other = _paths(tmp_path / "other")
+        plan = _plan(FileDelta(FileTag.SETTINGS, DeltaKind.NOOP, {}))
+
+        with ProcessLock(other) as lock:
+            with pytest.raises(ValueError, match="does not match"):
+                apply_plan_locked(paths, plan, state=lock.state)
+
     def test_writes_all_files_and_leaves_no_manifest(self, tmp_path):
         """A clean commit writes every delta and deletes the recovery manifest."""
         paths = _paths(tmp_path)
