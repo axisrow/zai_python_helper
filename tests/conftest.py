@@ -7,7 +7,20 @@ this isolation with zero opt-in (``autouse=True``). A buggy test must not
 write to the developer's real configuration files.
 """
 
+import os
+from pathlib import Path
+
 import pytest
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _no_new_production_state_artifacts():
+    """Tests must not create durable production state under /var/tmp."""
+    root = Path("/var/tmp")
+    before = set(root.glob("zai-python-helper-*"))
+    yield
+    leaked = set(root.glob("zai-python-helper-*")) - before
+    assert not leaked, f"test leaked production state into /var/tmp: {sorted(leaked)}"
 
 
 @pytest.fixture(autouse=True)
@@ -18,4 +31,12 @@ def _isolate_home(tmp_path, monkeypatch):
     so tests that want to assert against it may request the fixture explicitly.
     """
     monkeypatch.setenv("HOME", str(tmp_path))
+    # ``from_home`` is also used extensively by tests; keep its bookkeeping
+    # isolated even when a callsite does not spell out state_home.
+    previous_state_home = os.environ.get("ZAI_PYTHON_HELPER_STATE_HOME")
+    os.environ["ZAI_PYTHON_HELPER_STATE_HOME"] = str(tmp_path)
     yield tmp_path
+    if previous_state_home is None:
+        os.environ.pop("ZAI_PYTHON_HELPER_STATE_HOME", None)
+    else:
+        os.environ["ZAI_PYTHON_HELPER_STATE_HOME"] = previous_state_home

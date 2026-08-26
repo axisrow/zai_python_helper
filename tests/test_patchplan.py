@@ -85,6 +85,29 @@ def test_migrate_legacy_state_rewrites_recovery_journal_path(tmp_path):
 
 
 class TestProcessLock:
+    def test_precreated_state_directory_symlink_is_rejected(self, tmp_path):
+        """A predictable state root must not be followed during setup."""
+        state_root = tmp_path / "zai-python-helper-99999"
+        target = tmp_path / "attacker-target"
+        target.mkdir()
+        state_root.symlink_to(target, target_is_directory=True)
+
+        with pytest.raises(OSError):
+            with ProcessLock(state_root / "zai-python-helper" / "home" / "lock"):
+                pass
+        assert not (target / "zai-python-helper").exists()
+
+    def test_precreated_lock_symlink_is_rejected(self, tmp_path):
+        """The lock itself must also be opened without following symlinks."""
+        lock_path = tmp_path / "lock"
+        target = tmp_path / "target"
+        target.write_text("")
+        lock_path.symlink_to(target)
+
+        with pytest.raises(OSError):
+            with ProcessLock(lock_path):
+                pass
+
     def test_lock_is_exclusive_across_threads(self, tmp_path):
         """Two threads acquiring the same lock serialize (flock LOCK_EX).
 

@@ -99,7 +99,10 @@ class Paths:
         if state_home is None:
             # /var/tmp is durable across reboots, unlike /tmp.  The directory
             # is created and ownership-checked by ProcessLock before use.
-            configured = os.environ.get("XDG_STATE_HOME", "")
+            configured = os.environ.get(
+                "ZAI_PYTHON_HELPER_STATE_HOME",
+                os.environ.get("XDG_STATE_HOME", ""),
+            )
             state_home = (
                 configured
                 if configured and Path(configured).is_absolute()
@@ -133,7 +136,10 @@ class Paths:
         Tests never call this — they inject ``tmp_path`` via :meth:`from_home`
         directly; that naming split is what makes test isolation provable.
         """
-        configured = os.environ.get("XDG_STATE_HOME", "")
+        configured = os.environ.get(
+            "ZAI_PYTHON_HELPER_STATE_HOME",
+            os.environ.get("XDG_STATE_HOME", ""),
+        )
         state_home = (
             configured
             if configured and Path(configured).is_absolute()

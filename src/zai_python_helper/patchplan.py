@@ -33,6 +33,7 @@ import fcntl
 import json
 import os
 import shutil
+import stat
 import tempfile
 import threading as _threading
 from dataclasses import dataclass
@@ -49,15 +50,46 @@ _SECURE_FILE_MODE = 0o600
 
 
 def _ensure_private_parent(path: Path) -> None:
-    """Create the state parent securely, rejecting pre-created directories."""
-    path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
-    st = path.parent.stat()
-    if st.st_uid != os.getuid():
-        raise PermissionError(f"insecure state directory: {path.parent}")
-    # Tighten a directory created by an older release (or by a test) before
-    # opening the lock.  A foreign-owned directory was rejected above.
-    if st.st_mode & 0o077:
-        path.parent.chmod(0o700)
+    """Create the state parent without following attacker-controlled entries."""
+    parent = Path(os.path.abspath(path.parent))
+    parts = parent.parts
+    fd = os.open(parts[0] or os.sep, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    current = Path(parts[0] or os.sep)
+    try:
+        for part in parts[1:]:
+            current /= part
+            try:
+                os.mkdir(part, mode=0o700, dir_fd=fd)
+            except FileExistsError:
+                pass
+            # macOS exposes /var as a system symlink.  Permit such trusted
+            # ancestors, but never follow symlinks once entering our state
+            # directory (the predictable attacker-controlled component).
+            private = (
+                part == "zai-python-helper"
+                or part.startswith("zai-python-helper-")
+                or current == parent
+            )
+            flags = os.O_RDONLY | os.O_DIRECTORY
+            if private:
+                flags |= os.O_NOFOLLOW
+            next_fd = os.open(part, flags, dir_fd=fd)
+            try:
+                st = os.fstat(next_fd)
+                # Only state directories are tightened; arbitrary existing
+                # ancestors such as /tmp or a user's XDG root are untouched.
+                if private and st.st_uid != os.getuid():
+                    raise PermissionError(f"insecure state directory: {current}")
+                if private and st.st_mode & 0o077:
+                    os.fchmod(next_fd, 0o700)
+            except BaseException:
+                os.close(next_fd)
+                raise
+            finally:
+                os.close(fd)
+            fd = next_fd
+    finally:
+        os.close(fd)
 
 
 def migrate_legacy_state(paths: Paths) -> list[str]:
@@ -237,7 +269,16 @@ def os_open(path: Path) -> int:
     """Open ``path`` for flock (creating it). Isolated for test monkeypatching."""
     import os
 
-    return os.open(str(path), os.O_RDWR | os.O_CREAT, _SECURE_FILE_MODE)
+    fd = os.open(
+        str(path), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, _SECURE_FILE_MODE
+    )
+    st = os.fstat(fd)
+    if st.st_uid != os.getuid() or not stat.S_ISREG(st.st_mode):
+        os.close(fd)
+        raise PermissionError(f"insecure lock file: {path}")
+    if st.st_mode & 0o077:
+        os.fchmod(fd, _SECURE_FILE_MODE)
+    return fd
 
 
 def close_fd(fd: int) -> None:

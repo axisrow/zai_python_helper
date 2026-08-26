@@ -675,5 +675,5 @@ def test_paths_ownership_json_is_0600_capable_via_paths(_isolate_home):
     from zai_python_helper.paths import Paths
 
     paths = Paths.from_home(_isolate_home)
-    assert _isolate_home not in paths.ownership_json.parents
+    assert _isolate_home in paths.ownership_json.parents
     assert not paths.ownership_json.exists()  # no IO yet

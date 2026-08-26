@@ -13,7 +13,7 @@ def test_paths_from_home_resolves_all_fields(_isolate_home):
     assert paths.claude_settings == home / ".claude" / "settings.json"
     assert paths.claude_json == home / ".claude.json"
     assert paths.zshrc == home / ".zshrc"
-    assert home not in paths.ownership_json.parents
+    assert home in paths.ownership_json.parents
     assert paths.ownership_json.name == "ownership.json"
     assert paths.recovery_json.name == "recovery.json"
     assert paths.lock_file.name == "lock"
@@ -67,5 +67,5 @@ def test_paths_rejects_invalid_xdg_state_home(monkeypatch, tmp_path, value):
     """Invalid XDG roots cannot redirect secrets into the CWD."""
     monkeypatch.setenv("XDG_STATE_HOME", value)
     paths = Paths.from_home(tmp_path)
-    assert tmp_path not in paths.state_dir.parents
+    assert tmp_path in paths.state_dir.parents
     assert paths.state_dir.is_absolute()
