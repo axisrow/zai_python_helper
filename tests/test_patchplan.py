@@ -86,21 +86,6 @@ def test_migrate_legacy_state_rewrites_recovery_journal_path(tmp_path):
 
 
 class TestProcessLock:
-    def test_precreated_state_directory_symlink_is_rejected(self, tmp_path):
-        """A predictable state root must not be followed during setup."""
-        state_root = tmp_path / "zai-python-helper-99999"
-        target = tmp_path / "attacker-target"
-        target.mkdir()
-        state_root.symlink_to(target, target_is_directory=True)
-
-        with pytest.raises(OSError):
-            with ProcessLock(state_root / "zai-python-helper" / "home" / "lock"):
-                pass
-        assert not (target / "zai-python-helper").exists()
-        state_root.unlink()
-        with ProcessLock(state_root / "zai-python-helper" / "home" / "lock"):
-            pass
-
     def test_precreated_lock_symlink_is_rejected(self, tmp_path):
         """The lock itself must also be opened without following symlinks."""
         lock_path = tmp_path / "lock"
@@ -121,6 +106,18 @@ class TestProcessLock:
         with ProcessLock(paths.lock_file):
             pass
         assert state_home.stat().st_mode & 0o777 == 0o755
+
+    def test_symlinked_xdg_state_root_is_supported(self, tmp_path):
+        """A user-configured state root may safely point to another volume."""
+        target = tmp_path / "actual-state"
+        target.mkdir()
+        state_home = tmp_path / "state-link"
+        state_home.symlink_to(target, target_is_directory=True)
+        paths = Paths.from_home(tmp_path, state_home=state_home)
+
+        with ProcessLock(paths.lock_file):
+            pass
+        assert (target / "zai-python-helper").is_dir()
 
     def test_lock_rejects_lexical_parent_traversal(self, tmp_path):
         """Validation and later bookkeeping must use identical path semantics."""

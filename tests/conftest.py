@@ -20,11 +20,11 @@ def _no_new_production_state_artifacts():
 
     def snapshot():
         state = {}
-        for entry in root.glob("zai-python-helper-*"):
+        entry = root / f"zai-python-helper-{os.getuid()}"
+        if entry.exists() or entry.is_symlink():
             if entry.is_symlink():
                 state[str(entry)] = ("symlink", entry.readlink())
-                continue
-            if entry.is_dir():
+            elif entry.is_dir():
                 for path in (entry, *entry.rglob("*")):
                     if path.is_symlink():
                         state[str(path)] = ("symlink", path.readlink())

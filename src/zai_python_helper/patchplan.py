@@ -59,7 +59,7 @@ def _ensure_private_parent(path: Path) -> int:
     private_paths = {parent}
     if parent.parent.name == "zai-python-helper":
         private_paths.add(parent.parent)
-    protected_paths = private_paths | {state_root}
+    protected_paths = private_paths
     # The fallback root itself is predictable and therefore must also be
     # protected.  Do not infer this from a basename: XDG_STATE_HOME may
     # legitimately live below a user directory with that name.
@@ -68,6 +68,7 @@ def _ensure_private_parent(path: Path) -> int:
         and state_root.name == f"zai-python-helper-{os.getuid()}"
     ):
         private_paths.add(state_root)
+        protected_paths.add(state_root)
     fd = os.open(parts[0] or os.sep, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     current = Path(parts[0] or os.sep)
     try:
