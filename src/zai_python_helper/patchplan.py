@@ -45,6 +45,30 @@ from zai_python_helper.paths import Paths
 _SECURE_FILE_MODE = 0o600
 
 
+def migrate_legacy_state(paths: Paths) -> list[str]:
+    """Move pre-0.1 bookkeeping out of HOME, once and atomically.
+
+    Older releases kept these files in ``~/.zai-python-helper``.  Losing that
+    journal on upgrade would make ``use default`` clear values it could no
+    longer prove ownership of, so migrate each file only when its new
+    destination is absent.  The operation is serialized by the new lock and
+    is intentionally a no-op for fresh installations (the parity path).
+    """
+    legacy_dir = paths.claude_settings.parent.parent / ".zai-python-helper"
+    moved: list[str] = []
+    with ProcessLock(paths.lock_file):
+        paths.ownership_json.parent.mkdir(parents=True, exist_ok=True)
+        for name, destination in (
+            ("ownership.json", paths.ownership_json),
+            ("recovery.json", paths.recovery_json),
+        ):
+            source = legacy_dir / name
+            if source.exists() and not destination.exists():
+                source.replace(destination)
+                moved.append(name)
+    return moved
+
+
 # ---------------------------------------------------------------------------
 # Process lock
 # ---------------------------------------------------------------------------

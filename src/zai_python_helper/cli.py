@@ -762,8 +762,14 @@ def _handle_use_zai(args: argparse.Namespace) -> int:
     # prior. Recovery also runs under this lock (it takes the lock itself, so
     # it serializes with us) before we read any state.
     from zai_python_helper.ownership import OwnershipJournal
-    from zai_python_helper.patchplan import ProcessLock, apply_plan_locked, recover
+    from zai_python_helper.patchplan import (
+        ProcessLock,
+        apply_plan_locked,
+        migrate_legacy_state,
+        recover,
+    )
 
+    migrate_legacy_state(paths)
     _run_recovery(paths, recover)
 
     with ProcessLock(paths.lock_file):
@@ -845,10 +851,16 @@ def _handle_use_default(args: argparse.Namespace) -> int:
     dry_run = getattr(args, "dry_run", False)
 
     from zai_python_helper.ownership import OwnershipJournal
-    from zai_python_helper.patchplan import ProcessLock, apply_plan_locked, recover
+    from zai_python_helper.patchplan import (
+        ProcessLock,
+        apply_plan_locked,
+        migrate_legacy_state,
+        recover,
+    )
 
     # Roll forward any interrupted prior run first (recover takes the lock
     # itself, so it serializes with the commit below).
+    migrate_legacy_state(paths)
     _run_recovery(paths, recover)
 
     print(f"Reverting to default provider (tool: {tool.name}, region: {region.value})")
