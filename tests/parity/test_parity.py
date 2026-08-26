@@ -202,10 +202,18 @@ def _assert_raw_parity(
     upstream = _upstream(upstream_home, tool, region, action, mcp_id)
     ours = _ours(ours_home, tool, region, action, mcp_id)
     # A broken adapter/image is an infrastructure failure, never an expected
-    # parity drift. Raw mismatches are temporarily reported as xfail until the
-    # dedicated behavior follow-up issues (#79–#84) close the existing gaps.
+    # parity drift. Process channels are asserted independently so a file
+    # drift cannot hide a stdout regression. Activate is CLI↔CLI; revert/MCP
+    # intentionally use the manager fallback documented by the runner.
     assert upstream.exit_code == 0, upstream.stderr.decode(errors="replace")
     assert ours.exit_code == 0, ours.stderr.decode(errors="replace")
+    assert upstream.stderr == ours.stderr, _format_drift(
+        f"{tool}/{region}/{action}/{mcp_id}/stderr", upstream, ours
+    )
+    if action == "activate":
+        assert upstream.stdout == ours.stdout, _format_drift(
+            f"{tool}/{region}/{action}/{mcp_id}/stdout", upstream, ours
+        )
     if upstream != ours and not STRICT_PARITY:
         pytest.xfail(
             _format_drift(f"{tool}/{region}/{action}/{mcp_id}", upstream, ours)

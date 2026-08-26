@@ -98,8 +98,27 @@ def test_invoke_doctor_empty_home_uses_health_stdout_and_progress_stderr(tmp_pat
         env=env,
     )
     assert result.returncode == 0
-    assert "settings.json env block" in result.stdout
-    assert "Running health check..." in result.stderr
+    assert result.stdout == (
+        "\n=== Health Check Results ===\n\n"
+        "✓ PATH\n"
+        "✗ API Key & Network\n"
+        "  API key not configured\n"
+        "✗ GLM Coding Plan\n"
+        "  GLM Coding Plan not configured. Run 'chelper init' to configure.\n"
+        "✗ Tool: Claude Code (claude-code)\n"
+        "  Tool not found: Claude Code\n"
+        "✗ Tool: OpenCode (opencode)\n"
+        "  Tool not found: OpenCode\n"
+        "✗ Tool: Crush (crush)\n"
+        "  Tool not found: Crush\n"
+        "✗ Tool: Factory Droid (factory-droid)\n"
+        "  Tool not found: Factory Droid\n\n\n"
+        "Suggestions:\n"
+        '- Run "chelper init" to configure missing settings\n'
+        "- Check your network connection\n"
+        "- Ensure required tools are installed\n"
+    )
+    assert result.stderr == "- Running health check...\n"
     assert "Running health check..." not in result.stdout
 
 

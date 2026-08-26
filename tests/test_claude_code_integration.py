@@ -89,7 +89,7 @@ class TestUseZai:
         assert env["SOME_FOREIGN_KEY"] == "keep"
 
         out = capsys.readouterr().out
-        assert "restart recommended" in out
+        assert "GLM configuration reloaded to Claude Code successfully" in out
         # Token never leaks to stdout.
         assert TOKEN not in out
 
@@ -138,7 +138,10 @@ class TestIdempotency:
         _run(["use", "zai", "--api-key", TOKEN])
         capsys.readouterr()  # drain
         _run(["use", "zai", "--api-key", TOKEN])
-        assert "no changes" in capsys.readouterr().out.lower()
+        assert capsys.readouterr().out == (
+            "Reloading GLM configuration to Claude Code...\n"
+            "GLM configuration reloaded to Claude Code successfully\n"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -256,9 +259,12 @@ class TestUseDefault:
         # The foreign secret must NEVER appear in stdout.
         assert "sk-foreign-secret-xyz" not in out
         assert "OPENAI_API_KEY" not in out
-        # Our own token is redacted.
+        # The public output is the upstream-compatible status only.
         assert TOKEN not in out
-        assert "<redacted>" in out
+        assert out == (
+            "Reloading GLM configuration to Claude Code...\n"
+            "GLM configuration reloaded to Claude Code successfully\n"
+        )
 
 
 # ---------------------------------------------------------------------------
