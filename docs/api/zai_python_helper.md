@@ -783,7 +783,7 @@ Value: `{Region.GLOBAL: 'https://api.z.ai/api/anthropic', Region.CHINA: 'https:/
 
 ### `Paths`
 
-*dataclass — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/paths.py#L30)*
+*dataclass — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/paths.py#L29)*
 
 Frozen bundle of every resolved filesystem path the tool touches.
 
