@@ -31,6 +31,7 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import json
+import os
 import threading as _threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,6 +44,18 @@ from zai_python_helper.paths import Paths
 # same posture as the secrets file. Reuse ownership's secret-grade atomic
 # writer so both stay consistent.
 _SECURE_FILE_MODE = 0o600
+
+
+def _ensure_private_parent(path: Path) -> None:
+    """Create the state parent securely, rejecting pre-created directories."""
+    path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    st = path.parent.stat()
+    if st.st_uid != os.getuid():
+        raise PermissionError(f"insecure state directory: {path.parent}")
+    # Tighten a directory created by an older release (or by a test) before
+    # opening the lock.  A foreign-owned directory was rejected above.
+    if st.st_mode & 0o077:
+        path.parent.chmod(0o700)
 
 
 def migrate_legacy_state(paths: Paths) -> list[str]:
@@ -132,7 +145,7 @@ class ProcessLock:
         self._intra = intra
         self._held_intra = True
         # 2) Cross-process serialization (flock). Create the file + parent dir.
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        _ensure_private_parent(self.path)
         try:
             self._fd = os_open(self.path)
             fcntl.flock(self._fd, fcntl.LOCK_EX)
@@ -284,7 +297,9 @@ def _write_manifest(
     _atomic_write_secret(path, text.encode("utf-8"))
 
 
-def _read_manifest(path: Path) -> tuple[list[_RecoveryEntry], _RecoveryEntry | None]:
+def _read_manifest(
+    path: Path, paths: Paths
+) -> tuple[list[_RecoveryEntry], _RecoveryEntry | None]:
     """Parse a recovery manifest → ``(entries, journal)``.
 
     Returns ``([], None)`` if the manifest is absent or corrupt. A corrupt
@@ -305,14 +320,22 @@ def _read_manifest(path: Path) -> tuple[list[_RecoveryEntry], _RecoveryEntry | N
     if not isinstance(doc, dict):
         return [], None
     raw_entries = doc.get("entries", [])
+    allowed = {
+        tag.value: str(_tag_path(paths, tag))
+        for tag in FileTag
+    }
     entries = [
         _RecoveryEntry.from_dict(e)
         for e in (raw_entries if isinstance(raw_entries, list) else [])
         if isinstance(e, dict)
+        and str(e.get("path", "")) == allowed.get(str(e.get("tag", "")))
     ]
     raw_journal = doc.get("journal")
     journal = (
-        _RecoveryEntry.from_dict(raw_journal) if isinstance(raw_journal, dict) else None
+        _RecoveryEntry.from_dict(raw_journal)
+        if isinstance(raw_journal, dict)
+        and str(raw_journal.get("path", "")) == str(paths.ownership_json)
+        else None
     )
     return entries, journal
 
@@ -366,7 +389,7 @@ def recover(paths: Paths) -> list[str]:
         wrote, in manifest order. Empty if no manifest existed.
     """
     with ProcessLock(paths.lock_file):
-        entries, journal = _read_manifest(paths.recovery_json)
+        entries, journal = _read_manifest(paths.recovery_json, paths)
         if not entries and journal is None:
             # An absent/empty manifest means nothing to recover. Ensure no
             # stale (e.g. zero-byte) manifest lingers.
