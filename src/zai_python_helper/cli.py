@@ -488,6 +488,11 @@ def _print_diff(path: Path, current: str, desired: str, tag: FileTag) -> None:
         # No textual diff — nothing would change for this file.
         return
     print(diff_text, end="")
+    # JSON rendering intentionally has no final newline to match upstream
+    # bytes. Keep consecutive dry-run diff records readable regardless of
+    # whether the rendered input ends with a newline.
+    if not diff_text.endswith("\n"):
+        print()
 
 
 def _run_recovery(paths: Paths, recover_fn) -> None:
