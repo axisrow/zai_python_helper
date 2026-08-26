@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -98,7 +97,9 @@ class Paths:
         # omitted here it preserves the hermetic legacy layout for tests and
         # library callers that explicitly inject a HOME.
         if state_home is None:
-            state_home = os.environ.get("XDG_STATE_HOME", tempfile.gettempdir())
+            # /var/tmp is durable across reboots, unlike /tmp.  The directory
+            # is created and ownership-checked by ProcessLock before use.
+            state_home = os.environ.get("XDG_STATE_HOME", "/var/tmp")
         home_id = hashlib.sha256(str(h).encode()).hexdigest()[:16]
         helper_dir = Path(state_home) / "zai-python-helper" / home_id
         state_dir = helper_dir / "state"
@@ -127,5 +128,5 @@ class Paths:
         Tests never call this — they inject ``tmp_path`` via :meth:`from_home`
         directly; that naming split is what makes test isolation provable.
         """
-        state_home = os.environ.get("XDG_STATE_HOME", tempfile.gettempdir())
+        state_home = os.environ.get("XDG_STATE_HOME", "/var/tmp")
         return cls.from_home(Path.home(), cwd=Path.cwd(), state_home=state_home)
