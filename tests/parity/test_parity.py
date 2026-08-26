@@ -170,13 +170,11 @@ def _ours(home: Path, tool: str, region: str, action: str) -> ProcessResult:
     )
 
 
-def _prepare(home: Path, tool: str, region: str, action: str) -> None:
+def _prepare(home: Path, tool: str, region: str, action: str, runner) -> None:
     if action == "revert":
-        _upstream(home, tool, region, "activate")
-        _ours(home, tool, region, "activate")
+        runner(home, tool, region, "activate")
     elif action == "mcp-uninstall":
-        _upstream(home, tool, region, "mcp-install")
-        _ours(home, tool, region, "mcp-install")
+        runner(home, tool, region, "mcp-install")
 
 
 def _format_drift(path: str, upstream: ProcessResult, ours: ProcessResult) -> str:
@@ -196,8 +194,11 @@ def test_pinned_upstream_raw_parity(
     _ensure_image()
     upstream_home = tmp_path_factory.mktemp(f"upstream-{tool}-{region}-{action}")
     ours_home = tmp_path_factory.mktemp(f"ours-{tool}-{region}-{action}")
-    _prepare(upstream_home, tool, region, action)
-    _prepare(ours_home, tool, region, action)
+    # Each side must prepare its own HOME with its own implementation.  Mixing
+    # the setup commands would make inverse actions operate on foreign state
+    # and would also leak the Python ownership journal into the upstream case.
+    _prepare(upstream_home, tool, region, action, _upstream)
+    _prepare(ours_home, tool, region, action, _ours)
     upstream = _upstream(upstream_home, tool, region, action)
     ours = _ours(ours_home, tool, region, action)
     # A broken adapter/image is an infrastructure failure, never an expected

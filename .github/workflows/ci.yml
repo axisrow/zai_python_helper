@@ -49,4 +49,4 @@ jobs:
         # is needed. The image built above is reused (not rebuilt) because the
         # test's `_ensure_image()` sees it already present.
         run: |
-          pytest tests/parity/ -v
+          ZAI_PARITY_STRICT=1 pytest tests/parity/ -v
