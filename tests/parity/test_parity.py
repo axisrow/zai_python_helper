@@ -28,8 +28,9 @@ _HOST_GID = str(os.getgid())
 _CONTAINER_LABEL = f"ao.session={os.environ.get('AO_SESSION_ID', 'parity-tests')}"
 TOOLS = ("claude-code", "opencode", "crush", "factory-droid")
 REGIONS = ("global", "china")
-ACTIONS = ("activate", "revert", "mcp-install", "mcp-uninstall")
-MCP_ID = "web-search-prime"
+TOOL_CONFIG_ACTIONS = ("activate", "revert")
+MCP_ACTIONS = ("mcp-install", "mcp-uninstall")
+MCP_IDS = ("zai-mcp-server", "web-search-prime", "web-reader", "zread")
 # CI records the raw drift while follow-up parity issues repair it. Set this
 # locally (or in the parity workflow) to make drift a hard failure.
 STRICT_PARITY = os.environ.get("ZAI_PARITY_STRICT") == "1"
@@ -117,7 +118,9 @@ def _docker_run(home: Path, command: list[str]) -> subprocess.CompletedProcess[b
     )
 
 
-def _upstream(home: Path, tool: str, region: str, action: str) -> ProcessResult:
+def _upstream(
+    home: Path, tool: str, region: str, action: str, mcp_id: str
+) -> ProcessResult:
     result = _docker_run(
         home,
         [
@@ -126,7 +129,7 @@ def _upstream(home: Path, tool: str, region: str, action: str) -> ProcessResult:
             tool,
             region,
             action,
-            MCP_ID,
+            mcp_id,
             FAKE_TOKEN,
         ],
     )
@@ -135,7 +138,7 @@ def _upstream(home: Path, tool: str, region: str, action: str) -> ProcessResult:
     )
 
 
-def _ours(home: Path, tool: str, region: str, action: str) -> ProcessResult:
+def _ours(home: Path, tool: str, region: str, action: str, mcp_id: str) -> ProcessResult:
     our_tool = tool.replace("-", "_")
     if action == "activate":
         command = [
@@ -154,7 +157,7 @@ def _ours(home: Path, tool: str, region: str, action: str) -> ProcessResult:
         command = [
             "mcp",
             "install",
-            MCP_ID,
+            mcp_id,
             "--tool",
             tool,
             "--region",
@@ -163,32 +166,29 @@ def _ours(home: Path, tool: str, region: str, action: str) -> ProcessResult:
             FAKE_TOKEN,
         ]
     else:
-        command = ["mcp", "uninstall", MCP_ID, "--tool", tool]
+        command = ["mcp", "uninstall", mcp_id, "--tool", tool]
     result = _docker_run(home, ["python", "-m", "zai_python_helper", *command])
     return ProcessResult(
         result.returncode, result.stdout, result.stderr, snapshot_home(home)
     )
 
 
-def _prepare(home: Path, tool: str, region: str, action: str, runner) -> None:
+def _prepare(
+    home: Path, tool: str, region: str, action: str, mcp_id: str, runner
+) -> None:
     if action == "revert":
-        runner(home, tool, region, "activate")
+        runner(home, tool, region, "activate", mcp_id)
     elif action == "mcp-uninstall":
-        runner(home, tool, region, "mcp-install")
+        runner(home, tool, region, "mcp-install", mcp_id)
 
 
 def _format_drift(path: str, upstream: ProcessResult, ours: ProcessResult) -> str:
     return f"{path}: upstream={upstream!r} != ours={ours!r}"
 
 
-@pytest.mark.smoke
-@pytest.mark.parametrize("tool", TOOLS)
-@pytest.mark.parametrize("region", REGIONS)
-@pytest.mark.parametrize("action", ACTIONS)
-def test_pinned_upstream_raw_parity(
-    tmp_path_factory, tool: str, region: str, action: str
+def _assert_raw_parity(
+    tmp_path_factory, tool: str, region: str, action: str, mcp_id: str
 ) -> None:
-    """Every tool × region × action cell has one raw, byte-for-byte verdict."""
     if not _docker_available():
         pytest.skip("no docker daemon; full parity matrix requires the image")
     _ensure_image()
@@ -197,15 +197,42 @@ def test_pinned_upstream_raw_parity(
     # Each side must prepare its own HOME with its own implementation.  Mixing
     # the setup commands would make inverse actions operate on foreign state
     # and would also leak the Python ownership journal into the upstream case.
-    _prepare(upstream_home, tool, region, action, _upstream)
-    _prepare(ours_home, tool, region, action, _ours)
-    upstream = _upstream(upstream_home, tool, region, action)
-    ours = _ours(ours_home, tool, region, action)
+    _prepare(upstream_home, tool, region, action, mcp_id, _upstream)
+    _prepare(ours_home, tool, region, action, mcp_id, _ours)
+    upstream = _upstream(upstream_home, tool, region, action, mcp_id)
+    ours = _ours(ours_home, tool, region, action, mcp_id)
     # A broken adapter/image is an infrastructure failure, never an expected
     # parity drift. Raw mismatches are temporarily reported as xfail until the
-    # dedicated follow-up issues (#79–#85) close the existing contract gaps.
+    # dedicated behavior follow-up issues (#79–#84) close the existing gaps.
     assert upstream.exit_code == 0, upstream.stderr.decode(errors="replace")
     assert ours.exit_code == 0, ours.stderr.decode(errors="replace")
     if upstream != ours and not STRICT_PARITY:
-        pytest.xfail(_format_drift(f"{tool}/{region}/{action}", upstream, ours))
-    assert upstream == ours, _format_drift(f"{tool}/{region}/{action}", upstream, ours)
+        pytest.xfail(
+            _format_drift(f"{tool}/{region}/{action}/{mcp_id}", upstream, ours)
+        )
+    assert upstream == ours, _format_drift(
+        f"{tool}/{region}/{action}/{mcp_id}", upstream, ours
+    )
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("tool", TOOLS)
+@pytest.mark.parametrize("region", REGIONS)
+@pytest.mark.parametrize("action", TOOL_CONFIG_ACTIONS)
+def test_pinned_upstream_raw_tool_config_parity(
+    tmp_path_factory, tool: str, region: str, action: str
+) -> None:
+    """Every tool-config cell has one raw, byte-for-byte verdict."""
+    _assert_raw_parity(tmp_path_factory, tool, region, action, MCP_IDS[0])
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("mcp_id", MCP_IDS)
+@pytest.mark.parametrize("tool", TOOLS)
+@pytest.mark.parametrize("region", REGIONS)
+@pytest.mark.parametrize("action", MCP_ACTIONS)
+def test_pinned_upstream_raw_mcp_parity(
+    tmp_path_factory, tool: str, region: str, action: str, mcp_id: str
+) -> None:
+    """All 4 presets × 4 tools × 2 regions have live install/uninstall verdicts."""
+    _assert_raw_parity(tmp_path_factory, tool, region, action, mcp_id)

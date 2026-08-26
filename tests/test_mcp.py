@@ -1,18 +1,13 @@
-"""Tests for preset MCP install/uninstall (S7, issue #8) — core layer.
+"""Unit and integration tests for preset MCP install/uninstall (S7, issue #8).
 
-Parity focus: the per-tool MCP-entry shapes must match the upstream
-``@z_ai/coding-helper`` per-tool managers byte-for-byte (the issue's "parity
-required" contract — id/protocol/auth/url region-aware + the exact dict each
-tool stores). These tests assert the EXACT dict for each (tool, preset,
-region) so a drift in field name, nesting, or value is caught directly.
+The literal assertions in this module are fast tests of our internal entry
+builders. They do not claim upstream parity. Live byte-for-byte comparisons
+against the pinned ``@z_ai/coding-helper`` run in ``tests/parity/test_parity.py``.
 
 The pure transforms (``build_mcp_entry`` / ``install_into_doc`` /
 ``uninstall_from_doc``) are tested on plain dicts (no FS); the high-level
 ``install_mcp`` / ``uninstall_mcp`` cycle is tested with a tmp HOME (autouse
 ``_isolate_home``) and reads the written JSON back via ``JsonBackend``.
-
-Extended per-tool parity tests + the doctor-probe integration tests land in
-the follow-up CLI PR.
 """
 
 from __future__ import annotations
@@ -46,7 +41,7 @@ _EXPECTED_IDS = ["zai-mcp-server", "web-search-prime", "web-reader", "zread"]
 
 
 # --------------------------------------------------------------------------- #
-# Preset table — the parity contract for the static definitions.
+# Preset table — fast unit coverage for the static definitions.
 # --------------------------------------------------------------------------- #
 
 
@@ -82,11 +77,12 @@ def test_stdio_preset_carries_region_aware_env_template():
 
 
 # --------------------------------------------------------------------------- #
-# build_mcp_entry — the per-tool entry shape (parity byte-for-byte).
+# build_mcp_entry — exact internal per-tool entry shapes (unit tests).
 # --------------------------------------------------------------------------- #
 
 
-def test_claude_code_stdio_entry_matches_upstream():
+@pytest.mark.unit
+def test_claude_code_stdio_entry_exact_unit_shape():
     """Claude Code stdio: {type:stdio, command, args, env} with Z_AI_API_KEY."""
     entry = build_mcp_entry(Tool.CLAUDE_CODE, "zai-mcp-server", _KEY, Region.GLOBAL)
     assert entry == {
@@ -97,7 +93,8 @@ def test_claude_code_stdio_entry_matches_upstream():
     }
 
 
-def test_claude_code_http_entry_matches_upstream():
+@pytest.mark.unit
+def test_claude_code_http_entry_exact_unit_shape():
     """Claude Code http: {type:http, url, headers:{Authorization: Bearer}}."""
     entry = build_mcp_entry(Tool.CLAUDE_CODE, "web-search-prime", _KEY, Region.GLOBAL)
     assert entry == {
@@ -107,7 +104,8 @@ def test_claude_code_http_entry_matches_upstream():
     }
 
 
-def test_opencode_entry_shapes_differ_from_claude_code():
+@pytest.mark.unit
+def test_opencode_entry_shapes_unit_contract():
     """OpenCode stdio uses 'local' + command array + 'environment'; http 'remote'."""
     stdio = build_mcp_entry(Tool.OPENCODE, "zai-mcp-server", _KEY, Region.GLOBAL)
     assert stdio == {
@@ -120,7 +118,8 @@ def test_opencode_entry_shapes_differ_from_claude_code():
     assert http["headers"] == {"Authorization": f"Bearer {_KEY}"}
 
 
-def test_factory_droid_entries_carry_disabled_false():
+@pytest.mark.unit
+def test_factory_droid_entry_shapes_unit_contract():
     """Factory Droid adds 'disabled: false' to both stdio and http entries."""
     stdio = build_mcp_entry(Tool.FACTORY_DROID, "zai-mcp-server", _KEY, Region.GLOBAL)
     assert stdio["disabled"] is False
@@ -128,7 +127,8 @@ def test_factory_droid_entries_carry_disabled_false():
     assert http["disabled"] is False
 
 
-def test_crush_http_matches_claude_code_shape():
+@pytest.mark.unit
+def test_crush_http_entry_shape_unit_contract():
     """Crush uses the same http entry shape as Claude Code (type: http)."""
     crush = build_mcp_entry(Tool.CRUSH, "web-search-prime", _KEY, Region.GLOBAL)
     claude = build_mcp_entry(Tool.CLAUDE_CODE, "web-search-prime", _KEY, Region.GLOBAL)
@@ -239,7 +239,7 @@ def test_uninstall_from_doc_removes_only_its_id_and_preserves_empty_section():
     ],
 )
 def test_uninstall_from_doc_preserves_empty_section_for_every_tool(tool, section):
-    """All adapters retain their upstream section after the last uninstall."""
+    """All adapters retain their configured section after the last uninstall."""
     doc = {section: {"zread": {"type": "http"}}}
 
     out = uninstall_from_doc(doc, tool, "zread")
@@ -372,8 +372,8 @@ def test_install_mcp_uses_injected_io_seams(_isolate_home):
     assert store[path]["mcp"]["zread"]["type"] == "remote"
 
 
-def test_written_config_matches_upstream_json_bytes(_isolate_home):
-    """Tool config JSON is parseable and has no upstream-drifting newline."""
+def test_written_config_uses_compact_json_bytes(_isolate_home):
+    """Tool config JSON is parseable, mode 0600, and has no final newline."""
     install_mcp(Tool.CLAUDE_CODE, "zread", _KEY, Region.GLOBAL, home=_isolate_home)
     path = tool_config_path(Tool.CLAUDE_CODE, _isolate_home)
     text = path.read_text(encoding="utf-8")
