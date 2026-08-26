@@ -769,8 +769,11 @@ def _handle_use_zai(args: argparse.Namespace) -> int:
         recover,
     )
 
-    migrate_legacy_state(paths)
-    _run_recovery(paths, recover)
+    if not dry_run:
+        # Migration and crash recovery are writes; dry-run must remain a
+        # strictly read-only preview, including when legacy state exists.
+        migrate_legacy_state(paths)
+        _run_recovery(paths, recover)
 
     with ProcessLock(paths.lock_file):
         # Read state, plan, and capture ownership — all inside the lock so a
@@ -860,8 +863,10 @@ def _handle_use_default(args: argparse.Namespace) -> int:
 
     # Roll forward any interrupted prior run first (recover takes the lock
     # itself, so it serializes with the commit below).
-    migrate_legacy_state(paths)
-    _run_recovery(paths, recover)
+    if not dry_run:
+        # Do not migrate or replay state during a read-only preview.
+        migrate_legacy_state(paths)
+        _run_recovery(paths, recover)
 
     print(f"Reverting to default provider (tool: {tool.name}, region: {region.value})")
 
