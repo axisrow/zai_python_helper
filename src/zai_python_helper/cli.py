@@ -512,10 +512,10 @@ def _run_recovery(paths: Paths, recover_fn) -> None:
     replay it to completion and report what was recovered. Best-effort and
     silent when there is nothing to recover.
     """
-    from zai_python_helper.patchplan import has_pending_recovery
-
-    if not has_pending_recovery(paths):
-        return
+    # ``recover`` performs the existence check after opening the validated
+    # helper directory and taking its lock.  Do not use a path-based
+    # exists()-then-open probe here: that is precisely the state-root TOCTOU
+    # this boundary is intended to eliminate (issue #111).
     applied = recover_fn(paths)
     if applied:
         print(
@@ -770,7 +770,7 @@ def _handle_use_zai(args: argparse.Namespace) -> int:
         migrate_legacy_state(paths)
         _run_recovery(paths, recover)
 
-    with ProcessLock(paths.lock_file):
+    with ProcessLock(paths.lock_file) as lock:
         # Read state, plan, and capture ownership — all inside the lock so a
         # concurrent revert cannot mutate the config between our read and our
         # commit (and so the takeover prior reflects exactly the pre-commit
@@ -783,7 +783,7 @@ def _handle_use_zai(args: argparse.Namespace) -> int:
         # entry we wrote from one the user wrote (issue #61). Reading it here
         # keeps the snapshot consistent with the state we plan against.
         journal = OwnershipJournal(paths.ownership_json)
-        journal_records = journal.read()
+        journal_records = journal.read(root_fd=lock.root_fd)
 
         plan = tool.plan_zai(
             spec,
@@ -816,7 +816,7 @@ def _handle_use_zai(args: argparse.Namespace) -> int:
         def _journal_text() -> str | None:
             if not records:
                 return None
-            current = journal.read()
+            current = journal.read(root_fd=lock.root_fd)
             return journal.render(_merge_takeover_records(tool, current, records))
 
         apply_plan_locked(paths, plan, journal_content=_journal_text)
@@ -885,10 +885,10 @@ def _handle_use_default(args: argparse.Namespace) -> int:
     # inside ONE held ProcessLock (ADR-005 / S3 finding #6): a concurrent
     # ``use zai`` must not be able to change the config between our decision
     # read and our commit (which would make the decisions stale).
-    with ProcessLock(paths.lock_file):
+    with ProcessLock(paths.lock_file) as lock:
         state = tool.read_state(paths)
         journal = OwnershipJournal(paths.ownership_json)
-        journal_records = journal.read()
+        journal_records = journal.read(root_fd=lock.root_fd)
         decisions, retired_records = tool.revert_decisions(journal_records, state)
         plan = tool.plan_revert(
             state=state, decisions=decisions, journal_records=journal_records
@@ -907,7 +907,7 @@ def _handle_use_default(args: argparse.Namespace) -> int:
         # byte-identical (a fresh copy with no retirement); when there is
         # nothing at all to journal we skip it so no empty file is created.
         def _journal_text() -> str | None:
-            if not retired_records and not journal.path.exists():
+            if not retired_records and not journal.exists(root_fd=lock.root_fd):
                 return None
             return journal.render(retired_records)
 
