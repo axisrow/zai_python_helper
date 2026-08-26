@@ -880,9 +880,12 @@ write(path: Path, doc: dict[str, Any]) -> None
 
 Serialize `doc` to pretty JSON and write it atomically to `path`.
 
-`indent=2` + `sort_keys=False` (preserve insertion order) + a
-trailing newline. Sorted keys would shuffle user-owned keys on every
-write, producing noisy diffs, so we keep insertion order.
+`indent=2` + `sort_keys=False` (preserve insertion order), without
+a trailing newline (matching the upstream JSON writers). Sorted keys
+would shuffle user-owned keys on every write, producing noisy diffs,
+so we keep insertion order. Config files remain mode `0600` because
+they may carry authentication credentials; this is an intentional
+security deviation from upstream's default `0644` mode.
 
 #### `render()`
 
@@ -901,7 +904,7 @@ Pure: the bytes this backend WOULD write, without touching the FS.
 
 ### `ShellBackend`
 
-*class — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/backends.py#L151)*
+*class — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/backends.py#L154)*
 
 Owned marker-fenced block writer for shell rc files (ADR-003).
 

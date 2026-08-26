@@ -19,7 +19,8 @@ from pathlib import Path
 
 import pytest
 
-from zai_python_helper.cli import build_parser
+from zai_python_helper.cli import _print_diff, build_parser
+from zai_python_helper.core.planner import FileTag
 from zai_python_helper.paths import Paths
 
 GLOBAL_URL = "https://api.z.ai/api/anthropic"
@@ -717,6 +718,17 @@ class TestDryRun:
         # The secret value must never appear; only <redacted>.
         assert "sk-real-secret" not in out
         assert "<redacted>" in out
+
+    def test_dry_run_diff_records_are_separated_without_json_newline(
+        self, tmp_path, capsys
+    ):
+        """Adjacent diffs remain readable when JSON has no final newline."""
+        _print_diff(tmp_path / "one.json", "", "}", FileTag.SETTINGS)
+        _print_diff(tmp_path / "two.json", "", "}", FileTag.CLAUDE_JSON)
+
+        out = capsys.readouterr().out
+        assert "+}\n---" in out
+        assert "+}---" not in out
 
     def test_dry_run_redacts_foreign_secret_in_diff(self, tmp_path, monkeypatch, capsys):
         """Regression (Codex F1): a foreign secret in settings.json must be

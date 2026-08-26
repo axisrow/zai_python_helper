@@ -372,12 +372,14 @@ def test_install_mcp_uses_injected_io_seams(_isolate_home):
     assert store[path]["mcp"]["zread"]["type"] == "remote"
 
 
-def test_written_config_is_valid_json_with_trailing_newline(_isolate_home):
-    """The written tool config is parseable JSON ending in a newline."""
+def test_written_config_matches_upstream_json_bytes(_isolate_home):
+    """Tool config JSON is parseable and has no upstream-drifting newline."""
     install_mcp(Tool.CLAUDE_CODE, "zread", _KEY, Region.GLOBAL, home=_isolate_home)
-    text = tool_config_path(Tool.CLAUDE_CODE, _isolate_home).read_text(encoding="utf-8")
-    assert text.endswith("\n")
+    path = tool_config_path(Tool.CLAUDE_CODE, _isolate_home)
+    text = path.read_text(encoding="utf-8")
+    assert not text.endswith("\n")
     json.loads(text)
+    assert path.stat().st_mode & 0o777 == 0o600
 
 
 # --------------------------------------------------------------------------- #

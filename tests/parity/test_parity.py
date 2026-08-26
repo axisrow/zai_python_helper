@@ -15,11 +15,13 @@ intentional, directional exceptions are documented in the constants below:
 * ours-only ``.zshrc`` is the headless-first shell warning block (Phase 2);
 * ours-only ownership journal and lock implement ADR-004/ADR-005 (Phase 2).
 
-The two common files use a documented normalized-JSON contract: parse UTF-8,
-replace the hard-coded fake token, then serialize with sorted object keys.
-Values, JSON types, array order, and key presence are parity-significant;
-object-key order, whitespace, and final newlines are not.  No real token is
-read or sent: the image's fetch mock validates the fake token offline.
+The two common files use a documented normalized-JSON contract for semantic
+comparison: parse UTF-8, replace the hard-coded fake token, then serialize
+with sorted object keys. Values, JSON types, array order, and key presence are
+parity-significant; object-key order and whitespace are not. Raw-byte checks
+also pin the upstream contract that these JSON files have no final newline.
+No real token is read or sent: the image's fetch mock validates the fake token
+offline.
 
 ``default``, ``select``, and ``custom`` are intentionally not driven here:
 upstream 0.0.7 has no equivalent model-selection surface.  They are Phase-2
@@ -300,6 +302,15 @@ def test_use_zai_common_files_match_upstream_normalized_json(parity_pair, path):
     original, ours = parity_pair
     if normalize_json(original.get(path)) != normalize_json(ours.get(path)):
         _fail_with_diff(path, original.get(path), ours.get(path))
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("path", sorted(COMMON_HOME_FILES))
+def test_use_zai_common_json_has_no_trailing_newline(parity_pair, path):
+    """Both writers preserve upstream's raw-byte JSON newline contract."""
+    original, ours = parity_pair
+    assert original[path][-1:] != b"\n"
+    assert ours[path][-1:] != b"\n"
 
 
 # --------------------------------------------------------------------------- #
