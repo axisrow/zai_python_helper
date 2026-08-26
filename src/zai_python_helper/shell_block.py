@@ -136,28 +136,11 @@ def remove_owned_block(text: str) -> str:
     begin_idx, end_idx = rng
 
     lines = text.split("\n")
-    # Drop the inclusive [begin_idx, end_idx] range only.
-    out = lines[:begin_idx] + lines[end_idx + 1 :]
-
-    # Collapse runs of 2+ consecutive blank lines (the removal can leave a
-    # dangling blank pair at the splice point) down to a single blank line.
-    collapsed: list[str] = []
-    prev_blank = False
-    for line in out:
-        is_blank = line == ""
-        if is_blank and prev_blank:
-            continue
-        collapsed.append(line)
-        prev_blank = is_blank
-    # Trim leading blank lines (file should not start with a blank line).
-    while collapsed and collapsed[0] == "":
-        collapsed.pop(0)
-    # Trim trailing blank lines so a round-trip restores the original file's
-    # single trailing newline (install added a blank separator before the
-    # block; after removal we must not leave it dangling).
-    while collapsed and collapsed[-1] == "":
-        collapsed.pop()
-    # Ensure exactly one trailing newline, or empty if nothing remains.
-    if not collapsed:
-        return ""
-    return "\n".join(collapsed) + "\n"
+    # Drop the inclusive [begin_idx, end_idx] range only.  ``install`` adds
+    # one separator blank line immediately before the block; remove that one
+    # too, but do not normalize blank lines elsewhere in the user's file.
+    before = lines[:begin_idx]
+    after = lines[end_idx + 1 :]
+    if before and before[-1] == "":
+        before.pop()
+    return "\n".join(before + after)

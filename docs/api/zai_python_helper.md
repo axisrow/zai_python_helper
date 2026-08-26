@@ -856,7 +856,7 @@ directly; that naming split is what makes test isolation provable.
 
 ### `JsonBackend`
 
-*class — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/backends.py#L98)*
+*class — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/backends.py#L101)*
 
 Atomic JSON document writer/reader.
 
@@ -905,7 +905,7 @@ Pure: the bytes this backend WOULD write, without touching the FS.
 
 ### `ShellBackend`
 
-*class — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/backends.py#L158)*
+*class — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/backends.py#L161)*
 
 Owned marker-fenced block writer for shell rc files (ADR-003).
 
