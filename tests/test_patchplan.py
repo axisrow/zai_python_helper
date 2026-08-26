@@ -141,6 +141,29 @@ def test_migrate_legacy_state_rewrites_recovery_journal_path(tmp_path):
     assert manifest["journal"]["path"] == str(paths.ownership_json)
 
 
+@pytest.mark.parametrize("name", ["ownership.json", "recovery.json"])
+def test_migrate_legacy_state_prefers_newer_runtime_tree(tmp_path, name):
+    """A stale pre-0.1 HOME copy cannot override newer runtime state."""
+    home = tmp_path / "home"
+    home.mkdir()
+    home_legacy = home / ".zai-python-helper"
+    home_legacy.mkdir(mode=0o700)
+    runtime_legacy = tmp_path / "legacy-runtime"
+    runtime_legacy.mkdir(mode=0o700)
+    (home_legacy / name).write_text('{"source": "home"}\n')
+    (runtime_legacy / name).write_text('{"source": "runtime"}\n')
+    paths = replace(
+        Paths.from_home(home, state_home=tmp_path / "new-state"),
+        legacy_runtime_dir=runtime_legacy,
+    )
+
+    assert migrate_legacy_state(paths) == [name]
+    destination = paths.lock_file.parent / name
+    assert json.loads(destination.read_text()) == {"source": "runtime"}
+    assert not (runtime_legacy / name).exists()
+    assert (home_legacy / name).exists()
+
+
 def test_migrate_legacy_state_waits_for_legacy_process_lock(tmp_path):
     """Migration cannot copy/unlink state while an old process is committing."""
     legacy = tmp_path / "legacy-state"

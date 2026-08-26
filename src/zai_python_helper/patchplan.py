@@ -237,14 +237,17 @@ def state_transaction(paths: Paths):
             # Reserve every old lock namespace even when its tree does not yet
             # exist. An already-started old process may be paused before mkdir
             # and must still serialize with this complete transaction.
-            legacy_candidates = [
+            legacy_candidates: list[tuple[Path, bool]] = []
+            if paths.legacy_runtime_dir is not None:
+                legacy_candidates.append((paths.legacy_runtime_dir, True))
+            # The runtime tree superseded the pre-0.1 HOME tree. Acquire it
+            # first and migrate its newer state before considering HOME.
+            legacy_candidates.append(
                 (
                     paths.claude_settings.parent.parent / ".zai-python-helper",
                     True,
                 )
-            ]
-            if paths.legacy_runtime_dir is not None:
-                legacy_candidates.append((paths.legacy_runtime_dir, True))
+            )
             for legacy_dir, create in legacy_candidates:
                 if legacy_dir == lock.state.path:
                     continue

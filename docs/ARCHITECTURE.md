@@ -166,7 +166,8 @@ Both supported legacy trees (the pre-0.1 HOME tree and the former runtime tree)
 are safely reserved when absent, and their flocks are retained through
 migration, recovery, planning, and commit. Thus an already-started old-version
 process cannot create its tree and enter its former critical section midway
-through the new-root transaction.
+through the new-root transaction. When both trees contain state, the newer
+runtime tree is authoritative and is migrated before the pre-0.1 HOME tree.
 
 **Status:** Superseded and strengthened for v1.1 (issues #111 and #116).
 
