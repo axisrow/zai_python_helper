@@ -238,20 +238,36 @@ def migrate_legacy_state(paths: Paths) -> list[str]:
             if source is None:
                 continue
             with source:
-                for name in ("ownership.json", "recovery.json"):
-                    if lock.state.exists(name) or not source.exists(name):
-                        continue
-                    data = source.read_bytes(name)
-                    if name == "recovery.json":
-                        data = _rewrite_migrated_manifest(
-                            data,
-                            legacy_dir / "ownership.json",
-                            paths.ownership_json,
-                        )
-                    lock.state.atomic_write(name, data, _SECURE_FILE_MODE)
-                    source.unlink(name)
-                    moved.append(name)
+                with _locked_legacy_state(source):
+                    for name in ("ownership.json", "recovery.json"):
+                        if lock.state.exists(name) or not source.exists(name):
+                            continue
+                        data = source.read_bytes(name)
+                        if name == "recovery.json":
+                            data = _rewrite_migrated_manifest(
+                                data,
+                                legacy_dir / "ownership.json",
+                                paths.ownership_json,
+                            )
+                        lock.state.atomic_write(name, data, _SECURE_FILE_MODE)
+                        source.unlink(name)
+                        moved.append(name)
     return moved
+
+
+@contextlib.contextmanager
+def _locked_legacy_state(state: PinnedStateDirectory):
+    """Serialize migration with processes still using the legacy state tree."""
+    lock_path = state.path / "lock"
+    fd = os_open_at(state.fd, lock_path.name, lock_path)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        with contextlib.suppress(OSError):
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        with contextlib.suppress(OSError):
+            close_fd(fd)
 
 
 def _rewrite_migrated_manifest(

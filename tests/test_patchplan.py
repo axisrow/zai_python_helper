@@ -16,6 +16,8 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -136,6 +138,44 @@ def test_migrate_legacy_state_rewrites_recovery_journal_path(tmp_path):
     migrate_legacy_state(paths)
     manifest = json.loads(paths.recovery_json.read_text())
     assert manifest["journal"]["path"] == str(paths.ownership_json)
+
+
+def test_migrate_legacy_state_waits_for_legacy_process_lock(tmp_path):
+    """Migration cannot copy/unlink state while an old process is committing."""
+    legacy = tmp_path / "legacy-state"
+    legacy.mkdir(mode=0o700)
+    (legacy / "ownership.json").write_text('{"version": "stale"}\n')
+    ready = legacy / "ready"
+    paths = replace(
+        Paths.from_home(tmp_path / "home", state_home=tmp_path / "new-state"),
+        legacy_runtime_dir=legacy,
+    )
+    script = """
+import fcntl, os, pathlib, sys, time
+root = pathlib.Path(sys.argv[1])
+fd = os.open(root / "lock", os.O_RDWR | os.O_CREAT, 0o600)
+fcntl.flock(fd, fcntl.LOCK_EX)
+(root / "ready").write_text("held")
+time.sleep(0.35)
+(root / "ownership.json").write_text('{"version": "final"}\\n')
+fcntl.flock(fd, fcntl.LOCK_UN)
+os.close(fd)
+"""
+    process = subprocess.Popen([sys.executable, "-c", script, str(legacy)])
+    deadline = time.monotonic() + 2
+    while not ready.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert ready.exists()
+
+    started = time.monotonic()
+    try:
+        assert migrate_legacy_state(paths) == ["ownership.json"]
+    finally:
+        process.wait(timeout=2)
+
+    assert time.monotonic() - started >= 0.25
+    assert paths.ownership_json.read_text() == '{"version": "final"}\n'
+    assert not (legacy / "ownership.json").exists()
 
 
 # ---------------------------------------------------------------------------
