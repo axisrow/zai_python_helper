@@ -105,7 +105,11 @@ The v2 daemon **must already accept HTTP** from Claude/OpenCode (the data plane)
 1. if the key's current value still matches what we last set → restore the journaled prior (and its presence);
 2. if it **changed since** (user edited it, or another tool did) → **do not overwrite**; surface "key changed externally since activation, not reverting — inspect `<journal>`" and leave it.
 
-This is per-transition and self-invalidating rather than a frozen snapshot. Lives at e.g. `~/.zai-python-helper/ownership.json`, mode `0600`.
+This is per-transition and self-invalidating rather than a frozen snapshot.
+It lives outside HOME at `$XDG_STATE_HOME/zai-python-helper/<home-id>/ownership.json`
+(using the OS temporary directory as a fallback), mode `0600`. The process
+lock and recovery manifest use the same state directory. This keeps
+bookkeeping out of the Phase-1 HOME artifact set without weakening revert.
 
 **Status:** Accepted for v1. (Note: `CredentialRef` resolution in `io/resolve_key()` may read this journal on revert — IO, not core, consistent with ADR-001.)
 
