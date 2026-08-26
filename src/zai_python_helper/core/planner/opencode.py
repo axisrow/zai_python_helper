@@ -59,6 +59,7 @@ PROVIDER_NAME_BY_REGION: dict[Region, str] = {
     Region.CHINA: "zhipuai-coding-plan",
 }
 ALL_PROVIDER_NAMES: tuple[str, ...] = tuple(PROVIDER_NAME_BY_REGION.values())
+OPENCODE_SCHEMA = "https://opencode.ai/config.json"
 
 # A provider key is "ours" iff it EXACTLY equals one of the two regional names
 # above. Exact-match (not a ``coding-plan`` substring) is deliberate: a substring
@@ -264,7 +265,12 @@ def _plan_zai_doc(
     ``None`` keeps the single-entry default: seed from the first (and, outside
     duplicate state, only) regional entry.
     """
-    new_doc: dict[str, Any] = dict(doc) if doc else {}
+    # Upstream seeds its schema in a newly-created config. An existing file is
+    # user-owned even when it has no schema (or carries a different one), so
+    # only the genuinely absent/empty-file ``None`` state gets the default.
+    new_doc: dict[str, Any] = (
+        {"$schema": OPENCODE_SCHEMA} if doc is None else dict(doc)
+    )
 
     # Providers: drop EVERY prior coding-plan provider first, then DEEP-MERGE
     # the current region's apiKey into one migration-source entry — preserving

@@ -29,6 +29,7 @@ class TestPlanZai:
         delta = plan.delta_for(FileTag.OPENCODE)
         assert delta.kind == DeltaKind.WRITE_JSON
         doc = delta.content
+        assert doc["$schema"] == oc.OPENCODE_SCHEMA
         assert doc["provider"][GLOBAL_NAME] == {"options": {"apiKey": TOKEN}}
         # Bug 2 regression: model MUST reference the configured provider
         # (zai-coding-plan), not a bare "zai" — else OpenCode can't resolve it
@@ -41,6 +42,7 @@ class TestPlanZai:
     def test_china_uses_zhipuai_provider_name(self):
         plan = oc.plan_zai(Region.CHINA, opencode_doc=None, auth_token=TOKEN)
         doc = plan.delta_for(FileTag.OPENCODE).content
+        assert doc["$schema"] == oc.OPENCODE_SCHEMA
         assert doc["provider"][CHINA_NAME] == {"options": {"apiKey": TOKEN}}
         assert GLOBAL_NAME not in doc["provider"]
         assert doc["model"] == "zhipuai-coding-plan/glm-4.6"
@@ -59,6 +61,11 @@ class TestPlanZai:
         assert doc["theme"] == "dark"
         # And the coding-plan provider is added.
         assert doc["provider"][GLOBAL_NAME] == {"options": {"apiKey": TOKEN}}
+
+    def test_existing_document_without_schema_stays_without_schema(self):
+        plan = oc.plan_zai(Region.GLOBAL, opencode_doc={}, auth_token=TOKEN)
+        doc = plan.delta_for(FileTag.OPENCODE).content
+        assert "$schema" not in doc
 
     def test_removes_prior_coding_plan_provider_on_region_switch(self):
         """A global→china switch must not leave the stale global provider."""

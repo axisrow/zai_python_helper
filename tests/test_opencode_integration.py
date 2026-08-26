@@ -9,6 +9,8 @@ network.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from zai_python_helper.backends import JsonBackend
@@ -43,17 +45,27 @@ def _read_doc(paths):
 
 
 class TestApplyAndRevert:
-    def test_use_zai_writes_exact_config(self, tool, tmp_path):
+    @pytest.mark.parametrize(
+        ("region", "provider_name"),
+        ((Region.GLOBAL, GLOBAL_NAME), (Region.CHINA, CHINA_NAME)),
+    )
+    def test_use_zai_writes_exact_config(
+        self, tool, tmp_path, region, provider_name
+    ):
         paths = Paths.from_home(tmp_path)
         with ProcessLock(paths.lock_file):
             state = tool.read_state(paths)
-            plan = tool.plan_zai(_spec(), Region.GLOBAL, state=state, auth_token=TOKEN)
+            plan = tool.plan_zai(_spec(), region, state=state, auth_token=TOKEN)
             apply_plan_locked(paths, plan)
 
         doc = _read_doc(paths)
-        assert doc["provider"][GLOBAL_NAME] == {"options": {"apiKey": TOKEN}}
-        assert doc["model"] == "zai-coding-plan/glm-4.6"
-        assert doc["small_model"] == "zai-coding-plan/glm-4.5-air"
+        assert doc["$schema"] == oc.OPENCODE_SCHEMA
+        assert doc["provider"][provider_name] == {"options": {"apiKey": TOKEN}}
+        assert doc["model"] == f"{provider_name}/glm-4.6"
+        assert doc["small_model"] == f"{provider_name}/glm-4.5-air"
+        assert paths.opencode.read_text(encoding="utf-8") == json.dumps(
+            doc, indent=4, ensure_ascii=False
+        )
 
     def test_use_zai_is_idempotent(self, tool, tmp_path):
         paths = Paths.from_home(tmp_path)

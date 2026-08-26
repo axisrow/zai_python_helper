@@ -28,6 +28,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from zai_python_helper.core.planner import FileTag
 from zai_python_helper.errors import ConfigurationError
 from zai_python_helper.shell_block import (
     install_owned_block,
@@ -102,6 +103,11 @@ class JsonBackend:
     """
 
     @staticmethod
+    def _indent_for_tag(tag: FileTag) -> int:
+        """Return the upstream JSON indentation width for ``tag``."""
+        return 4 if tag is FileTag.OPENCODE else 2
+
+    @staticmethod
     def read(path: Path) -> dict[str, Any] | None:
         """Parse ``path`` as JSON → dict, or ``None`` if it does not exist.
 
@@ -129,26 +135,25 @@ class JsonBackend:
         return doc
 
     @staticmethod
-    def write(path: Path, doc: dict[str, Any]) -> None:
+    def write(path: Path, doc: dict[str, Any], *, indent: int = 2) -> None:
         """Serialize ``doc`` to pretty JSON and write it atomically to ``path``.
 
-        ``indent=2`` + ``sort_keys=False`` (preserve insertion order), without
-        a trailing newline (matching the upstream JSON writers). Sorted keys
-        would shuffle user-owned keys on every write, producing noisy diffs,
-        so we keep insertion order. Config files remain mode ``0600`` because
-        they may carry authentication credentials; this is an intentional
-        security deviation from upstream's default ``0644`` mode.
+        ``indent`` defaults to 2. Callers may select a tool-specific upstream
+        format (OpenCode uses 4 spaces). Keys retain insertion order and the
+        output has no trailing newline. Config files remain mode ``0600``
+        because they may carry authentication credentials; this is an
+        intentional security deviation from upstream's default ``0644`` mode.
         """
-        text = json.dumps(doc, indent=2, ensure_ascii=False)
+        text = json.dumps(doc, indent=indent, ensure_ascii=False)
         atomic_write_bytes(Path(path), text.encode("utf-8"))
 
     @staticmethod
-    def render(doc: dict[str, Any]) -> str:
+    def render(doc: dict[str, Any], *, indent: int = 2) -> str:
         """Render ``doc`` to the exact on-disk text (for diffing in --dry-run).
 
         Pure: the bytes this backend WOULD write, without touching the FS.
         """
-        return json.dumps(doc, indent=2, ensure_ascii=False)
+        return json.dumps(doc, indent=indent, ensure_ascii=False)
 
 
 class ShellBackend:
