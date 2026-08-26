@@ -212,6 +212,40 @@ os.close(fd)
     assert acquired.read_text() == "entered"
 
 
+def test_state_transaction_reserves_missing_home_legacy_lock_tree(tmp_path):
+    """A pre-0.1 process cannot create and lock HOME state during commit."""
+    home = tmp_path / "home"
+    home.mkdir()
+    legacy = home / ".zai-python-helper"
+    started = legacy / "started"
+    acquired = legacy / "acquired"
+    paths = Paths.from_home(home, state_home=tmp_path / "new-state")
+    script = """
+import fcntl, os, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+root.mkdir(mode=0o700, parents=True, exist_ok=True)
+fd = os.open(root / "lock", os.O_RDWR | os.O_CREAT, 0o600)
+(root / "started").write_text("waiting")
+fcntl.flock(fd, fcntl.LOCK_EX)
+(root / "acquired").write_text("entered")
+fcntl.flock(fd, fcntl.LOCK_UN)
+os.close(fd)
+"""
+
+    assert not legacy.exists()
+    with state_transaction(paths):
+        process = subprocess.Popen([sys.executable, "-c", script, str(legacy)])
+        deadline = time.monotonic() + 2
+        while not started.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert started.exists()
+        time.sleep(0.1)
+        assert not acquired.exists()
+
+    process.wait(timeout=2)
+    assert acquired.read_text() == "entered"
+
+
 # ---------------------------------------------------------------------------
 # ProcessLock: serialization
 # ---------------------------------------------------------------------------

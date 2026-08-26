@@ -234,17 +234,16 @@ def state_transaction(paths: Paths):
             raise RuntimeError("ProcessLock acquired without pinned state")
         with contextlib.ExitStack() as stack:
             sources: list[tuple[Path, PinnedStateDirectory]] = []
+            # Reserve every old lock namespace even when its tree does not yet
+            # exist. An already-started old process may be paused before mkdir
+            # and must still serialize with this complete transaction.
             legacy_candidates = [
                 (
                     paths.claude_settings.parent.parent / ".zai-python-helper",
-                    False,
+                    True,
                 )
             ]
             if paths.legacy_runtime_dir is not None:
-                # Reserve and lock the previous release's predictable runtime
-                # tree even when it does not exist yet. This closes the window
-                # where an already-started old process reaches mkdir/flock only
-                # after migration inspected an absent path.
                 legacy_candidates.append((paths.legacy_runtime_dir, True))
             for legacy_dir, create in legacy_candidates:
                 if legacy_dir == lock.state.path:
