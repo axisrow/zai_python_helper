@@ -36,9 +36,9 @@ from zai_python_helper.shell_block import (
     remove_owned_block,
 )
 
-# Default mode for newly-created config files. ``0o600`` because settings.json
-# may carry an auth token and ``.zshrc`` is user-private by convention.
-_SECURE_FILE_MODE = 0o600
+# Match upstream's default mode for newly-created config files. This is an
+# intentional parity choice even when settings.json contains credentials.
+_CONFIG_FILE_MODE = 0o644
 
 
 def atomic_write_bytes(path: Path, data: bytes) -> None:
@@ -66,7 +66,7 @@ def atomic_write_bytes(path: Path, data: bytes) -> None:
                 f.write(data)
                 f.flush()
                 os.fsync(f.fileno())
-            os.chmod(tmp_path, _SECURE_FILE_MODE)
+            os.chmod(tmp_path, _CONFIG_FILE_MODE)
             os.replace(tmp_path, path)
             # Durability of the rename itself on POSIX needs a dir fsync.
             _fsync_dir(path.parent)
@@ -140,9 +140,8 @@ class JsonBackend:
 
         ``indent`` defaults to 2. Callers may select a tool-specific upstream
         format (OpenCode uses 4 spaces). Keys retain insertion order and the
-        output has no trailing newline. Config files remain mode ``0600``
-        because they may carry authentication credentials; this is an
-        intentional security deviation from upstream's default ``0644`` mode.
+        output has no trailing newline. Config files intentionally use mode
+        ``0644`` to match upstream for strict byte-for-byte parity.
         """
         text = json.dumps(doc, indent=indent, ensure_ascii=False)
         atomic_write_bytes(Path(path), text.encode("utf-8"))

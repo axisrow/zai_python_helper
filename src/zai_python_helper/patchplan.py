@@ -301,9 +301,18 @@ def _remove_manifest(path: Path) -> None:
 
 def _apply_entry(entry: _RecoveryEntry) -> None:
     """Write one recovery entry to disk atomically (idempotent replay)."""
+    data = entry.content.encode("utf-8")
+    if entry.tag == "ownership":
+        # The journal is credential-bearing state, not a user config file.
+        # Keep its 0600 protection when replaying the transaction after a
+        # crash; config entries use the upstream-parity 0644 writer.
+        from zai_python_helper.ownership import _atomic_write_secret
+
+        _atomic_write_secret(Path(entry.path), data)
+        return
     from zai_python_helper.backends import atomic_write_bytes
 
-    atomic_write_bytes(Path(entry.path), entry.content.encode("utf-8"))
+    atomic_write_bytes(Path(entry.path), data)
 
 
 # ---------------------------------------------------------------------------

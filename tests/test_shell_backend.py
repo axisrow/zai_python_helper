@@ -180,7 +180,7 @@ class TestShellBackendIO:
         assert ShellBackend.install_block(rc)
         text = rc.read_text()
         assert owns_owned_block(text)
-        assert rc.stat().st_mode & 0o777 == 0o600
+        assert rc.stat().st_mode & 0o777 == 0o644
 
     def test_install_idempotent_on_disk(self, tmp_path):
         rc = tmp_path / ".zshrc"
