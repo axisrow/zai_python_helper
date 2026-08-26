@@ -13,7 +13,7 @@ import { openCodeManager } from '/usr/local/lib/node_modules/@z_ai/coding-helper
 import { crushManager } from '/usr/local/lib/node_modules/@z_ai/coding-helper/dist/lib/crush-manager.js';
 import { factoryDroidManager } from '/usr/local/lib/node_modules/@z_ai/coding-helper/dist/lib/factory-droid-manager.js';
 import { PRESET_MCP_SERVICES } from '/usr/local/lib/node_modules/@z_ai/coding-helper/dist/lib/mcp-manager.js';
-import { mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -36,6 +36,19 @@ function activateViaCli() {
   const configPath = join(configDir, 'config.yaml');
   mkdirSync(configDir, { recursive: true });
   writeFileSync(configPath, `lang: en_US\nplan: ${plan}\napi_key: ${token}\n`);
+  // The Docker image ships only the Claude shim.  `auth reload` checks the
+  // selected tool with `which` before calling its configuration manager, so
+  // create no-op presence shims for the other three matrix tools here.  They
+  // live outside HOME and are not part of the parity artifact snapshot.
+  const shimDir = join('/tmp', `zai-parity-cli-tools-${process.pid}`);
+  mkdirSync(shimDir, { recursive: true });
+  for (const name of ['opencode', 'crush', 'droid']) {
+    const shimPath = join(shimDir, name);
+    writeFileSync(shimPath, '#!/bin/sh\nexit 0\n');
+    chmodSync(shimPath, 0o755);
+  }
+  const pathBefore = process.env.PATH || '';
+  process.env.PATH = `${shimDir}:${pathBefore}`;
   try {
     const result = spawnSync('chelper', ['auth', 'reload', tool], {
       encoding: 'utf8',
@@ -46,6 +59,7 @@ function activateViaCli() {
     if (result.error) throw result.error;
     if (result.status !== 0) process.exit(result.status ?? 1);
   } finally {
+    process.env.PATH = pathBefore;
     unlinkSync(configPath);
   }
 }
