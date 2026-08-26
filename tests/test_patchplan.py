@@ -130,6 +130,14 @@ class TestProcessLock:
         target.mkdir()
         fallback.symlink_to(target, target_is_directory=True)
         monkeypatch.setattr(os, "getuid", lambda: uid)
+        realpath = os.path.realpath
+
+        def macos_realpath(path):
+            if path == "/var/tmp":
+                return "/private/var/tmp"
+            return realpath(path)
+
+        monkeypatch.setattr(os.path, "realpath", macos_realpath)
         try:
             with monkeypatch.context() as isolated:
                 isolated.delenv("ZAI_PYTHON_HELPER_STATE_HOME")
