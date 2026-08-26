@@ -51,6 +51,11 @@ io/               IO layer (outside core)
 
 **Status:** Accepted. Enforced by review — no `open()`, no `requests`/`httpx`, no `os.environ`/`getpass` in `core/`.
 
+**Config file mode parity:** v1 config files intentionally use upstream's
+`0644` mode for strict Phase-1 byte-for-byte parity. This is not a file-mode
+security guarantee for credentials in those configs; the ownership journal,
+recovery manifest, and secrets file remain separately protected at `0600`.
+
 ---
 
 ## ADR-002: v2 proxy-router will be Python

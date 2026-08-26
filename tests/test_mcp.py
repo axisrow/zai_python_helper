@@ -373,13 +373,13 @@ def test_install_mcp_uses_injected_io_seams(_isolate_home):
 
 
 def test_written_config_uses_compact_json_bytes(_isolate_home):
-    """Tool config JSON is parseable, mode 0600, and has no final newline."""
+    """Tool config JSON is parseable, mode 0644, and has no final newline."""
     install_mcp(Tool.CLAUDE_CODE, "zread", _KEY, Region.GLOBAL, home=_isolate_home)
     path = tool_config_path(Tool.CLAUDE_CODE, _isolate_home)
     text = path.read_text(encoding="utf-8")
     assert not text.endswith("\n")
     json.loads(text)
-    assert path.stat().st_mode & 0o777 == 0o600
+    assert path.stat().st_mode & 0o777 == 0o644
 
 
 # --------------------------------------------------------------------------- #

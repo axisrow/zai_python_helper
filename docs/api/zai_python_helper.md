@@ -883,9 +883,8 @@ Serialize `doc` to pretty JSON and write it atomically to `path`.
 
 `indent` defaults to 2. Callers may select a tool-specific upstream
 format (OpenCode uses 4 spaces). Keys retain insertion order and the
-output has no trailing newline. Config files remain mode `0600`
-because they may carry authentication credentials; this is an
-intentional security deviation from upstream's default `0644` mode.
+output has no trailing newline. Config files intentionally use mode
+`0644` to match upstream for strict byte-for-byte parity.
 
 #### `render()`
 
@@ -904,7 +903,7 @@ Pure: the bytes this backend WOULD write, without touching the FS.
 
 ### `ShellBackend`
 
-*class — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/backends.py#L159)*
+*class — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/backends.py#L158)*
 
 Owned marker-fenced block writer for shell rc files (ADR-003).
 
