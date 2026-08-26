@@ -65,8 +65,11 @@ def test_paths_default_uses_path_home(monkeypatch):
 @pytest.mark.parametrize("value", ["", "relative/state"])
 def test_paths_rejects_invalid_xdg_state_home(monkeypatch, tmp_path, value):
     """Invalid XDG roots cannot redirect secrets into the CWD."""
-    monkeypatch.delenv("ZAI_PYTHON_HELPER_STATE_HOME")
-    monkeypatch.setenv("XDG_STATE_HOME", value)
-    paths = Paths.from_home(tmp_path)
+    # Use a nested patch so the shared autouse fixture's state override is
+    # restored before that fixture tears down its own environment.
+    with monkeypatch.context() as isolated:
+        isolated.delenv("ZAI_PYTHON_HELPER_STATE_HOME")
+        isolated.setenv("XDG_STATE_HOME", value)
+        paths = Paths.from_home(tmp_path)
     assert tmp_path not in paths.state_dir.parents
     assert paths.state_dir.is_absolute()
