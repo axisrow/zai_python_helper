@@ -49,12 +49,14 @@ from zai_python_helper.paths import Paths
 _SECURE_FILE_MODE = 0o600
 
 
-def _ensure_private_parent(path: Path) -> None:
+def _ensure_private_parent(path: Path) -> int:
     """Create the state parent without following attacker-controlled entries."""
     parent = Path(os.path.abspath(path.parent))
     parts = parent.parts
     state_root = parent.parent.parent
-    private_paths = {parent, parent.parent}
+    private_paths = {parent}
+    if parent.parent.name == "zai-python-helper":
+        private_paths.add(parent.parent)
     protected_paths = private_paths | {state_root}
     # The fallback root itself is predictable and therefore must also be
     # protected.  Do not infer this from a basename: XDG_STATE_HOME may
@@ -95,8 +97,12 @@ def _ensure_private_parent(path: Path) -> None:
                 raise
             os.close(fd)
             fd = next_fd
+        result = fd
+        fd = -1
+        return result
     finally:
-        os.close(fd)
+        if fd >= 0:
+            os.close(fd)
 
 
 def migrate_legacy_state(paths: Paths) -> list[str]:
@@ -234,8 +240,11 @@ class ProcessLock:
         self._held_intra = True
         # 2) Cross-process serialization (flock). Create the file + parent dir.
         try:
-            _ensure_private_parent(self.path)
-            self._fd = os_open(self.path)
+            parent_fd = _ensure_private_parent(self.path)
+            try:
+                self._fd = os_open_at(parent_fd, self.path.name, self.path)
+            finally:
+                os.close(parent_fd)
             fcntl.flock(self._fd, fcntl.LOCK_EX)
         except BaseException:
             # Close the fd we opened (if flock failed) and release the intra
@@ -279,6 +288,21 @@ def os_open(path: Path) -> int:
     fd = os.open(
         str(path), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, _SECURE_FILE_MODE
     )
+    return _validate_lock_fd(fd, path)
+
+
+def os_open_at(parent_fd: int, name: str, path: Path) -> int:
+    """Open a lock beneath an already validated parent directory descriptor."""
+    fd = os.open(
+        name,
+        os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW,
+        _SECURE_FILE_MODE,
+        dir_fd=parent_fd,
+    )
+    return _validate_lock_fd(fd, path)
+
+
+def _validate_lock_fd(fd: int, path: Path) -> int:
     try:
         st = os.fstat(fd)
         if st.st_uid != os.getuid() or not stat.S_ISREG(st.st_mode):

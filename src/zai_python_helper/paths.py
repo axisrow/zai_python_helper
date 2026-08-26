@@ -26,6 +26,17 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+def _state_home_from_env() -> str:
+    """Return the configured absolute state root, or the secure fallback."""
+    override = os.environ.get("ZAI_PYTHON_HELPER_STATE_HOME", "")
+    xdg = os.environ.get("XDG_STATE_HOME", "")
+    if override and Path(override).is_absolute():
+        return override
+    if xdg and Path(xdg).is_absolute():
+        return xdg
+    return f"/var/tmp/zai-python-helper-{os.getuid()}"
+
+
 @dataclass(frozen=True)
 class Paths:
     """Frozen bundle of every resolved filesystem path the tool touches.
@@ -99,15 +110,7 @@ class Paths:
         if state_home is None:
             # /var/tmp is durable across reboots, unlike /tmp.  The directory
             # is created and ownership-checked by ProcessLock before use.
-            configured = os.environ.get(
-                "ZAI_PYTHON_HELPER_STATE_HOME",
-                os.environ.get("XDG_STATE_HOME", ""),
-            )
-            state_home = (
-                configured
-                if configured and Path(configured).is_absolute()
-                else f"/var/tmp/zai-python-helper-{os.getuid()}"
-            )
+            state_home = _state_home_from_env()
         home_id = hashlib.sha256(str(h).encode()).hexdigest()[:16]
         helper_dir = Path(state_home) / "zai-python-helper" / home_id
         state_dir = helper_dir / "state"
@@ -136,13 +139,5 @@ class Paths:
         Tests never call this — they inject ``tmp_path`` via :meth:`from_home`
         directly; that naming split is what makes test isolation provable.
         """
-        configured = os.environ.get(
-            "ZAI_PYTHON_HELPER_STATE_HOME",
-            os.environ.get("XDG_STATE_HOME", ""),
-        )
-        state_home = (
-            configured
-            if configured and Path(configured).is_absolute()
-            else f"/var/tmp/zai-python-helper-{os.getuid()}"
-        )
+        state_home = _state_home_from_env()
         return cls.from_home(Path.home(), cwd=Path.cwd(), state_home=state_home)

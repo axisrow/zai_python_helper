@@ -252,11 +252,11 @@ class TestProcessLock:
 
         opened: list[int] = []
 
-        real_open = pp.os_open
+        real_open = pp.os_open_at
         real_flock = fcntl.flock
 
-        def tracking_open(path):
-            fd = real_open(path)
+        def tracking_open(parent_fd, name, path):
+            fd = real_open(parent_fd, name, path)
             opened.append(fd)
             return fd
 
@@ -265,7 +265,7 @@ class TestProcessLock:
                 raise OSError("simulated flock failure")
             real_flock(fd, op)
 
-        monkeypatch.setattr(pp, "os_open", tracking_open)
+        monkeypatch.setattr(pp, "os_open_at", tracking_open)
         monkeypatch.setattr(pp.fcntl, "flock", failing_flock)
 
         lock = ProcessLock(tmp_path / "lock")
