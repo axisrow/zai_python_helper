@@ -73,3 +73,11 @@ def test_paths_rejects_invalid_xdg_state_home(monkeypatch, tmp_path, value):
         paths = Paths.from_home(tmp_path)
     assert tmp_path not in paths.state_dir.parents
     assert paths.state_dir.is_absolute()
+
+
+def test_paths_rejects_dangling_configured_state_symlink(tmp_path):
+    """A missing configured volume must fail closed rather than redirecting state."""
+    state_link = tmp_path / "state-link"
+    state_link.symlink_to(tmp_path / "unmounted-state", target_is_directory=True)
+    with pytest.raises(ValueError, match="dangling symlink"):
+        Paths.from_home(tmp_path, state_home=state_link)

@@ -112,6 +112,13 @@ class Paths:
             # /var/tmp is durable across reboots, unlike /tmp.  The directory
             # is created and ownership-checked by ProcessLock before use.
             state_home, is_fallback = _state_home_from_env()
+        configured_state_home = Path(state_home)
+        if (
+            not is_fallback
+            and configured_state_home.is_symlink()
+            and not configured_state_home.exists()
+        ):
+            raise ValueError(f"configured state root is a dangling symlink: {state_home}")
         home_id = hashlib.sha256(str(h).encode()).hexdigest()[:16]
         # Pin the state root's current symlink target.  All transaction files
         # then use the same canonical tree as the lock, even if the user-level
@@ -119,7 +126,11 @@ class Paths:
         # Preserve the fallback leaf for descriptor validation: resolving it
         # first would follow a pre-created attacker symlink. User-configured
         # roots are canonicalized so all bookkeeping remains pinned together.
-        state_root = Path(state_home) if is_fallback else Path(os.path.realpath(state_home))
+        state_root = (
+            configured_state_home
+            if is_fallback
+            else Path(os.path.realpath(configured_state_home))
+        )
         helper_dir = state_root / "zai-python-helper" / home_id
         state_dir = helper_dir / "state"
         cwd_path = Path(cwd) if cwd is not None else Path.cwd()
