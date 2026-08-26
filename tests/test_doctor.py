@@ -107,6 +107,11 @@ class _CliResponse:
         return False
 
 
+class _CliOpener:
+    def open(self, *_args, **_kwargs):
+        return _CliResponse()
+
+
 def test_cli_doctor_reports_invalid_api_key(monkeypatch, tmp_path, capsys):
     """The CLI-compatible doctor must not treat a rejected key as healthy."""
     import urllib.error
@@ -139,15 +144,63 @@ def test_cli_doctor_reports_all_clear_when_healthy(monkeypatch, tmp_path, capsys
     _write_settings(paths, {"ANTHROPIC_BASE_URL": _ZAI_URL})
     monkeypatch.setenv("PATH", "/usr/bin")
     monkeypatch.setattr(doctor.shutil, "which", lambda _command: "/usr/bin/tool")
-    monkeypatch.setattr(
-        doctor.urllib.request, "urlopen", lambda *_args, **_kwargs: _CliResponse()
-    )
+    monkeypatch.setattr(doctor.urllib.request, "build_opener", lambda *_args: _CliOpener())
 
     assert run_cli_doctor(paths) == 0
     out = capsys.readouterr().out
     assert "✓ API Key & Network" in out
     assert "All checks passed!" in out
     assert "Suggestions:" not in out
+
+
+def test_cli_doctor_rejects_redirects(monkeypatch):
+    """Credential validation must not follow a redirecting models endpoint."""
+    import urllib.error
+
+    from zai_python_helper import doctor
+
+    class _RedirectingOpener:
+        def open(self, *_args, **_kwargs):
+            raise urllib.error.HTTPError(
+                "https://api.z.ai/api/coding/paas/v4/models",
+                302,
+                "Found",
+                {"Location": "https://attacker.example/collect"},
+                None,
+            )
+
+    seen = []
+    monkeypatch.setattr(
+        doctor.urllib.request,
+        "build_opener",
+        lambda *handlers: (seen.append(handlers) or _RedirectingOpener()),
+    )
+    assert doctor._validate_cli_api_key("secret", "glm_coding_plan_global") == (
+        False,
+        "Network connection failed",
+    )
+    assert seen == [(doctor._NoRedirectHandler,)]
+
+
+def test_cli_doctor_rejects_unknown_plan(monkeypatch, tmp_path, capsys):
+    """A typo in the plan must not route the key to the China endpoint."""
+    from zai_python_helper import doctor
+
+    paths = Paths.from_home(tmp_path)
+    _write_cli_config(paths, plan="glm_coding_plan_typo")
+    _write_settings(paths, None)
+    monkeypatch.setattr(
+        doctor.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("unknown plan must not make a request")
+        ),
+    )
+    assert run_cli_doctor(paths) == 0
+    out = capsys.readouterr().out
+    assert "Unsupported GLM Coding Plan" in out
+    assert "GLM Coding Plan not configured" in out
+    assert "All checks passed!" not in out
 
 
 def _write_opencode_duplicate(
