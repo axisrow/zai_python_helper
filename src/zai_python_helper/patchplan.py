@@ -213,45 +213,80 @@ def migrate_legacy_state(paths: Paths) -> list[str]:
     Older releases kept these files in ``~/.zai-python-helper``.  Losing that
     journal on upgrade would make ``use default`` clear values it could no
     longer prove ownership of, so migrate each file only when its new
-    destination is absent.  The operation is serialized by the new lock and
-    is intentionally a no-op for fresh installations (the parity path).
+    destination is absent. The operation is serialized by both new and legacy
+    locks and is intentionally a no-op for fresh installations.
     """
-    legacy_dirs = [paths.claude_settings.parent.parent / ".zai-python-helper"]
-    if paths.legacy_runtime_dir is not None:
-        legacy_dirs.append(paths.legacy_runtime_dir)
-    moved: list[str] = []
+    with state_transaction(paths) as (_lock, moved):
+        return moved
+
+
+@contextlib.contextmanager
+def state_transaction(paths: Paths):
+    """Hold new and legacy locks for one complete mutating operation.
+
+    The legacy lock lease intentionally outlives migration. An old-version
+    process may have started before us but not reached its lock yet; retaining
+    the lease through recovery and commit prevents that process from entering
+    its legacy critical section midway through the new-root transaction.
+    """
     with ProcessLock(paths) as lock:
         if lock.state is None:
             raise RuntimeError("ProcessLock acquired without pinned state")
-        for legacy_dir in legacy_dirs:
-            if legacy_dir == lock.state.path:
-                continue
-            try:
-                source = PinnedStateDirectory.open(
-                    legacy_dir, create=False, harden=True
+        with contextlib.ExitStack() as stack:
+            sources: list[tuple[Path, PinnedStateDirectory]] = []
+            legacy_candidates = [
+                (
+                    paths.claude_settings.parent.parent / ".zai-python-helper",
+                    False,
                 )
-            except (OSError, PermissionError):
-                # A foreign-owned predictable /var/tmp root is an attacker
-                # reservation, not an authority and not a reason to deny the
-                # victim access to the new private state root.
+            ]
+            if paths.legacy_runtime_dir is not None:
+                # Reserve and lock the previous release's predictable runtime
+                # tree even when it does not exist yet. This closes the window
+                # where an already-started old process reaches mkdir/flock only
+                # after migration inspected an absent path.
+                legacy_candidates.append((paths.legacy_runtime_dir, True))
+            for legacy_dir, create in legacy_candidates:
+                if legacy_dir == lock.state.path:
+                    continue
+                try:
+                    source = PinnedStateDirectory.open(
+                        legacy_dir, create=create, harden=True
+                    )
+                except OSError:
+                    # A foreign-owned predictable /var/tmp root is an attacker
+                    # reservation, not an authority and not a reason to deny
+                    # the victim access to the new private state root.
+                    continue
+                if source is None:
+                    continue
+                stack.enter_context(source)
+                stack.enter_context(_locked_legacy_state(source))
+                sources.append((legacy_dir, source))
+            moved = _migrate_legacy_state_locked(paths, lock.state, sources)
+            yield lock, moved
+
+
+def _migrate_legacy_state_locked(
+    paths: Paths,
+    destination: PinnedStateDirectory,
+    sources: list[tuple[Path, PinnedStateDirectory]],
+) -> list[str]:
+    moved: list[str] = []
+    for legacy_dir, source in sources:
+        for name in ("ownership.json", "recovery.json"):
+            if destination.exists(name) or not source.exists(name):
                 continue
-            if source is None:
-                continue
-            with source:
-                with _locked_legacy_state(source):
-                    for name in ("ownership.json", "recovery.json"):
-                        if lock.state.exists(name) or not source.exists(name):
-                            continue
-                        data = source.read_bytes(name)
-                        if name == "recovery.json":
-                            data = _rewrite_migrated_manifest(
-                                data,
-                                legacy_dir / "ownership.json",
-                                paths.ownership_json,
-                            )
-                        lock.state.atomic_write(name, data, _SECURE_FILE_MODE)
-                        source.unlink(name)
-                        moved.append(name)
+            data = source.read_bytes(name)
+            if name == "recovery.json":
+                data = _rewrite_migrated_manifest(
+                    data,
+                    legacy_dir / "ownership.json",
+                    paths.ownership_json,
+                )
+            destination.atomic_write(name, data, _SECURE_FILE_MODE)
+            source.unlink(name)
+            moved.append(name)
     return moved
 
 
@@ -704,29 +739,31 @@ def recover(paths: Paths) -> list[str]:
         The list of tags (e.g. ``["settings", "zshrc"]``) that recovery
         wrote, in manifest order. Empty if no manifest existed.
     """
-    with ProcessLock(paths) as lock:
+    with state_transaction(paths) as (lock, _moved):
         if lock.state is None:
             raise RuntimeError("ProcessLock acquired without pinned state")
-        # The context is intentionally explicit so future state I/O cannot
-        # accidentally regress to path-based access.
-        entries, journal = _read_manifest(lock.state, paths)
-        if not entries and journal is None:
-            # An absent/empty manifest means nothing to recover. Ensure no
-            # stale (e.g. zero-byte) manifest lingers.
-            _remove_manifest(lock.state)
-            return []
-        applied = []
-        for entry in entries:
-            _apply_entry(entry)
-            applied.append(entry.tag)
-        # Replay the ownership journal LAST, mirroring commit order: the
-        # journal's ``active=False`` retirement only becomes durable once the
-        # RESTORE it describes is durable (issue #60). It is not reported as a
-        # recovered tag — it is bookkeeping, not a managed config file.
-        if journal is not None:
-            _apply_entry(journal, state=lock.state)
-        _remove_manifest(lock.state)
-        return applied
+        return recover_locked(paths, lock.state)
+
+
+def recover_locked(paths: Paths, state: PinnedStateDirectory) -> list[str]:
+    """Replay recovery while the caller retains new and legacy lock leases."""
+    entries, journal = _read_manifest(state, paths)
+    if not entries and journal is None:
+        # An absent/empty manifest means nothing to recover. Ensure no stale
+        # (e.g. zero-byte) manifest lingers.
+        _remove_manifest(state)
+        return []
+    applied = []
+    for entry in entries:
+        _apply_entry(entry)
+        applied.append(entry.tag)
+    # Replay the ownership journal LAST, mirroring commit order: the journal's
+    # ``active=False`` retirement only becomes durable once the RESTORE it
+    # describes is durable (issue #60). It is not reported as a recovered tag.
+    if journal is not None:
+        _apply_entry(journal, state=state)
+    _remove_manifest(state)
+    return applied
 
 
 def apply_plan_locked(

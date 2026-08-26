@@ -162,6 +162,9 @@ input only. Fresh state uses the private XDG default. A legacy runtime tree is
 read only through its own validated descriptor; foreign-owned, symlinked, or
 non-directory reservations are ignored rather than denying service, while a
 safe current-user tree is migrated atomically into the active pinned root.
+The legacy flock is retained through migration, recovery, planning, and commit
+so an already-started old-version process cannot enter its former critical
+section midway through the new-root transaction.
 
 **Status:** Superseded and strengthened for v1.1 (issues #111 and #116).
 

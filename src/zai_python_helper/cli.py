@@ -758,19 +758,15 @@ def _handle_use_zai(args: argparse.Namespace) -> int:
     # it serializes with us) before we read any state.
     from zai_python_helper.ownership import OwnershipJournal
     from zai_python_helper.patchplan import (
-        ProcessLock,
         apply_plan_locked,
-        migrate_legacy_state,
-        recover,
+        recover_locked,
+        state_transaction,
     )
 
-    if not dry_run:
-        # Migration and crash recovery are writes; dry-run must remain a
-        # strictly read-only preview, including when legacy state exists.
-        migrate_legacy_state(paths)
-        _run_recovery(paths, recover)
-
-    with ProcessLock(paths) as lock:
+    with state_transaction(paths) as (lock, _moved):
+        if lock.state is None:
+            raise RuntimeError("state transaction opened without pinned state")
+        _run_recovery(paths, lambda _paths: recover_locked(paths, lock.state))
         # Read state, plan, and capture ownership — all inside the lock so a
         # concurrent revert cannot mutate the config between our read and our
         # commit (and so the takeover prior reflects exactly the pre-commit
@@ -853,18 +849,10 @@ def _handle_use_default(args: argparse.Namespace) -> int:
 
     from zai_python_helper.ownership import OwnershipJournal
     from zai_python_helper.patchplan import (
-        ProcessLock,
         apply_plan_locked,
-        migrate_legacy_state,
-        recover,
+        recover_locked,
+        state_transaction,
     )
-
-    # Roll forward any interrupted prior run first (recover takes the lock
-    # itself, so it serializes with the commit below).
-    if not dry_run:
-        # Do not migrate or replay state during a read-only preview.
-        migrate_legacy_state(paths)
-        _run_recovery(paths, recover)
 
     print(f"Reverting to default provider (tool: {tool.name}, region: {region.value})")
 
@@ -887,7 +875,10 @@ def _handle_use_default(args: argparse.Namespace) -> int:
     # inside ONE held ProcessLock (ADR-005 / S3 finding #6): a concurrent
     # ``use zai`` must not be able to change the config between our decision
     # read and our commit (which would make the decisions stale).
-    with ProcessLock(paths) as lock:
+    with state_transaction(paths) as (lock, _moved):
+        if lock.state is None:
+            raise RuntimeError("state transaction opened without pinned state")
+        _run_recovery(paths, lambda _paths: recover_locked(paths, lock.state))
         state = tool.read_state(paths)
         journal = OwnershipJournal(paths.ownership_json)
         journal_records = journal.read(state=lock.state)

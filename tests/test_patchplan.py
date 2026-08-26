@@ -40,6 +40,7 @@ from zai_python_helper.patchplan import (
     has_pending_recovery,
     migrate_legacy_state,
     recover,
+    state_transaction,
 )
 from zai_python_helper.paths import Paths
 
@@ -176,6 +177,39 @@ os.close(fd)
     assert time.monotonic() - started >= 0.25
     assert paths.ownership_json.read_text() == '{"version": "final"}\n'
     assert not (legacy / "ownership.json").exists()
+
+
+def test_state_transaction_retains_legacy_lock_through_commit_scope(tmp_path):
+    """An old process reaching its lock late stays blocked until commit exits."""
+    legacy = tmp_path / "legacy-state"
+    started = legacy / "started"
+    acquired = legacy / "acquired"
+    paths = replace(
+        Paths.from_home(tmp_path / "home", state_home=tmp_path / "new-state"),
+        legacy_runtime_dir=legacy,
+    )
+    script = """
+import fcntl, os, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+fd = os.open(root / "lock", os.O_RDWR | os.O_CREAT, 0o600)
+(root / "started").write_text("waiting")
+fcntl.flock(fd, fcntl.LOCK_EX)
+(root / "acquired").write_text("entered")
+fcntl.flock(fd, fcntl.LOCK_UN)
+os.close(fd)
+"""
+
+    with state_transaction(paths):
+        process = subprocess.Popen([sys.executable, "-c", script, str(legacy)])
+        deadline = time.monotonic() + 2
+        while not started.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert started.exists()
+        time.sleep(0.1)
+        assert not acquired.exists()
+
+    process.wait(timeout=2)
+    assert acquired.read_text() == "entered"
 
 
 # ---------------------------------------------------------------------------
