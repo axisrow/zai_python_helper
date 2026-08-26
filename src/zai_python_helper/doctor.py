@@ -96,7 +96,7 @@ def _validate_cli_api_key(api_key: str, plan: str) -> tuple[bool, str | None]:
         # origin (or downgrade transport).  A redirect is a failed validation.
         opener = urllib.request.build_opener(_NoRedirectHandler)
         with opener.open(request, timeout=_CLI_API_TIMEOUT) as response:
-            ok = 200 <= response.status < 300
+            ok = response.status == 200
             return ok, None if ok else "Network connection failed"
     except urllib.error.HTTPError as error:
         if error.code == 401:

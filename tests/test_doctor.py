@@ -98,7 +98,8 @@ def _write_cli_config(paths: Paths, *, plan: str = "glm_coding_plan_global") -> 
 
 
 class _CliResponse:
-    status = 200
+    def __init__(self, status=200):
+        self.status = status
 
     def __enter__(self):
         return self
@@ -112,22 +113,34 @@ class _CliOpener:
         return _CliResponse()
 
 
+class _CliStatusOpener:
+    def __init__(self, status):
+        self.status = status
+
+    def open(self, *_args, **_kwargs):
+        return _CliResponse(self.status)
+
+
+class _CliRejectingOpener:
+    def open(self, *_args, **_kwargs):
+        import urllib.error
+
+        raise urllib.error.HTTPError(
+            "https://api.z.ai", 401, "Unauthorized", {}, None
+        )
+
+
 def test_cli_doctor_reports_invalid_api_key(monkeypatch, tmp_path, capsys):
     """The CLI-compatible doctor must not treat a rejected key as healthy."""
-    import urllib.error
-
     from zai_python_helper import doctor
 
     paths = Paths.from_home(tmp_path)
     _write_cli_config(paths)
     _write_settings(paths, {"ANTHROPIC_BASE_URL": _ZAI_URL})
 
-    def reject(*_args, **_kwargs):
-        raise urllib.error.HTTPError(
-            "https://api.z.ai", 401, "Unauthorized", {}, None
-        )
-
-    monkeypatch.setattr(doctor.urllib.request, "urlopen", reject)
+    monkeypatch.setattr(
+        doctor.urllib.request, "build_opener", lambda *_args: _CliRejectingOpener()
+    )
     assert run_cli_doctor(paths) == 0
     out = capsys.readouterr().out
     assert "API Key is invalid or expired" in out
@@ -180,6 +193,21 @@ def test_cli_doctor_rejects_redirects(monkeypatch):
         "Network connection failed",
     )
     assert seen == [(doctor._NoRedirectHandler,)]
+
+
+def test_cli_doctor_requires_models_http_200(monkeypatch):
+    """A non-200 response must not be treated as a successful model check."""
+    from zai_python_helper import doctor
+
+    monkeypatch.setattr(
+        doctor.urllib.request,
+        "build_opener",
+        lambda *_args: _CliStatusOpener(204),
+    )
+    assert doctor._validate_cli_api_key("secret", "glm_coding_plan_global") == (
+        False,
+        "Network connection failed",
+    )
 
 
 def test_cli_doctor_rejects_unknown_plan(monkeypatch, tmp_path, capsys):
