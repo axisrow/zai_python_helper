@@ -209,8 +209,8 @@ def test_install_into_doc_rejects_malformed_section_without_overwriting_it():
         )
 
 
-def test_uninstall_from_doc_removes_only_its_id_and_drops_empty_section():
-    """uninstall removes ONLY the named id; siblings survive; empty section dropped."""
+def test_uninstall_from_doc_removes_only_its_id_and_preserves_empty_section():
+    """uninstall removes ONLY the named id; siblings survive; empty section stays."""
     doc = {
         "hasCompletedOnboarding": True,
         "mcpServers": {
@@ -224,9 +224,28 @@ def test_uninstall_from_doc_removes_only_its_id_and_drops_empty_section():
     assert out["hasCompletedOnboarding"] is True
     # Input not mutated.
     assert "zread" in doc["mcpServers"]
-    # Removing the last entry drops the section entirely.
+    # Removing the last entry preserves the section as an empty object.
     last = uninstall_from_doc(out, Tool.CLAUDE_CODE, "user-custom")
-    assert "mcpServers" not in last
+    assert last["mcpServers"] == {}
+
+
+@pytest.mark.parametrize(
+    "tool,section",
+    [
+        (Tool.CLAUDE_CODE, "mcpServers"),
+        (Tool.OPENCODE, "mcp"),
+        (Tool.CRUSH, "mcp"),
+        (Tool.FACTORY_DROID, "mcpServers"),
+    ],
+)
+def test_uninstall_from_doc_preserves_empty_section_for_every_tool(tool, section):
+    """All adapters retain their upstream section after the last uninstall."""
+    doc = {section: {"zread": {"type": "http"}}}
+
+    out = uninstall_from_doc(doc, tool, "zread")
+
+    assert out == {section: {}}
+    assert doc == {section: {"zread": {"type": "http"}}}
 
 
 def test_uninstall_idempotent_on_absent_id():
@@ -311,6 +330,23 @@ def test_uninstall_mcp_removes_entry_leaving_siblings(_isolate_home):
     assert "web-reader" in on_disk["mcpServers"]
     # Idempotent on absent id.
     assert uninstall_mcp(Tool.CLAUDE_CODE, "zread", home=_isolate_home) is False
+
+
+@pytest.mark.parametrize(
+    "tool,section",
+    [
+        (Tool.CLAUDE_CODE, "mcpServers"),
+        (Tool.OPENCODE, "mcp"),
+        (Tool.CRUSH, "mcp"),
+        (Tool.FACTORY_DROID, "mcpServers"),
+    ],
+)
+def test_uninstall_mcp_writes_empty_section_for_every_tool(_isolate_home, tool, section):
+    """The high-level uninstall persists an empty section for every adapter."""
+    install_mcp(tool, "zread", _KEY, Region.GLOBAL, home=_isolate_home)
+
+    assert uninstall_mcp(tool, "zread", home=_isolate_home) is True
+    assert JsonBackend.read(tool_config_path(tool, _isolate_home)) == {section: {}}
 
 
 def test_install_mcp_uses_injected_io_seams(_isolate_home):
@@ -528,4 +564,3 @@ def test_cli_mcp_uninstall_dry_run_does_not_mutate(_isolate_home):
     # And the preview must NOT claim it was removed.
     assert "removed" not in out
     assert "would remove" in out or "dry-run" in out.lower()
-

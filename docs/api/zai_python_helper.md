@@ -1135,8 +1135,10 @@ Return a NEW config doc with `mcp_id` removed from `tool`'s section.
 Pure. Removes ONLY `<section>[mcp_id]` — every other entry and every
 foreign top-level key is preserved. A missing doc, missing section, or
 absent `mcp_id` is a no-op (idempotent), returning a copy of the input.
-The section is dropped entirely when uninstalling leaves it empty, so we
-never write a stray `"mcpServers": {}` skeleton into a user's file.
+The section is retained as an empty object when uninstalling removes its
+last entry.  Upstream keeps the section key present, and preserving it
+avoids semantic drift for parsers that distinguish an absent section from
+an intentionally empty one.
 
 ---
 
@@ -1144,7 +1146,7 @@ never write a stray `"mcpServers": {}` skeleton into a user's file.
 
 ### `list_installed()`
 
-*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/mcp.py#L472)*
+*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/mcp.py#L473)*
 
 ```python
 list_installed(doc: dict[str, Any] | None, tool: Tool) -> list[str]
@@ -1161,7 +1163,7 @@ order (Python dict preserves it; JSON round-trips it).
 
 ### `is_installed()`
 
-*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/mcp.py#L486)*
+*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/mcp.py#L487)*
 
 ```python
 is_installed(doc: dict[str, Any] | None, tool: Tool, mcp_id: str) -> bool
@@ -1199,7 +1201,7 @@ Pure path arithmetic — no IO, no existence check (mirrors
 
 ### `install_mcp()`
 
-*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/mcp.py#L539)*
+*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/mcp.py#L540)*
 
 ```python
 install_mcp(tool: Tool | str, mcp_id: str, key: str | None, region: Region, home: str | Path | None, presets: list[McpPreset] | None, reader: ConfigReader, writer: ConfigWriter) -> bool
@@ -1222,7 +1224,7 @@ fake filesystem in tests) can bypass the defaults.
 
 ### `uninstall_mcp()`
 
-*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/mcp.py#L592)*
+*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/mcp.py#L593)*
 
 ```python
 uninstall_mcp(tool: Tool | str, mcp_id: str, home: str | Path | None, reader: ConfigReader, writer: ConfigWriter) -> bool
