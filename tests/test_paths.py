@@ -13,10 +13,11 @@ def test_paths_from_home_resolves_all_fields(_isolate_home):
     assert paths.claude_settings == home / ".claude" / "settings.json"
     assert paths.claude_json == home / ".claude.json"
     assert paths.zshrc == home / ".zshrc"
-    assert paths.ownership_json == home / ".zai-python-helper" / "ownership.json"
-    assert paths.recovery_json == home / ".zai-python-helper" / "recovery.json"
-    assert paths.lock_file == home / ".zai-python-helper" / "lock"
-    assert paths.state_dir == home / ".zai-python-helper" / "state"
+    assert home not in paths.ownership_json.parents
+    assert paths.ownership_json.name == "ownership.json"
+    assert paths.recovery_json.name == "recovery.json"
+    assert paths.lock_file.name == "lock"
+    assert paths.state_dir.name == "state"
 
 
 def test_paths_from_home_with_string(_isolate_home):
@@ -43,7 +44,7 @@ def test_paths_from_home_no_existence_check(_isolate_home):
     fake_home = _isolate_home / "nonexistent"
     paths = Paths.from_home(fake_home)
 
-    assert paths.state_dir == fake_home / ".zai-python-helper" / "state"
+    assert fake_home not in paths.state_dir.parents
     # No IO should have occurred
     assert not fake_home.exists()
 
@@ -57,4 +58,14 @@ def test_paths_default_uses_path_home(monkeypatch):
     monkeypatch.setenv("HOME", fake_home)
 
     paths = Paths.default()
-    assert paths.state_dir == Path(fake_home) / ".zai-python-helper" / "state"
+    assert paths.state_dir != Path(fake_home) / ".zai-python-helper" / "state"
+    assert Path(fake_home) not in paths.state_dir.parents
+
+
+@pytest.mark.parametrize("value", ["", "relative/state"])
+def test_paths_rejects_invalid_xdg_state_home(monkeypatch, tmp_path, value):
+    """Invalid XDG roots cannot redirect secrets into the CWD."""
+    monkeypatch.setenv("XDG_STATE_HOME", value)
+    paths = Paths.from_home(tmp_path)
+    assert tmp_path not in paths.state_dir.parents
+    assert paths.state_dir.is_absolute()

@@ -102,13 +102,12 @@ class TestUseZai:
         assert doc["hasCompletedOnboarding"] is True
         assert doc["theme"] == "dark"
 
-    def test_zshrc_foreign_survives_block_added(self, tmp_path, monkeypatch):
+    def test_zshrc_is_not_modified_in_phase1(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HOME", str(tmp_path))
         _seed(tmp_path, zshrc="export PATH=/bin\nalias ll='ls -la'\n")
         _run(["use", "zai", "--region", "global", "--api-key", TOKEN])
 
         text = Paths.from_home(tmp_path).zshrc.read_text()
-        assert "zai-python-helper managed" in text
         assert "export PATH=/bin" in text
         assert "alias ll='ls -la'" in text
 
@@ -124,13 +123,12 @@ class TestIdempotency:
         _seed(tmp_path)
         _run(["use", "zai", "--mode", "default", "--api-key", TOKEN])
         snapshot_settings = Paths.from_home(tmp_path).claude_settings.read_text()
-        snapshot_zshrc = Paths.from_home(tmp_path).zshrc.read_text()
 
         # Second run.
         _run(["use", "zai", "--mode", "default", "--api-key", TOKEN])
 
         assert Paths.from_home(tmp_path).claude_settings.read_text() == snapshot_settings
-        assert Paths.from_home(tmp_path).zshrc.read_text() == snapshot_zshrc
+        assert not Paths.from_home(tmp_path).zshrc.exists()
 
     def test_second_use_zai_reports_no_changes(self, tmp_path, monkeypatch, capsys):
         monkeypatch.setenv("HOME", str(tmp_path))

@@ -1,10 +1,8 @@
 """Pure-domain ``Paths`` object: the root configuration object of the project.
 
-Every filesystem path the tool touches is resolved from a single injected
-``home`` through ``Paths.from_home`` — ``~/.claude/settings.json``,
-``~/.claude.json``, ``~/.zshrc``, ``~/.zai-python-helper/ownership.json``,
-lock file, and state directory. This is the single source of truth for
-resolved paths: no other module may hard-code ``~/...`` literals.
+Every user configuration path is resolved from a single injected ``home``
+through ``Paths.from_home``. Runtime bookkeeping (journal, lock, recovery)
+is resolved in an external state root so it does not mutate HOME.
 
 This module lives in the core layer (pure domain services, no side effects).
 ``from_home`` is PURE path arithmetic — it performs no IO at all and no
@@ -22,6 +20,8 @@ Usage contract:
 
 from __future__ import annotations
 
+import hashlib
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -57,7 +57,13 @@ class Paths:
     cwd: Path
 
     @classmethod
-    def from_home(cls, home: str | Path, cwd: str | Path | None = None) -> Paths:
+    def from_home(
+        cls,
+        home: str | Path,
+        cwd: str | Path | None = None,
+        *,
+        state_home: str | Path | None = None,
+    ) -> Paths:
         """Resolve all paths off ``home`` via pure arithmetic (no IO).
 
         Accepts ``str | Path`` and coerces to ``pathlib.Path``. Does NOT
@@ -72,10 +78,10 @@ class Paths:
         - ``opencode``          = ``home / ".config" / "opencode" / "opencode.json"``
         - ``crush``             = ``home / ".config" / "crush" / "crush.json"``
         - ``factory_droid``     = ``home / ".factory" / "settings.json"``
-        - ``ownership_json``   = ``home / ".zai-python-helper" / "ownership.json"``
-        - ``recovery_json``    = ``home / ".zai-python-helper" / "recovery.json"``
-        - ``lock_file``         = ``home / ".zai-python-helper" / "lock"``
-        - ``state_dir``         = ``home / ".zai-python-helper" / "state"``
+        - ``ownership_json``   = external state root / ``ownership.json``
+        - ``recovery_json``    = external state root / ``recovery.json``
+        - ``lock_file``         = external state root / ``lock``
+        - ``state_dir``         = external state root / ``state``
         - ``project_claude_settings`` = ``cwd / ".claude" / "settings.json"``
         - ``local_claude_settings`` = ``cwd / ".claude" / "settings.local.json"``
 
@@ -86,8 +92,22 @@ class Paths:
                 a specific path to simulate running from a project directory.
         """
         h = Path(home)
-        state_dir = h / ".zai-python-helper" / "state"
-        helper_dir = h / ".zai-python-helper"
+        # Runtime bookkeeping is deliberately not part of HOME for the
+        # production entry point. ``state_home`` is an injection seam;
+        # omitted here it preserves the hermetic legacy layout for tests and
+        # library callers that explicitly inject a HOME.
+        if state_home is None:
+            # /var/tmp is durable across reboots, unlike /tmp.  The directory
+            # is created and ownership-checked by ProcessLock before use.
+            configured = os.environ.get("XDG_STATE_HOME", "")
+            state_home = (
+                configured
+                if configured and Path(configured).is_absolute()
+                else f"/var/tmp/zai-python-helper-{os.getuid()}"
+            )
+        home_id = hashlib.sha256(str(h).encode()).hexdigest()[:16]
+        helper_dir = Path(state_home) / "zai-python-helper" / home_id
+        state_dir = helper_dir / "state"
         cwd_path = Path(cwd) if cwd is not None else Path.cwd()
         return cls(
             claude_settings=h / ".claude" / "settings.json",
@@ -113,4 +133,10 @@ class Paths:
         Tests never call this — they inject ``tmp_path`` via :meth:`from_home`
         directly; that naming split is what makes test isolation provable.
         """
-        return cls.from_home(Path.home(), cwd=Path.cwd())
+        configured = os.environ.get("XDG_STATE_HOME", "")
+        state_home = (
+            configured
+            if configured and Path(configured).is_absolute()
+            else f"/var/tmp/zai-python-helper-{os.getuid()}"
+        )
+        return cls.from_home(Path.home(), cwd=Path.cwd(), state_home=state_home)

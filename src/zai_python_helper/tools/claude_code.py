@@ -109,6 +109,19 @@ class ClaudeCodeTool(Tool):
     # Planning
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _phase1_config_plan(plan: PatchPlan) -> PatchPlan:
+        """Keep execution byte-compatible: Phase 1 never edits ``.zshrc``.
+
+        The pure planner retains the owned shell-block transform for callers
+        that explicitly use that API.  The upstream execution path does not
+        create or modify a shell rc file, however, so the adapter excludes
+        that optional bookkeeping delta from normal activation/revert.
+        """
+        return PatchPlan(deltas=tuple(
+            delta for delta in plan.deltas if delta.tag != FileTag.ZSHRC
+        ))
+
     def plan_zai(
         self,
         spec: ProviderSpec,
@@ -118,14 +131,14 @@ class ClaudeCodeTool(Tool):
         auth_token: str,
         journal_records: dict[str, Any] | None = None,
     ) -> PatchPlan:
-        return cc_plan_zai(
+        return self._phase1_config_plan(cc_plan_zai(
             spec,
             region,
             settings_doc=state.get(FileTag.SETTINGS),
             claude_json_doc=state.get(FileTag.CLAUDE_JSON),
             zshrc_text=state.get(FileTag.ZSHRC, ""),
             auth_token=auth_token,
-        )
+        ))
 
     def plan_revert(
         self,
@@ -134,11 +147,11 @@ class ClaudeCodeTool(Tool):
         decisions: dict[str, Any],
         journal_records: dict[str, Any] | None = None,
     ) -> PatchPlan:
-        return cc_plan_revert(
+        return self._phase1_config_plan(cc_plan_revert(
             decisions,
             settings_doc=state.get(FileTag.SETTINGS),
             zshrc_text=state.get(FileTag.ZSHRC, ""),
-        )
+        ))
 
     # ------------------------------------------------------------------
     # Ownership descriptor

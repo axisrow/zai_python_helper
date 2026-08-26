@@ -26,6 +26,7 @@ from zai_python_helper.patchplan import (
     ProcessLock,
     apply_plan_under_lock,
     has_pending_recovery,
+    migrate_legacy_state,
     recover,
 )
 from zai_python_helper.paths import Paths
@@ -45,6 +46,37 @@ def _write_json_delta(tag: FileTag, content: dict) -> FileDelta:
 
 def _paths(home: Path) -> Paths:
     return Paths.from_home(home)
+
+
+def test_migrate_legacy_state_moves_journal_and_recovery(tmp_path):
+    """An upgrade preserves both ownership and interrupted-run state."""
+    paths = _paths(tmp_path)
+    legacy = tmp_path / ".zai-python-helper"
+    legacy.mkdir()
+    (legacy / "ownership.json").write_text('{"legacy": true}\n')
+    (legacy / "recovery.json").write_text('{"entries": []}\n')
+
+    assert migrate_legacy_state(paths) == ["ownership.json", "recovery.json"]
+    assert paths.ownership_json.read_text() == '{"legacy": true}\n'
+    assert paths.recovery_json.read_text() == '{"entries": []}\n'
+    assert not (legacy / "ownership.json").exists()
+    assert not (legacy / "recovery.json").exists()
+
+
+def test_migrate_legacy_state_rewrites_recovery_journal_path(tmp_path):
+    """Migrated recovery manifests must point at the new journal location."""
+    paths = _paths(tmp_path)
+    legacy = tmp_path / ".zai-python-helper"
+    legacy.mkdir()
+    (legacy / "ownership.json").write_text('{"legacy": true}\n')
+    (legacy / "recovery.json").write_text(json.dumps({
+        "entries": [],
+        "journal": {"tag": "ownership", "path": str(legacy / "ownership.json"), "content": "{}\n"},
+    }))
+
+    migrate_legacy_state(paths)
+    manifest = json.loads(paths.recovery_json.read_text())
+    assert manifest["journal"]["path"] == str(paths.ownership_json)
 
 
 # ---------------------------------------------------------------------------

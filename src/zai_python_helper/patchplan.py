@@ -31,6 +31,9 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import json
+import os
+import shutil
+import tempfile
 import threading as _threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,6 +46,89 @@ from zai_python_helper.paths import Paths
 # same posture as the secrets file. Reuse ownership's secret-grade atomic
 # writer so both stay consistent.
 _SECURE_FILE_MODE = 0o600
+
+
+def _ensure_private_parent(path: Path) -> None:
+    """Create the state parent securely, rejecting pre-created directories."""
+    path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    st = path.parent.stat()
+    if st.st_uid != os.getuid():
+        raise PermissionError(f"insecure state directory: {path.parent}")
+    # Tighten a directory created by an older release (or by a test) before
+    # opening the lock.  A foreign-owned directory was rejected above.
+    if st.st_mode & 0o077:
+        path.parent.chmod(0o700)
+
+
+def migrate_legacy_state(paths: Paths) -> list[str]:
+    """Move pre-0.1 bookkeeping out of HOME, once and atomically.
+
+    Older releases kept these files in ``~/.zai-python-helper``.  Losing that
+    journal on upgrade would make ``use default`` clear values it could no
+    longer prove ownership of, so migrate each file only when its new
+    destination is absent.  The operation is serialized by the new lock and
+    is intentionally a no-op for fresh installations (the parity path).
+    """
+    legacy_dir = paths.claude_settings.parent.parent / ".zai-python-helper"
+    moved: list[str] = []
+    with ProcessLock(paths.lock_file):
+        paths.ownership_json.parent.mkdir(parents=True, exist_ok=True)
+        for name, destination in (
+            ("ownership.json", paths.ownership_json),
+            ("recovery.json", paths.recovery_json),
+        ):
+            source = legacy_dir / name
+            if source.exists() and not destination.exists():
+                _copy_then_remove(source, destination)
+                moved.append(name)
+        # A recovery manifest stores the journal's absolute path.  Rewrite
+        # that reference while migrating, otherwise recovery would replay
+        # config but silently discard the journal retirement/update.
+        if paths.recovery_json.exists():
+            _rewrite_legacy_journal_path(
+                paths.recovery_json,
+                legacy_dir / "ownership.json",
+                paths.ownership_json,
+            )
+    return moved
+
+
+def _copy_then_remove(source: Path, destination: Path) -> None:
+    """Migrate a file safely even when source and destination cross devices."""
+    destination.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(
+        prefix=f".{destination.name}.", dir=destination.parent
+    )
+    try:
+        with os.fdopen(fd, "wb") as output, source.open("rb") as input_file:
+            shutil.copyfileobj(input_file, output)
+            output.flush()
+            os.fsync(output.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, destination)
+        source.unlink()
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(temporary)
+        raise
+
+
+def _rewrite_legacy_journal_path(
+    manifest_path: Path, legacy_journal: Path, current_journal: Path
+) -> None:
+    """Update a migrated manifest's stale absolute journal reference."""
+    try:
+        document = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    journal = document.get("journal") if isinstance(document, dict) else None
+    if not isinstance(journal, dict) or journal.get("path") != str(legacy_journal):
+        return
+    journal["path"] = str(current_journal)
+    text = json.dumps(document, indent=2, ensure_ascii=False) + "\n"
+    from zai_python_helper.ownership import _atomic_write_secret
+
+    _atomic_write_secret(manifest_path, text.encode("utf-8"))
 
 
 # ---------------------------------------------------------------------------
@@ -108,7 +194,7 @@ class ProcessLock:
         self._intra = intra
         self._held_intra = True
         # 2) Cross-process serialization (flock). Create the file + parent dir.
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        _ensure_private_parent(self.path)
         try:
             self._fd = os_open(self.path)
             fcntl.flock(self._fd, fcntl.LOCK_EX)
@@ -260,7 +346,9 @@ def _write_manifest(
     _atomic_write_secret(path, text.encode("utf-8"))
 
 
-def _read_manifest(path: Path) -> tuple[list[_RecoveryEntry], _RecoveryEntry | None]:
+def _read_manifest(
+    path: Path, paths: Paths
+) -> tuple[list[_RecoveryEntry], _RecoveryEntry | None]:
     """Parse a recovery manifest → ``(entries, journal)``.
 
     Returns ``([], None)`` if the manifest is absent or corrupt. A corrupt
@@ -281,14 +369,22 @@ def _read_manifest(path: Path) -> tuple[list[_RecoveryEntry], _RecoveryEntry | N
     if not isinstance(doc, dict):
         return [], None
     raw_entries = doc.get("entries", [])
+    allowed = {
+        tag.value: str(_tag_path(paths, tag))
+        for tag in FileTag
+    }
     entries = [
         _RecoveryEntry.from_dict(e)
         for e in (raw_entries if isinstance(raw_entries, list) else [])
         if isinstance(e, dict)
+        and str(e.get("path", "")) == allowed.get(str(e.get("tag", "")))
     ]
     raw_journal = doc.get("journal")
     journal = (
-        _RecoveryEntry.from_dict(raw_journal) if isinstance(raw_journal, dict) else None
+        _RecoveryEntry.from_dict(raw_journal)
+        if isinstance(raw_journal, dict)
+        and str(raw_journal.get("path", "")) == str(paths.ownership_json)
+        else None
     )
     return entries, journal
 
@@ -351,7 +447,7 @@ def recover(paths: Paths) -> list[str]:
         wrote, in manifest order. Empty if no manifest existed.
     """
     with ProcessLock(paths.lock_file):
-        entries, journal = _read_manifest(paths.recovery_json)
+        entries, journal = _read_manifest(paths.recovery_json, paths)
         if not entries and journal is None:
             # An absent/empty manifest means nothing to recover. Ensure no
             # stale (e.g. zero-byte) manifest lingers.
