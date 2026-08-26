@@ -154,13 +154,16 @@ def _entry(provider: str, region: Region, auth_token: str) -> dict[str, Any]:
     else:  # PROVIDER_OPENAI
         base_url = paas_base_url_for_region(region)
     display = _canonical_display_name(provider, region)
+    # Preserve the insertion order emitted by coding-helper 0.0.7.  Factory
+    # Droid compares this JSON byte-for-byte in the parity harness; unlike the
+    # other fields, object key order is observable on disk.
     return {
         "displayName": display,
-        "provider": provider,
         "model": MODEL_ID,
-        "maxOutputTokens": MAX_OUTPUT_TOKENS,
         "baseUrl": base_url,
         "apiKey": auth_token,
+        "provider": provider,
+        "maxOutputTokens": MAX_OUTPUT_TOKENS,
     }
 
 

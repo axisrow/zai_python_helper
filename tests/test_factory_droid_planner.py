@@ -47,6 +47,18 @@ class TestPlanZai:
         assert oai["displayName"] == "GLM-4.7 [GLM Coding Plan Global] - Openai"
         assert oai["provider"] == "generic-chat-completion-api"
 
+    def test_entries_match_upstream_key_order(self):
+        plan = fd.plan_zai(Region.GLOBAL, factory_doc=None, auth_token=TOKEN)
+        models = plan.delta_for(FileTag.FACTORY_DROID).content["customModels"]
+        assert list(models[0]) == [
+            "displayName",
+            "model",
+            "baseUrl",
+            "apiKey",
+            "provider",
+            "maxOutputTokens",
+        ]
+
     def test_china_uses_china_endpoints(self):
         plan = fd.plan_zai(Region.CHINA, factory_doc=None, auth_token=TOKEN)
         models = plan.delta_for(FileTag.FACTORY_DROID).content["customModels"]
