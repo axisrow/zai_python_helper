@@ -267,6 +267,11 @@ def test_docker_revert_semantic_parity_across_processes(
     def semantic(files: dict[str, tuple[bytes, int]]) -> dict[str, object]:
         result: dict[str, object] = {}
         for name, (content, _mode) in files.items():
+            # The HOME legacy lock namespace is intentionally retained as a
+            # Phase-2 transaction artifact. It serializes already-started
+            # pre-0.1 processes and is outside revert's config semantics.
+            if name == ".zai-python-helper/lock":
+                continue
             result[name] = (
                 json.loads(content)
                 if name.endswith(".json")
