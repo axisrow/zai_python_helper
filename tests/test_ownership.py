@@ -643,9 +643,10 @@ class TestOwnershipJournalIO:
         with pytest.raises(ConfigurationError):
             OwnershipJournal(path).read()
 
-    def test_root_fd_read_does_not_double_close_owned_fd(self, tmp_path, monkeypatch):
+    def test_pinned_read_does_not_double_close_reused_fd(self, tmp_path, monkeypatch):
         """The fdopen context manager is the sole owner of a read descriptor."""
-        import zai_python_helper.ownership as ownership
+        import zai_python_helper.patchplan as patchplan
+        from zai_python_helper.patchplan import PinnedStateDirectory
 
         state = tmp_path / "state"
         state.mkdir()
@@ -666,15 +667,19 @@ class TestOwnershipJournalIO:
             def __exit__(self, *_args):
                 real_close(fd)
 
-        monkeypatch.setattr(ownership.os, "open", lambda *args, **kwargs: fd)
-        monkeypatch.setattr(ownership.os, "fdopen", lambda *args, **kwargs: FailingStream())
+        monkeypatch.setattr(patchplan.os, "open", lambda *args, **kwargs: fd)
+        monkeypatch.setattr(
+            patchplan.os, "fdopen", lambda *args, **kwargs: FailingStream()
+        )
         closes: list[int] = []
-        monkeypatch.setattr(ownership.os, "close", lambda value: closes.append(value))
+        monkeypatch.setattr(patchplan.os, "close", lambda value: closes.append(value))
         try:
             from zai_python_helper.errors import ConfigurationError
 
             with pytest.raises(ConfigurationError):
-                OwnershipJournal(path).read(root_fd=root_fd)
+                OwnershipJournal(path).read(
+                    state=PinnedStateDirectory(state, root_fd)
+                )
             assert closes == []
         finally:
             real_close(root_fd)

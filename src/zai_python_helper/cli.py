@@ -770,7 +770,7 @@ def _handle_use_zai(args: argparse.Namespace) -> int:
         migrate_legacy_state(paths)
         _run_recovery(paths, recover)
 
-    with ProcessLock(paths.lock_file) as lock:
+    with ProcessLock(paths) as lock:
         # Read state, plan, and capture ownership — all inside the lock so a
         # concurrent revert cannot mutate the config between our read and our
         # commit (and so the takeover prior reflects exactly the pre-commit
@@ -783,7 +783,7 @@ def _handle_use_zai(args: argparse.Namespace) -> int:
         # entry we wrote from one the user wrote (issue #61). Reading it here
         # keeps the snapshot consistent with the state we plan against.
         journal = OwnershipJournal(paths.ownership_json)
-        journal_records = journal.read(root_fd=lock.root_fd)
+        journal_records = journal.read(state=lock.state)
 
         plan = tool.plan_zai(
             spec,
@@ -816,10 +816,12 @@ def _handle_use_zai(args: argparse.Namespace) -> int:
         def _journal_text() -> str | None:
             if not records:
                 return None
-            current = journal.read(root_fd=lock.root_fd)
+            current = journal.read(state=lock.state)
             return journal.render(_merge_takeover_records(tool, current, records))
 
-        apply_plan_locked(paths, plan, journal_content=_journal_text)
+        apply_plan_locked(
+            paths, plan, state=lock.state, journal_content=_journal_text
+        )
     # Match the pinned upstream `chelper auth reload <tool>` CLI.  File
     # changes remain observable through the filesystem contract; stdout is a
     # stable process contract and must not expose paths or configuration.
@@ -885,10 +887,10 @@ def _handle_use_default(args: argparse.Namespace) -> int:
     # inside ONE held ProcessLock (ADR-005 / S3 finding #6): a concurrent
     # ``use zai`` must not be able to change the config between our decision
     # read and our commit (which would make the decisions stale).
-    with ProcessLock(paths.lock_file) as lock:
+    with ProcessLock(paths) as lock:
         state = tool.read_state(paths)
         journal = OwnershipJournal(paths.ownership_json)
-        journal_records = journal.read(root_fd=lock.root_fd)
+        journal_records = journal.read(state=lock.state)
         decisions, retired_records = tool.revert_decisions(journal_records, state)
         plan = tool.plan_revert(
             state=state, decisions=decisions, journal_records=journal_records
@@ -907,11 +909,13 @@ def _handle_use_default(args: argparse.Namespace) -> int:
         # byte-identical (a fresh copy with no retirement); when there is
         # nothing at all to journal we skip it so no empty file is created.
         def _journal_text() -> str | None:
-            if not retired_records and not journal.exists(root_fd=lock.root_fd):
+            if not retired_records and not journal.exists(state=lock.state):
                 return None
             return journal.render(retired_records)
 
-        written = apply_plan_locked(paths, plan, journal_content=_journal_text)
+        written = apply_plan_locked(
+            paths, plan, state=lock.state, journal_content=_journal_text
+        )
     if not written:
         print("(no changes — already at default)")
     else:

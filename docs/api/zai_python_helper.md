@@ -343,7 +343,7 @@ somehow unknown (defensive; the enum makes this unreachable today).
 
 ### `RevertAction`
 
-*enum — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/ownership.py#L76)*
+*enum — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/ownership.py#L77)*
 
 What `revert` decided to do with one managed key.
 
@@ -366,7 +366,7 @@ Members:
 
 ### `RevertDecision`
 
-*dataclass — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/ownership.py#L147)*
+*dataclass — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/ownership.py#L148)*
 
 The outcome of `revert` for one key.
 
@@ -385,7 +385,7 @@ Attributes:
 
 ### `take_over()`
 
-*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/ownership.py#L220)*
+*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/ownership.py#L221)*
 
 ```python
 take_over(records: dict[str, Any], tool: str, key: str, prior_value: str | None, prior_present: bool, set_hash: str | None) -> dict[str, Any]
@@ -432,7 +432,7 @@ Args:
 
 ### `revert()`
 
-*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/ownership.py#L345)*
+*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/ownership.py#L346)*
 
 ```python
 revert(records: dict[str, Any], tool: str, key: str, current_value: str | None) -> tuple[RevertDecision, dict[str, Any]]
@@ -785,7 +785,7 @@ Value: `{Region.GLOBAL: 'https://api.z.ai/api/anthropic', Region.CHINA: 'https:/
 
 ### `Paths`
 
-*dataclass — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/paths.py#L58)*
+*dataclass — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/paths.py#L71)*
 
 Frozen bundle of every resolved filesystem path the tool touches.
 
@@ -806,6 +806,7 @@ Attributes:
 - `recovery_json`: `Path`
 - `lock_file`: `Path`
 - `state_dir`: `Path`
+- `legacy_runtime_dir`: `Path | None`
 - `project_claude_settings`: `Path`
 - `local_claude_settings`: `Path`
 - `cwd`: `Path`

@@ -41,10 +41,10 @@ def _merge(tool, current, records):
 class TestApplyAndRevert:
     def test_use_zai_writes_exact_config(self, tool, tmp_path):
         paths = Paths.from_home(tmp_path, state_home=tmp_path)
-        with ProcessLock(paths.lock_file):
+        with ProcessLock(paths) as lock:
             state = tool.read_state(paths)
             plan = tool.plan_zai(_spec(), Region.GLOBAL, state=state, auth_token=TOKEN)
-            apply_plan_locked(paths, plan)
+            apply_plan_locked(paths, plan, state=lock.state)
         entry = _read(paths)["providers"]["zai"]
         assert entry["api_key"] == TOKEN
         assert entry["base_url"] == "https://api.z.ai/api/coding/paas/v4"
@@ -53,9 +53,13 @@ class TestApplyAndRevert:
     def test_use_zai_is_idempotent(self, tool, tmp_path):
         paths = Paths.from_home(tmp_path, state_home=tmp_path)
         spec = _spec()
-        with ProcessLock(paths.lock_file):
+        with ProcessLock(paths) as lock:
             state = tool.read_state(paths)
-            apply_plan_locked(paths, tool.plan_zai(spec, Region.GLOBAL, state=state, auth_token=TOKEN))
+            apply_plan_locked(
+                paths,
+                tool.plan_zai(spec, Region.GLOBAL, state=state, auth_token=TOKEN),
+                state=lock.state,
+            )
             state2 = tool.read_state(paths)
             plan2 = tool.plan_zai(spec, Region.GLOBAL, state=state2, auth_token=TOKEN)
         assert plan2.is_empty
@@ -70,18 +74,18 @@ class TestApplyAndRevert:
         JsonBackend.write(paths.crush, seed)
         journal = OwnershipJournal(paths.ownership_json)
 
-        with ProcessLock(paths.lock_file):
+        with ProcessLock(paths) as lock:
             state = tool.read_state(paths)
             plan = tool.plan_zai(spec, Region.GLOBAL, state=state, auth_token=TOKEN)
             records = tool.extract_takeover(plan, prior_state=state, spec=spec)
             journal.write(_merge(tool, journal.read(), records))
-            apply_plan_locked(paths, plan)
+            apply_plan_locked(paths, plan, state=lock.state)
 
-        with ProcessLock(paths.lock_file):
+        with ProcessLock(paths) as lock:
             state = tool.read_state(paths)
             decisions, retired = tool.revert_decisions(journal.read(), state)
             plan = tool.plan_revert(state=state, decisions=decisions)
-            apply_plan_locked(paths, plan)
+            apply_plan_locked(paths, plan, state=lock.state)
 
         doc = _read(paths)
         # zai gone; foreign provider + theme restored.
@@ -94,22 +98,22 @@ class TestApplyAndRevert:
         spec = _spec()
         journal = OwnershipJournal(paths.ownership_json)
 
-        with ProcessLock(paths.lock_file):
+        with ProcessLock(paths) as lock:
             state = tool.read_state(paths)
             plan = tool.plan_zai(spec, Region.GLOBAL, state=state, auth_token=TOKEN)
             records = tool.extract_takeover(plan, prior_state=state, spec=spec)
             journal.write(_merge(tool, journal.read(), records))
-            apply_plan_locked(paths, plan)
+            apply_plan_locked(paths, plan, state=lock.state)
 
         doc = _read(paths)
         doc["providers"]["zai"]["api_key"] = "user-rotated"
         JsonBackend.write(paths.crush, doc)
 
-        with ProcessLock(paths.lock_file):
+        with ProcessLock(paths) as lock:
             state = tool.read_state(paths)
             decisions, retired = tool.revert_decisions(journal.read(), state)
             plan = tool.plan_revert(state=state, decisions=decisions)
-            apply_plan_locked(paths, plan)
+            apply_plan_locked(paths, plan, state=lock.state)
 
         doc = _read(paths)
         assert doc["providers"]["zai"]["api_key"] == "user-rotated"
@@ -123,23 +127,23 @@ class TestApplyAndRevert:
         spec = _spec()
         journal = OwnershipJournal(paths.ownership_json)
 
-        with ProcessLock(paths.lock_file):
+        with ProcessLock(paths) as lock:
             state = tool.read_state(paths)
             plan = tool.plan_zai(spec, Region.GLOBAL, state=state, auth_token=TOKEN)
             records = tool.extract_takeover(plan, prior_state=state, spec=spec)
             journal.write(_merge(tool, journal.read(), records))
-            apply_plan_locked(paths, plan)
+            apply_plan_locked(paths, plan, state=lock.state)
 
         # External edit: only base_url changes; api_key still ours.
         doc = _read(paths)
         doc["providers"]["zai"]["base_url"] = "https://user.custom/v4"
         JsonBackend.write(paths.crush, doc)
 
-        with ProcessLock(paths.lock_file):
+        with ProcessLock(paths) as lock:
             state = tool.read_state(paths)
             decisions, retired = tool.revert_decisions(journal.read(), state)
             plan = tool.plan_revert(state=state, decisions=decisions)
-            apply_plan_locked(paths, plan)
+            apply_plan_locked(paths, plan, state=lock.state)
 
         doc = _read(paths)
         # base_url REFUSE'd → preserved; api_key RESTORE'd-to-absent → gone;
@@ -156,23 +160,23 @@ class TestApplyAndRevert:
         spec = _spec()
         journal = OwnershipJournal(paths.ownership_json)
 
-        with ProcessLock(paths.lock_file):
+        with ProcessLock(paths) as lock:
             state = tool.read_state(paths)
             plan = tool.plan_zai(spec, Region.GLOBAL, state=state, auth_token=TOKEN)
             records = tool.extract_takeover(plan, prior_state=state, spec=spec)
             journal.write(_merge(tool, journal.read(), records))
-            apply_plan_locked(paths, plan)
+            apply_plan_locked(paths, plan, state=lock.state)
 
         # User adds a foreign field into the zai entry.
         doc = _read(paths)
         doc["providers"]["zai"]["custom"] = "keep-me"
         JsonBackend.write(paths.crush, doc)
 
-        with ProcessLock(paths.lock_file):
+        with ProcessLock(paths) as lock:
             state = tool.read_state(paths)
             decisions, retired = tool.revert_decisions(journal.read(), state)
             plan = tool.plan_revert(state=state, decisions=decisions)
-            apply_plan_locked(paths, plan)
+            apply_plan_locked(paths, plan, state=lock.state)
 
         doc = _read(paths)
         # Entry survives with the foreign field; managed fields gone.
@@ -186,10 +190,10 @@ class TestApplyAndRevert:
         JsonBackend.write(paths.opencode, {"$schema": "keep", "provider": {}})
         JsonBackend.write(paths.claude_settings, {"env": {"ANTHROPIC_AUTH_TOKEN": "cc"}})
 
-        with ProcessLock(paths.lock_file):
+        with ProcessLock(paths) as lock:
             state = tool.read_state(paths)
             plan = tool.plan_zai(_spec(), Region.GLOBAL, state=state, auth_token=TOKEN)
-            apply_plan_locked(paths, plan)
+            apply_plan_locked(paths, plan, state=lock.state)
 
         assert JsonBackend.read(paths.opencode) == {"$schema": "keep", "provider": {}}
         assert JsonBackend.read(paths.claude_settings) == {"env": {"ANTHROPIC_AUTH_TOKEN": "cc"}}

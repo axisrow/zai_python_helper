@@ -1,5 +1,7 @@
 """Tests for the Paths dataclass."""
 
+from pathlib import Path
+
 import pytest
 
 from zai_python_helper.paths import Paths
@@ -71,8 +73,9 @@ def test_paths_rejects_invalid_xdg_state_home(monkeypatch, tmp_path, value):
         isolated.delenv("ZAI_PYTHON_HELPER_STATE_HOME")
         isolated.setenv("XDG_STATE_HOME", value)
         paths = Paths.from_home(tmp_path)
-    assert tmp_path not in paths.state_dir.parents
     assert paths.state_dir.is_absolute()
+    assert tmp_path / ".local" / "state" in paths.state_dir.parents
+    assert Path("/var/tmp") not in paths.state_dir.parents
 
 
 def test_paths_rejects_dangling_configured_state_symlink(tmp_path):

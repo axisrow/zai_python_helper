@@ -17,8 +17,8 @@ Layering (ADR-001: core/IO split):
   :func:`revert` / :func:`hash_value`): operate on a plain ``dict`` of
   journal records. No file access, no env, importable without a
   filesystem. This is the part exported as the public API (issue #18).
-- **IO seam** (:class:`OwnershipJournal`): reads/writes that dict to
-  ``~/.zai-python-helper/ownership.json`` atomically at mode ``0600``.
+- **IO seam** (:class:`OwnershipJournal`): reads/writes that dict through a
+  pinned state-directory descriptor atomically at mode ``0600``.
   Injected with an explicit path so tests use ``Paths.from_home(tmp)``.
 
 Journal shape on disk::
@@ -59,12 +59,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
-import tempfile
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from zai_python_helper.patchplan import PinnedStateDirectory
 
 # SHA-256 of the credential value we wrote. We never store the value we set
 # in cleartext — only its hash, so a leaked journal cannot reveal the active
@@ -547,7 +548,16 @@ class OwnershipJournal:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
 
-    def read(self, *, root_fd: int | None = None) -> dict[str, Any]:
+    def _state(
+        self, state: PinnedStateDirectory | None, *, create: bool
+    ) -> tuple[PinnedStateDirectory | None, bool]:
+        if state is not None:
+            return state, False
+        from zai_python_helper.patchplan import PinnedStateDirectory
+
+        return PinnedStateDirectory.open(self.path.parent, create=create), True
+
+    def read(self, *, state: PinnedStateDirectory | None = None) -> dict[str, Any]:
         """Parse the journal file → dict, or ``{}`` if absent/empty.
 
         A malformed journal raises :class:`ConfigurationError` (never a bare
@@ -557,26 +567,20 @@ class OwnershipJournal:
         from zai_python_helper.errors import ConfigurationError
 
         try:
-            if root_fd is None:
-                if not self.path.exists():
-                    return {}
-                text = self.path.read_text(encoding="utf-8")
-            else:
-                fd = os.open(self.path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=root_fd)
-                try:
-                    stream = os.fdopen(fd, "r", encoding="utf-8")
-                except OSError:
-                    # fdopen did not acquire ownership when construction fails.
-                    os.close(fd)
-                    raise
-                with stream:
-                    text = stream.read()
-        except FileNotFoundError:
-            if root_fd is not None:
-                return {}
-            raise
+            pinned, owned = self._state(state, create=False)
         except OSError as e:
             raise ConfigurationError(f"Failed to read {self.path}: {e}") from e
+        if pinned is None:
+            return {}
+        try:
+            text = pinned.read_text(self.path.name)
+        except FileNotFoundError:
+            return {}
+        except OSError as e:
+            raise ConfigurationError(f"Failed to read {self.path}: {e}") from e
+        finally:
+            if owned:
+                pinned.close()
         if not text.strip():
             return {}
         try:
@@ -590,17 +594,16 @@ class OwnershipJournal:
             )
         return doc
 
-    def exists(self, *, root_fd: int | None = None) -> bool:
+    def exists(self, *, state: PinnedStateDirectory | None = None) -> bool:
         """Test existence without re-resolving the state-root path."""
-        if root_fd is None:
-            return self.path.exists()
-        try:
-            fd = os.open(self.path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=root_fd)
-        except FileNotFoundError:
+        pinned, owned = self._state(state, create=False)
+        if pinned is None:
             return False
-        else:
-            os.close(fd)
-            return True
+        try:
+            return pinned.exists(self.path.name)
+        finally:
+            if owned:
+                pinned.close()
 
     @staticmethod
     def render(records: dict[str, Any]) -> str:
@@ -615,7 +618,12 @@ class OwnershipJournal:
         """
         return json.dumps(records or {}, indent=2, ensure_ascii=False) + "\n"
 
-    def write(self, records: dict[str, Any], *, root_fd: int | None = None) -> None:
+    def write(
+        self,
+        records: dict[str, Any],
+        *,
+        state: PinnedStateDirectory | None = None,
+    ) -> None:
         """Serialize ``records`` to pretty JSON and write atomically at 0600.
 
         The file is created mode ``0600`` (credentials may be present) via the
@@ -623,59 +631,18 @@ class OwnershipJournal:
         world-readable journal. Rendering is :meth:`render`.
         """
         data = self.render(records).encode("utf-8")
-        if root_fd is None:
-            _atomic_write_secret(self.path, data)
-            return
-        from zai_python_helper.patchplan import _atomic_write_at
+        from zai_python_helper.errors import ConfigurationError
 
-        _atomic_write_at(root_fd, self.path.name, data, _JOURNAL_FILE_MODE)
-
-
-def _atomic_write_secret(path: Path, data: bytes) -> None:
-    """Write ``data`` to ``path`` atomically at mode ``0600``.
-
-    Local copy of the atomic-write primitive so :mod:`ownership` has no
-    import cycle with :mod:`backends` (which imports planner types). Same
-    guarantees: temp in the same dir, fsync before replace, dir fsync after,
-    0600 mode on the temp so the replaced file is never world-readable even
-    transiently.
-    """
-    from zai_python_helper.errors import ConfigurationError
-
-    path = Path(path)
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp_name = tempfile.mkstemp(
-            dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp"
-        )
-        tmp_path = Path(tmp_name)
         try:
-            # 0600 BEFORE we write the bytes, so the temp is never readable
-            # by group/other even for the instant it exists.
-            os.chmod(tmp_path, _JOURNAL_FILE_MODE)
-            with os.fdopen(fd, "wb") as f:
-                f.write(data)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp_path, path)
-            _fsync_dir(path.parent)
-        except Exception:
-            try:
-                tmp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
-            raise
-    except OSError as e:
-        raise ConfigurationError(f"Failed to write {path}: {e}") from e
-
-
-def _fsync_dir(dir_path: Path) -> None:
-    """Best-effort ``fsync`` of a directory (ignores unsupported filesystems)."""
-    try:
-        dir_fd = os.open(str(dir_path), os.O_RDONLY)
+            pinned, owned = self._state(state, create=True)
+        except OSError as e:
+            raise ConfigurationError(f"Failed to write {self.path}: {e}") from e
+        if pinned is None:  # create=True either returns a capability or raises.
+            raise ConfigurationError(f"Failed to open state directory for {self.path}")
         try:
-            os.fsync(dir_fd)
+            pinned.atomic_write(self.path.name, data, _JOURNAL_FILE_MODE)
+        except OSError as e:
+            raise ConfigurationError(f"Failed to write {self.path}: {e}") from e
         finally:
-            os.close(dir_fd)
-    except OSError:
-        pass
+            if owned:
+                pinned.close()
