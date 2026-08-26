@@ -133,7 +133,7 @@ class TestMaskKey:
 
 def _write_settings(home, env: dict | None = None) -> None:
     """Seed ``~/.claude/settings.json`` with the given env block."""
-    settings = Paths.from_home(home).claude_settings
+    settings = Paths.from_home(home, state_home=home).claude_settings
     settings.parent.mkdir(parents=True, exist_ok=True)
     payload = {"env": env or {}} if env is not None else {}
     settings.write_text(json.dumps(payload), encoding="utf-8")
@@ -145,7 +145,7 @@ def _cc(home) -> ClaudeCodeStatus:
     A narrow helper so each test reads ``.claude_code`` once and the type
     narrows to non-None for the assertions that follow.
     """
-    cc = detect_status(Paths.from_home(home)).claude_code
+    cc = detect_status(Paths.from_home(home, state_home=home)).claude_code
     assert cc is not None
     return cc
 
@@ -169,7 +169,7 @@ class TestDetectClaudeCode:
 
     def test_detects_registered_non_claude_tools(self, tmp_path):
         """Status must include the S6 tools, not only the legacy CC block."""
-        paths = Paths.from_home(tmp_path)
+        paths = Paths.from_home(tmp_path, state_home=tmp_path)
         paths.opencode.parent.mkdir(parents=True, exist_ok=True)
         paths.opencode.write_text(
             json.dumps(
@@ -201,7 +201,7 @@ class TestDetectClaudeCode:
         base_url with credentials embedded in the query string (or
         userinfo) would leak in cleartext via ``detail``, violating the
         StatusRow.detail invariant (MUST NOT carry secrets)."""
-        paths = Paths.from_home(tmp_path)
+        paths = Paths.from_home(tmp_path, state_home=tmp_path)
         paths.crush.parent.mkdir(parents=True, exist_ok=True)
         secret_url = "https://api.z.ai/api/paas/v4?api_key=SUPERSECRET123&token=abc"
         paths.crush.write_text(
@@ -240,7 +240,7 @@ class TestDetectClaudeCode:
         OUTSIDE safe_endpoint's try/except, so it crashed the status
         command and could leak a secret-shaped fragment via the exception
         message. status_row() must degrade gracefully instead."""
-        paths = Paths.from_home(tmp_path)
+        paths = Paths.from_home(tmp_path, state_home=tmp_path)
         paths.crush.parent.mkdir(parents=True, exist_ok=True)
         bad_port_url = "https://api.z.ai:SUPERSECRET/path"
         paths.crush.write_text(
@@ -274,7 +274,7 @@ class TestDetectClaudeCode:
         config) crashed ``safe_endpoint`` on ``url.strip()`` with an
         uncaught AttributeError, since that call sat outside the function's
         try/except. status_row() must degrade, not crash."""
-        paths = Paths.from_home(tmp_path)
+        paths = Paths.from_home(tmp_path, state_home=tmp_path)
         paths.crush.parent.mkdir(parents=True, exist_ok=True)
         paths.crush.write_text(
             json.dumps(
@@ -382,7 +382,7 @@ class TestDetectClaudeCode:
     def test_non_string_base_url_does_not_crash(self, tmp_path, bad_value):
         """Regression (review cycle 3): schema drift may put a non-string
         in ANTHROPIC_BASE_URL. Status must degrade to inactive, not crash."""
-        settings = Paths.from_home(tmp_path).claude_settings
+        settings = Paths.from_home(tmp_path, state_home=tmp_path).claude_settings
         settings.parent.mkdir(parents=True, exist_ok=True)
         settings.write_text(
             json.dumps({"env": {"ANTHROPIC_BASE_URL": bad_value}}), encoding="utf-8"
@@ -396,7 +396,7 @@ class TestDetectClaudeCode:
 
     def test_non_string_key_value_does_not_crash(self, tmp_path):
         """A non-string ANTHROPIC_API_KEY must not crash mask_key."""
-        settings = Paths.from_home(tmp_path).claude_settings
+        settings = Paths.from_home(tmp_path, state_home=tmp_path).claude_settings
         settings.parent.mkdir(parents=True, exist_ok=True)
         settings.write_text(
             json.dumps(
@@ -441,7 +441,7 @@ class TestDetectClaudeCode:
         assert cc.zai_active is False
         assert cc.region is None
         assert cc.base_url == "(malformed endpoint)"
-        out = render_status(detect_status(Paths.from_home(tmp_path)), **FORCE_PLAIN)
+        out = render_status(detect_status(Paths.from_home(tmp_path, state_home=tmp_path)), **FORCE_PLAIN)
         assert "supersecret" not in out
 
     @pytest.mark.parametrize(
@@ -464,7 +464,7 @@ class TestDetectClaudeCode:
         # credential never reaches the stored endpoint or any render.
         assert "CREDENTIAL" not in (cc.base_url or "")
         assert "secret" not in (cc.base_url or "")
-        out = render_status(detect_status(Paths.from_home(tmp_path)), **FORCE_PLAIN)
+        out = render_status(detect_status(Paths.from_home(tmp_path, state_home=tmp_path)), **FORCE_PLAIN)
         assert "CREDENTIAL" not in out
         assert "secret" not in out
 
@@ -496,7 +496,7 @@ class TestDetectClaudeCode:
         cc = _cc(tmp_path)
         assert cc.base_url == "https://api.z.ai"
         assert "sk-live-CRED-123456" not in (cc.base_url or "")
-        out = render_status(detect_status(Paths.from_home(tmp_path)), **FORCE_PLAIN)
+        out = render_status(detect_status(Paths.from_home(tmp_path, state_home=tmp_path)), **FORCE_PLAIN)
         assert "sk-live-CRED-123456" not in out
 
     def test_nfkc_invalid_endpoint_does_not_crash(self, tmp_path):
@@ -512,7 +512,7 @@ class TestDetectClaudeCode:
 
     def test_malformed_settings_json_treated_as_no_env(self, tmp_path):
         # A corrupt settings.json must not crash status — degrade to inactive.
-        settings = Paths.from_home(tmp_path).claude_settings
+        settings = Paths.from_home(tmp_path, state_home=tmp_path).claude_settings
         settings.parent.mkdir(parents=True, exist_ok=True)
         settings.write_text("{ not valid json", encoding="utf-8")
 
@@ -524,7 +524,7 @@ class TestDetectClaudeCode:
     def test_env_must_be_a_dict(self, tmp_path):
         # ``env`` is a list (wrong shape) → treated as no env, no crash.
         _write_settings(tmp_path, env=None)  # writes {} (no env key)
-        settings = Paths.from_home(tmp_path).claude_settings
+        settings = Paths.from_home(tmp_path, state_home=tmp_path).claude_settings
         payload = json.loads(settings.read_text())
         payload["env"] = ["ANTHROPIC_BASE_URL", "https://api.z.ai"]
         settings.write_text(json.dumps(payload), encoding="utf-8")
@@ -541,7 +541,7 @@ class TestDetectClaudeCode:
 
 class TestDetectZshrc:
     def test_managed_block_detected(self, tmp_path):
-        zshrc = Paths.from_home(tmp_path).zshrc
+        zshrc = Paths.from_home(tmp_path, state_home=tmp_path).zshrc
         zshrc.write_text(
             "# user stuff\n"
             f"{ZSHRC_BLOCK_BEGIN}\n"
@@ -556,7 +556,7 @@ class TestDetectZshrc:
         assert zsh.foreign_exports == []
 
     def test_foreign_export_outside_block_flagged(self, tmp_path):
-        zshrc = Paths.from_home(tmp_path).zshrc
+        zshrc = Paths.from_home(tmp_path, state_home=tmp_path).zshrc
         zshrc.write_text(
             f"{ZSHRC_BLOCK_BEGIN}\n"
             "# (our managed block)\n"
@@ -573,7 +573,7 @@ class TestDetectZshrc:
     def test_export_value_never_carried(self, tmp_path):
         """Regression (review cycle 1): the assigned secret value must never
         appear in the detected state — only the variable name."""
-        zshrc = Paths.from_home(tmp_path).zshrc
+        zshrc = Paths.from_home(tmp_path, state_home=tmp_path).zshrc
         zshrc.write_text(
             "export ANTHROPIC_API_KEY=sk-secret-LEAKED-value-12345\n"
             "export ANTHROPIC_AUTH_TOKEN=abc.def-LEAKED\n",
@@ -589,7 +589,7 @@ class TestDetectZshrc:
     def test_export_inside_managed_block_not_flagged(self, tmp_path):
         # Per ADR-003 the block is ours; even a stray export inside it is
         # not a "foreign" export and must not warn.
-        zshrc = Paths.from_home(tmp_path).zshrc
+        zshrc = Paths.from_home(tmp_path, state_home=tmp_path).zshrc
         zshrc.write_text(
             f"{ZSHRC_BLOCK_BEGIN}\n"
             "export ANTHROPIC_API_KEY=zai-inside\n"
@@ -602,7 +602,7 @@ class TestDetectZshrc:
         assert zsh.foreign_exports == []
 
     def test_multiple_foreign_exports_all_flagged(self, tmp_path):
-        zshrc = Paths.from_home(tmp_path).zshrc
+        zshrc = Paths.from_home(tmp_path, state_home=tmp_path).zshrc
         zshrc.write_text(
             "export ANTHROPIC_BASE_URL=https://evil.example\n"
             "export ANTHROPIC_API_KEY=sk-foreign\n",
@@ -631,7 +631,7 @@ class TestDetectZshrc:
         assert zsh.foreign_exports == ["ANTHROPIC_API_KEY"]
 
     def test_non_anthropic_exports_ignored(self, tmp_path):
-        zshrc = Paths.from_home(tmp_path).zshrc
+        zshrc = Paths.from_home(tmp_path, state_home=tmp_path).zshrc
         zshrc.write_text(
             "export PATH=/usr/local/bin\n"
             "export EDITOR=vim\n",
@@ -651,7 +651,7 @@ class TestDetectZshrc:
         """Regression (review cycle 5): a .zshrc that exists but can't be
         read (permission denied) must NOT crash status — degrade to an
         unreadable state."""
-        zshrc = Paths.from_home(tmp_path).zshrc
+        zshrc = Paths.from_home(tmp_path, state_home=tmp_path).zshrc
         zshrc.write_text("export ANTHROPIC_API_KEY=x\n", encoding="utf-8")
         os.chmod(zshrc, 0o000)
         try:
@@ -665,7 +665,7 @@ class TestDetectZshrc:
     def test_zshrc_is_directory_degrades(self, tmp_path):
         """Regression (review cycle 5): if .zshrc is a directory, read_text
         raises IsADirectoryError — status must degrade, not crash."""
-        os.makedirs(Paths.from_home(tmp_path).zshrc)
+        os.makedirs(Paths.from_home(tmp_path, state_home=tmp_path).zshrc)
         zsh = _zsh(tmp_path)
         assert zsh.exists is True
         assert zsh.readable is False
@@ -685,7 +685,7 @@ class TestRender:
                 "ANTHROPIC_AUTH_TOKEN": "57a3eeb553bc48d98c70354a758f5af7.wkiny4JhBASee7Np",
             },
         )
-        out = render_status(detect_status(Paths.from_home(tmp_path)), **FORCE_PLAIN)
+        out = render_status(detect_status(Paths.from_home(tmp_path, state_home=tmp_path)), **FORCE_PLAIN)
 
         assert "Claude Code" in out
         assert "Z.ai: active" in out
@@ -696,18 +696,18 @@ class TestRender:
 
     def test_inactive_render(self, tmp_path):
         # No settings → inactive, no region.
-        out = render_status(detect_status(Paths.from_home(tmp_path)), **FORCE_PLAIN)
+        out = render_status(detect_status(Paths.from_home(tmp_path, state_home=tmp_path)), **FORCE_PLAIN)
         assert "Claude Code" in out
         assert "no settings.json found" in out
 
     def test_foreign_export_warning_rendered(self, tmp_path):
         _write_settings(tmp_path, {"ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic"})
-        zshrc = Paths.from_home(tmp_path).zshrc
+        zshrc = Paths.from_home(tmp_path, state_home=tmp_path).zshrc
         zshrc.write_text(
             "export ANTHROPIC_API_KEY=sk-secret-LEAKED-value-12345\n",
             encoding="utf-8",
         )
-        out = render_status(detect_status(Paths.from_home(tmp_path)), **FORCE_PLAIN)
+        out = render_status(detect_status(Paths.from_home(tmp_path, state_home=tmp_path)), **FORCE_PLAIN)
 
         assert "shell env may override settings.json" in out
         # The variable name is shown, but the value is redacted away.
@@ -718,13 +718,13 @@ class TestRender:
         """Regression (review cycle 1): status output must never carry a
         secret from a foreign shell export."""
         _write_settings(tmp_path, {"ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic"})
-        zshrc = Paths.from_home(tmp_path).zshrc
+        zshrc = Paths.from_home(tmp_path, state_home=tmp_path).zshrc
         zshrc.write_text(
             "export ANTHROPIC_API_KEY=sk-secret-LEAKED-value-12345\n"
             "export ANTHROPIC_AUTH_TOKEN=abc.def-LEAKED\n",
             encoding="utf-8",
         )
-        out = render_status(detect_status(Paths.from_home(tmp_path)), **FORCE_PLAIN)
+        out = render_status(detect_status(Paths.from_home(tmp_path, state_home=tmp_path)), **FORCE_PLAIN)
         assert "sk-secret-LEAKED-value-12345" not in out
         assert "abc.def-LEAKED" not in out
 
@@ -736,7 +736,7 @@ class TestRender:
             "https://user:secretPass@api.z.ai/api/sk-hiddenkey-12345"
         )
         _write_settings(tmp_path, {"ANTHROPIC_BASE_URL": secret_url})
-        out = render_status(detect_status(Paths.from_home(tmp_path)), **FORCE_PLAIN)
+        out = render_status(detect_status(Paths.from_home(tmp_path, state_home=tmp_path)), **FORCE_PLAIN)
         assert "secretPass" not in out
         assert "sk-hiddenkey" not in out
         # The origin is shown so the endpoint stays recognizable.
@@ -744,13 +744,13 @@ class TestRender:
 
     def test_no_warning_when_clean(self, tmp_path):
         _write_settings(tmp_path, {"ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic"})
-        out = render_status(detect_status(Paths.from_home(tmp_path)), **FORCE_PLAIN)
+        out = render_status(detect_status(Paths.from_home(tmp_path, state_home=tmp_path)), **FORCE_PLAIN)
         assert "override settings.json" not in out
 
     def test_color_only_when_tty(self, tmp_path):
         # use_color=True → ANSI escapes present; False → absent.
         _write_settings(tmp_path, {"ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic"})
-        report = detect_status(Paths.from_home(tmp_path))
+        report = detect_status(Paths.from_home(tmp_path, state_home=tmp_path))
 
         colored = render_status(report, use_color=True)
         plain = render_status(report, use_color=False)
@@ -763,7 +763,7 @@ class TestRender:
         import io
 
         _write_settings(tmp_path, {"ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic"})
-        report = detect_status(Paths.from_home(tmp_path))
+        report = detect_status(Paths.from_home(tmp_path, state_home=tmp_path))
 
         out = render_status(report, stream=io.StringIO())
         assert "\033[" not in out
@@ -776,7 +776,7 @@ class TestRender:
 
 class TestReadOnly:
     def test_detect_writes_no_files(self, tmp_path):
-        paths = Paths.from_home(tmp_path)
+        paths = Paths.from_home(tmp_path, state_home=tmp_path)
         # Snapshot every existing path's content; assert unchanged after.
         _write_settings(tmp_path, {"ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic"})
         zshrc = paths.zshrc
@@ -806,4 +806,4 @@ class TestReadOnly:
         monkeypatch.setattr(socket, "socket", _no_network)
         _write_settings(tmp_path, {"ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic"})
         # Must not raise.
-        detect_status(Paths.from_home(tmp_path))
+        detect_status(Paths.from_home(tmp_path, state_home=tmp_path))

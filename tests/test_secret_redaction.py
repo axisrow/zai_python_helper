@@ -416,7 +416,7 @@ class TestShellForeignSuppression:
         Issue #44 acceptance: a sentinel at the file tail must not reach stdout.
         """
         monkeypatch.setenv("HOME", str(tmp_path))
-        paths = Paths.from_home(tmp_path)
+        paths = Paths.from_home(tmp_path, state_home=tmp_path)
         foreign = self._foreign_with_zsh_gap()
         paths.zshrc.write_text(foreign)
 

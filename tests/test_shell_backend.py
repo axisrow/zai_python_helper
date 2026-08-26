@@ -249,7 +249,7 @@ def test_backend_paths_resolve_via_paths(path_attr, tmp_path):
     """Smoke: Paths + backend cooperate on a tmp home (HOME isolation seam)."""
     from zai_python_helper.paths import Paths
 
-    paths = Paths.from_home(tmp_path)
+    paths = Paths.from_home(tmp_path, state_home=tmp_path)
     target: Path = getattr(paths, path_attr)
     ShellBackend.install_block(target) if path_attr == "zshrc" else None
     if path_attr == "zshrc":

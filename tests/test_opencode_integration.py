@@ -52,7 +52,7 @@ class TestApplyAndRevert:
     def test_use_zai_writes_exact_config(
         self, tool, tmp_path, region, provider_name
     ):
-        paths = Paths.from_home(tmp_path)
+        paths = Paths.from_home(tmp_path, state_home=tmp_path)
         with ProcessLock(paths.lock_file):
             state = tool.read_state(paths)
             plan = tool.plan_zai(_spec(), region, state=state, auth_token=TOKEN)
@@ -68,7 +68,7 @@ class TestApplyAndRevert:
         )
 
     def test_use_zai_is_idempotent(self, tool, tmp_path):
-        paths = Paths.from_home(tmp_path)
+        paths = Paths.from_home(tmp_path, state_home=tmp_path)
         spec = _spec()
         with ProcessLock(paths.lock_file):
             state = tool.read_state(paths)
@@ -80,7 +80,7 @@ class TestApplyAndRevert:
 
     def test_use_default_restores_prior_via_journal(self, tool, tmp_path):
         """use zai then use default restores the pre-activation state."""
-        paths = Paths.from_home(tmp_path)
+        paths = Paths.from_home(tmp_path, state_home=tmp_path)
         spec = _spec()
         # Seed a foreign provider + a foreign top-level key.
         seed = {
@@ -123,7 +123,7 @@ class TestApplyAndRevert:
 
     def test_use_default_refuses_when_key_changed_externally(self, tool, tmp_path):
         """If the apiKey changed externally since activation, revert leaves it."""
-        paths = Paths.from_home(tmp_path)
+        paths = Paths.from_home(tmp_path, state_home=tmp_path)
         spec = _spec()
         journal = OwnershipJournal(paths.ownership_json)
 
@@ -151,7 +151,7 @@ class TestApplyAndRevert:
 
     def test_independent_of_claude_code(self, tool, tmp_path):
         """Disabling OpenCode does not affect Claude Code files (and vice versa)."""
-        paths = Paths.from_home(tmp_path)
+        paths = Paths.from_home(tmp_path, state_home=tmp_path)
         # Claude Code settings exist and are untouched.
         JsonBackend.write(paths.claude_settings, {"env": {"ANTHROPIC_AUTH_TOKEN": "cc-tok"}})
 
@@ -178,7 +178,7 @@ class TestApplyAndRevert:
         ambiguous case the guard is for (issue #61)."""
         from zai_python_helper.errors import ValidationError
 
-        paths = Paths.from_home(tmp_path)
+        paths = Paths.from_home(tmp_path, state_home=tmp_path)
         spec = _spec()
         seed = {
             "$schema": "keep",
@@ -236,7 +236,7 @@ class TestApplyAndRevert:
         Sequence: clean GLOBAL activation (journal owns provider.apiKey), then
         the user hand-adds a china provider. Our global entry is provably ours,
         so revert removes it and leaves the user's china entry untouched."""
-        paths = Paths.from_home(tmp_path)
+        paths = Paths.from_home(tmp_path, state_home=tmp_path)
         spec = _spec()
 
         with ProcessLock(paths.lock_file):
@@ -270,7 +270,7 @@ class TestApplyAndRevert:
         self, tool, tmp_path
     ):
         """Two matching regional entries are ambiguous and must both survive."""
-        paths = Paths.from_home(tmp_path)
+        paths = Paths.from_home(tmp_path, state_home=tmp_path)
         spec = _spec()
         with ProcessLock(paths.lock_file):
             state = tool.read_state(paths)
@@ -300,7 +300,7 @@ class TestApplyAndRevert:
         docstring/error message from generalizing either one to the other."""
         from zai_python_helper.errors import ValidationError
 
-        paths = Paths.from_home(tmp_path)
+        paths = Paths.from_home(tmp_path, state_home=tmp_path)
         spec = _spec()
         seed = {
             "provider": {
@@ -340,7 +340,7 @@ class TestApplyAndRevert:
         (journal owns provider.apiKey = hash of our token), then the user
         hand-adds a china provider. Activating again must drop OUR entry, keep
         going, and leave a single regional provider — no dead-end."""
-        paths = Paths.from_home(tmp_path)
+        paths = Paths.from_home(tmp_path, state_home=tmp_path)
         spec = _spec()
         journal = OwnershipJournal(paths.ownership_json)
 
@@ -398,7 +398,7 @@ class TestApplyAndRevert:
         place they never put it."""
         from zai_python_helper.ownership import hash_value
 
-        paths = Paths.from_home(tmp_path)
+        paths = Paths.from_home(tmp_path, state_home=tmp_path)
         spec = _spec()
         journal = OwnershipJournal(paths.ownership_json)
 
@@ -451,7 +451,7 @@ class TestApplyAndRevert:
         the user's regional entry comes first in dict order (issue #61:
         ``plan_revert`` inferred the region by first-match). The user's entry
         must survive byte-identical."""
-        paths = Paths.from_home(tmp_path)
+        paths = Paths.from_home(tmp_path, state_home=tmp_path)
         spec = _spec()
         journal = OwnershipJournal(paths.ownership_json)
 
@@ -524,7 +524,7 @@ class TestStatusRowOnDuplicateState:
     def test_reports_our_provider_not_the_first_in_dict_order(self, tool, tmp_path):
         from zai_python_helper.ownership import hash_value
 
-        paths = Paths.from_home(tmp_path)
+        paths = Paths.from_home(tmp_path, state_home=tmp_path)
         # The USER's global entry comes first; OURS is the china one.
         self._seed(
             paths,
@@ -550,7 +550,7 @@ class TestStatusRowOnDuplicateState:
         assert row.region is Region.CHINA
 
     def test_detail_flags_the_duplicate_state(self, tool, tmp_path):
-        paths = Paths.from_home(tmp_path)
+        paths = Paths.from_home(tmp_path, state_home=tmp_path)
         self._seed(
             paths,
             first=GLOBAL_NAME,
@@ -566,7 +566,7 @@ class TestStatusRowOnDuplicateState:
     def test_detail_omits_hand_edit_when_ours_is_attributable(self, tool, tmp_path):
         from zai_python_helper.ownership import hash_value
 
-        paths = Paths.from_home(tmp_path)
+        paths = Paths.from_home(tmp_path, state_home=tmp_path)
         self._seed(
             paths,
             first=GLOBAL_NAME,
@@ -592,7 +592,7 @@ class TestStatusRowOnDuplicateState:
         assert "hand edit required" not in row.detail
 
     def test_no_duplicate_marker_on_a_clean_doc(self, tool, tmp_path):
-        paths = Paths.from_home(tmp_path)
+        paths = Paths.from_home(tmp_path, state_home=tmp_path)
         JsonBackend.write(
             paths.opencode,
             {
@@ -614,7 +614,7 @@ class TestSelfHealDestructionWarning:
     def test_warns_on_both_dry_run_and_real_activation(self, tool, tmp_path, capsys):
         from zai_python_helper.cli import _warn_self_heal_destruction
 
-        paths = Paths.from_home(tmp_path)
+        paths = Paths.from_home(tmp_path, state_home=tmp_path)
         spec = _spec()
         journal = OwnershipJournal(paths.ownership_json)
 
@@ -658,7 +658,7 @@ class TestSelfHealDestructionWarning:
     def test_no_warning_when_state_is_not_duplicate(self, tool, tmp_path, capsys):
         from zai_python_helper.cli import _warn_self_heal_destruction
 
-        paths = Paths.from_home(tmp_path)
+        paths = Paths.from_home(tmp_path, state_home=tmp_path)
         spec = _spec()
         with ProcessLock(paths.lock_file):
             state = tool.read_state(paths)

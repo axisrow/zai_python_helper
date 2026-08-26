@@ -40,7 +40,7 @@ def _merge(tool, current, records):
 
 class TestApplyAndRevert:
     def test_use_zai_writes_exact_config(self, tool, tmp_path):
-        paths = Paths.from_home(tmp_path)
+        paths = Paths.from_home(tmp_path, state_home=tmp_path)
         with ProcessLock(paths.lock_file):
             state = tool.read_state(paths)
             plan = tool.plan_zai(_spec(), Region.GLOBAL, state=state, auth_token=TOKEN)
@@ -51,7 +51,7 @@ class TestApplyAndRevert:
         assert entry["id"] == "zai"
 
     def test_use_zai_is_idempotent(self, tool, tmp_path):
-        paths = Paths.from_home(tmp_path)
+        paths = Paths.from_home(tmp_path, state_home=tmp_path)
         spec = _spec()
         with ProcessLock(paths.lock_file):
             state = tool.read_state(paths)
@@ -61,7 +61,7 @@ class TestApplyAndRevert:
         assert plan2.is_empty
 
     def test_use_default_restores_prior_via_journal(self, tool, tmp_path):
-        paths = Paths.from_home(tmp_path)
+        paths = Paths.from_home(tmp_path, state_home=tmp_path)
         spec = _spec()
         seed = {
             "providers": {"openai": {"base_url": "f", "api_key": "foreign"}},
@@ -90,7 +90,7 @@ class TestApplyAndRevert:
         assert doc["theme"] == "dark"
 
     def test_use_default_refuses_when_key_changed_externally(self, tool, tmp_path):
-        paths = Paths.from_home(tmp_path)
+        paths = Paths.from_home(tmp_path, state_home=tmp_path)
         spec = _spec()
         journal = OwnershipJournal(paths.ownership_json)
 
@@ -119,7 +119,7 @@ class TestApplyAndRevert:
         while api_key is still ours, ``use default`` must REFUSE on base_url
         (keep the edit) and NOT collapse the entry — even though api_key is
         RESTORE'd to absent. The entry survives with the user's base_url."""
-        paths = Paths.from_home(tmp_path)
+        paths = Paths.from_home(tmp_path, state_home=tmp_path)
         spec = _spec()
         journal = OwnershipJournal(paths.ownership_json)
 
@@ -152,7 +152,7 @@ class TestApplyAndRevert:
         """Regression (cycle-review #38): a foreign field the user added into
         ``providers.zai`` must survive revert even when both managed fields are
         RESTORE'd to absent."""
-        paths = Paths.from_home(tmp_path)
+        paths = Paths.from_home(tmp_path, state_home=tmp_path)
         spec = _spec()
         journal = OwnershipJournal(paths.ownership_json)
 
@@ -182,7 +182,7 @@ class TestApplyAndRevert:
         assert "base_url" not in entry
 
     def test_independent_of_opencode_and_claude_code(self, tool, tmp_path):
-        paths = Paths.from_home(tmp_path)
+        paths = Paths.from_home(tmp_path, state_home=tmp_path)
         JsonBackend.write(paths.opencode, {"$schema": "keep", "provider": {}})
         JsonBackend.write(paths.claude_settings, {"env": {"ANTHROPIC_AUTH_TOKEN": "cc"}})
 

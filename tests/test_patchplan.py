@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import os
 import threading
 import time
 from pathlib import Path
@@ -45,7 +46,7 @@ def _write_json_delta(tag: FileTag, content: dict) -> FileDelta:
 
 
 def _paths(home: Path) -> Paths:
-    return Paths.from_home(home)
+    return Paths.from_home(home, state_home=home)
 
 
 def test_migrate_legacy_state_moves_journal_and_recovery(tmp_path):
@@ -85,6 +86,100 @@ def test_migrate_legacy_state_rewrites_recovery_journal_path(tmp_path):
 
 
 class TestProcessLock:
+    def test_precreated_lock_symlink_is_rejected(self, tmp_path):
+        """The lock itself must also be opened without following symlinks."""
+        lock_path = tmp_path / "lock"
+        target = tmp_path / "target"
+        target.write_text("")
+        lock_path.symlink_to(target)
+
+        with pytest.raises(OSError):
+            with ProcessLock(lock_path):
+                pass
+
+    def test_unrelated_xdg_ancestor_is_not_rehardened(self, tmp_path):
+        """State setup must not chmod a user-owned XDG ancestor by its name."""
+        state_home = tmp_path / "zai-python-helper-user"
+        state_home.mkdir(mode=0o755)
+        paths = Paths.from_home(tmp_path, state_home=state_home)
+
+        with ProcessLock(paths.lock_file):
+            pass
+        assert state_home.stat().st_mode & 0o777 == 0o755
+
+    def test_symlinked_xdg_state_root_is_supported(self, tmp_path):
+        """A user-configured state root may safely point to another volume."""
+        target = tmp_path / "actual-state"
+        target.mkdir()
+        state_home = tmp_path / "state-link"
+        state_home.symlink_to(target, target_is_directory=True)
+        paths = Paths.from_home(tmp_path, state_home=state_home)
+
+        with ProcessLock(paths.lock_file):
+            pass
+        assert target in paths.lock_file.parents
+        assert (target / "zai-python-helper").is_dir()
+
+    def test_fallback_leaf_symlink_is_rejected_when_var_is_symlink(self, tmp_path, monkeypatch):
+        """The /var -> /private/var layout must not disable fallback hardening."""
+        from zai_python_helper.paths import Paths
+
+        uid = 10_000_000 + os.getpid()
+        fallback = Path("/var/tmp") / f"zai-python-helper-{uid}"
+        target = tmp_path / "attacker-target"
+        target.mkdir()
+        fallback.symlink_to(target, target_is_directory=True)
+        monkeypatch.setattr(os, "getuid", lambda: uid)
+        realpath = os.path.realpath
+
+        def macos_realpath(path):
+            if path == "/var/tmp":
+                return "/private/var/tmp"
+            return realpath(path)
+
+        monkeypatch.setattr(os.path, "realpath", macos_realpath)
+        try:
+            with monkeypatch.context() as isolated:
+                isolated.delenv("ZAI_PYTHON_HELPER_STATE_HOME")
+                isolated.delenv("XDG_STATE_HOME", raising=False)
+                paths = Paths.default()
+            with pytest.raises(OSError):
+                with ProcessLock(paths.lock_file):
+                    pass
+        finally:
+            fallback.unlink(missing_ok=True)
+
+    def test_lock_rejects_lexical_parent_traversal(self, tmp_path):
+        """Validation and later bookkeeping must use identical path semantics."""
+        link = tmp_path / "link"
+        link.symlink_to(tmp_path, target_is_directory=True)
+        with pytest.raises(ValueError, match="must not contain"):
+            with ProcessLock(link / ".." / "lock"):
+                pass
+
+    def test_lock_validation_closes_fd_when_chmod_fails(self, tmp_path, monkeypatch):
+        """A failed lock hardening operation must not leak its descriptor."""
+        from zai_python_helper import patchplan
+
+        lock_path = tmp_path / "lock"
+        lock_path.write_text("")
+        lock_path.chmod(0o644)
+        closed: list[int] = []
+        real_close = os.close
+
+        def fail_chmod(fd, mode):
+            raise OSError("filesystem refuses chmod")
+
+        def record_close(fd):
+            closed.append(fd)
+            real_close(fd)
+
+        monkeypatch.setattr(patchplan.os, "fchmod", fail_chmod)
+        monkeypatch.setattr(patchplan.os, "close", record_close)
+        with pytest.raises(OSError, match="refuses chmod"):
+            patchplan.os_open(lock_path)
+        assert closed
+
     def test_lock_is_exclusive_across_threads(self, tmp_path):
         """Two threads acquiring the same lock serialize (flock LOCK_EX).
 
@@ -192,11 +287,11 @@ class TestProcessLock:
 
         opened: list[int] = []
 
-        real_open = pp.os_open
+        real_open = pp.os_open_at
         real_flock = fcntl.flock
 
-        def tracking_open(path):
-            fd = real_open(path)
+        def tracking_open(parent_fd, name, path):
+            fd = real_open(parent_fd, name, path)
             opened.append(fd)
             return fd
 
@@ -205,7 +300,7 @@ class TestProcessLock:
                 raise OSError("simulated flock failure")
             real_flock(fd, op)
 
-        monkeypatch.setattr(pp, "os_open", tracking_open)
+        monkeypatch.setattr(pp, "os_open_at", tracking_open)
         monkeypatch.setattr(pp.fcntl, "flock", failing_flock)
 
         lock = ProcessLock(tmp_path / "lock")
@@ -228,6 +323,31 @@ class TestProcessLock:
 
 
 class TestRecover:
+    def test_recover_accepts_legacy_lexical_journal_path(self, tmp_path):
+        """Canonical state roots must preserve pending pre-upgrade journals."""
+        target = tmp_path / "state-target"
+        target.mkdir()
+        state_link = tmp_path / "state-link"
+        state_link.symlink_to(target, target_is_directory=True)
+        paths = Paths.from_home(tmp_path, state_home=state_link)
+        paths.recovery_json.parent.mkdir(parents=True)
+        old_journal = state_link / paths.ownership_json.relative_to(target)
+        paths.recovery_json.write_text(
+            json.dumps(
+                {
+                    "entries": [],
+                    "journal": {
+                        "tag": "ownership",
+                        "path": str(old_journal),
+                        "content": '{"restored": true}\n',
+                    },
+                }
+            )
+        )
+
+        assert recover(paths) == []
+        assert json.loads(paths.ownership_json.read_text()) == {"restored": True}
+
     def test_no_manifest_is_noop(self, tmp_path):
         """recover() with no manifest writes nothing and returns []."""
         paths = _paths(tmp_path)

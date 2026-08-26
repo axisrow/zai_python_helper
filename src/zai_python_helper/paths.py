@@ -26,6 +26,35 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+def _state_home_from_env() -> tuple[str, bool]:
+    """Return the configured absolute state root, or the secure fallback."""
+    override = os.environ.get("ZAI_PYTHON_HELPER_STATE_HOME", "")
+    xdg = os.environ.get("XDG_STATE_HOME", "")
+    if override and Path(override).is_absolute():
+        return override, False
+    if xdg and Path(xdg).is_absolute():
+        return xdg, False
+    return f"/var/tmp/zai-python-helper-{os.getuid()}", True
+
+
+def _canonical_configured_state_root(path: Path) -> Path:
+    """Resolve the existing prefix strictly and allow a nonexistent suffix."""
+    missing: list[str] = []
+    probe = path
+    while not os.path.lexists(probe):
+        if probe == probe.parent:
+            break
+        missing.append(probe.name)
+        probe = probe.parent
+    try:
+        resolved = probe.resolve(strict=True)
+    except (FileNotFoundError, OSError) as exc:
+        raise ValueError(f"configured state root has a dangling symlink: {path}") from exc
+    for part in reversed(missing):
+        resolved /= part
+    return resolved
+
+
 @dataclass(frozen=True)
 class Paths:
     """Frozen bundle of every resolved filesystem path the tool touches.
@@ -92,6 +121,7 @@ class Paths:
                 a specific path to simulate running from a project directory.
         """
         h = Path(home)
+        is_fallback = False
         # Runtime bookkeeping is deliberately not part of HOME for the
         # production entry point. ``state_home`` is an injection seam;
         # omitted here it preserves the hermetic legacy layout for tests and
@@ -99,14 +129,21 @@ class Paths:
         if state_home is None:
             # /var/tmp is durable across reboots, unlike /tmp.  The directory
             # is created and ownership-checked by ProcessLock before use.
-            configured = os.environ.get("XDG_STATE_HOME", "")
-            state_home = (
-                configured
-                if configured and Path(configured).is_absolute()
-                else f"/var/tmp/zai-python-helper-{os.getuid()}"
-            )
+            state_home, is_fallback = _state_home_from_env()
+        configured_state_home = Path(state_home)
         home_id = hashlib.sha256(str(h).encode()).hexdigest()[:16]
-        helper_dir = Path(state_home) / "zai-python-helper" / home_id
+        # Pin the state root's current symlink target.  All transaction files
+        # then use the same canonical tree as the lock, even if the user-level
+        # XDG symlink is retargeted while a transaction is running.
+        # Preserve the fallback leaf for descriptor validation: resolving it
+        # first would follow a pre-created attacker symlink. User-configured
+        # roots are canonicalized so all bookkeeping remains pinned together.
+        state_root = (
+            configured_state_home
+            if is_fallback
+            else _canonical_configured_state_root(configured_state_home)
+        )
+        helper_dir = state_root / "zai-python-helper" / home_id
         state_dir = helper_dir / "state"
         cwd_path = Path(cwd) if cwd is not None else Path.cwd()
         return cls(
@@ -133,10 +170,4 @@ class Paths:
         Tests never call this — they inject ``tmp_path`` via :meth:`from_home`
         directly; that naming split is what makes test isolation provable.
         """
-        configured = os.environ.get("XDG_STATE_HOME", "")
-        state_home = (
-            configured
-            if configured and Path(configured).is_absolute()
-            else f"/var/tmp/zai-python-helper-{os.getuid()}"
-        )
-        return cls.from_home(Path.home(), cwd=Path.cwd(), state_home=state_home)
+        return cls.from_home(Path.home(), cwd=Path.cwd())

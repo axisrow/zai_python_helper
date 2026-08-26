@@ -33,9 +33,10 @@ import fcntl
 import json
 import os
 import shutil
+import stat
 import tempfile
 import threading as _threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -48,16 +49,64 @@ from zai_python_helper.paths import Paths
 _SECURE_FILE_MODE = 0o600
 
 
-def _ensure_private_parent(path: Path) -> None:
-    """Create the state parent securely, rejecting pre-created directories."""
-    path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
-    st = path.parent.stat()
-    if st.st_uid != os.getuid():
-        raise PermissionError(f"insecure state directory: {path.parent}")
-    # Tighten a directory created by an older release (or by a test) before
-    # opening the lock.  A foreign-owned directory was rejected above.
-    if st.st_mode & 0o077:
-        path.parent.chmod(0o700)
+def _ensure_private_parent(path: Path) -> int:
+    """Create the state parent without following attacker-controlled entries."""
+    if ".." in Path(path.parent).parts:
+        raise ValueError(f"state path must not contain '..': {path.parent}")
+    parent = Path(os.path.abspath(path.parent))
+    parts = parent.parts
+    state_root = parent.parent.parent
+    private_paths = {parent}
+    if parent.parent.name == "zai-python-helper":
+        private_paths.add(parent.parent)
+    protected_paths = private_paths
+    # The fallback root itself is predictable and therefore must also be
+    # protected.  Do not infer this from a basename: XDG_STATE_HOME may
+    # legitimately live below a user directory with that name.
+    if (
+        Path(os.path.realpath(state_root.parent))
+        == Path(os.path.realpath("/var/tmp"))
+        and state_root.name == f"zai-python-helper-{os.getuid()}"
+    ):
+        private_paths.add(state_root)
+        protected_paths.add(state_root)
+    fd = os.open(parts[0] or os.sep, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    current = Path(parts[0] or os.sep)
+    try:
+        for part in parts[1:]:
+            current /= part
+            try:
+                os.mkdir(part, mode=0o700, dir_fd=fd)
+            except FileExistsError:
+                pass
+            # macOS exposes /var as a system symlink.  Permit such trusted
+            # ancestors, but never follow symlinks once entering our state
+            # directory (the predictable attacker-controlled component).
+            protected = current in protected_paths
+            private = current in private_paths
+            flags = os.O_RDONLY | os.O_DIRECTORY
+            if protected:
+                flags |= os.O_NOFOLLOW
+            next_fd = os.open(part, flags, dir_fd=fd)
+            try:
+                st = os.fstat(next_fd)
+                # Only application state directories are tightened; arbitrary
+                # existing ancestors such as /tmp or a user's XDG root are untouched.
+                if private and st.st_uid != os.getuid():
+                    raise PermissionError(f"insecure state directory: {current}")
+                if private and st.st_mode & 0o077:
+                    os.fchmod(next_fd, 0o700)
+            except BaseException:
+                os.close(next_fd)
+                raise
+            os.close(fd)
+            fd = next_fd
+        result = fd
+        fd = -1
+        return result
+    finally:
+        if fd >= 0:
+            os.close(fd)
 
 
 def migrate_legacy_state(paths: Paths) -> list[str]:
@@ -194,9 +243,12 @@ class ProcessLock:
         self._intra = intra
         self._held_intra = True
         # 2) Cross-process serialization (flock). Create the file + parent dir.
-        _ensure_private_parent(self.path)
         try:
-            self._fd = os_open(self.path)
+            parent_fd = _ensure_private_parent(self.path)
+            try:
+                self._fd = os_open_at(parent_fd, self.path.name, self.path)
+            finally:
+                os.close(parent_fd)
             fcntl.flock(self._fd, fcntl.LOCK_EX)
         except BaseException:
             # Close the fd we opened (if flock failed) and release the intra
@@ -237,7 +289,34 @@ def os_open(path: Path) -> int:
     """Open ``path`` for flock (creating it). Isolated for test monkeypatching."""
     import os
 
-    return os.open(str(path), os.O_RDWR | os.O_CREAT, _SECURE_FILE_MODE)
+    fd = os.open(
+        str(path), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, _SECURE_FILE_MODE
+    )
+    return _validate_lock_fd(fd, path)
+
+
+def os_open_at(parent_fd: int, name: str, path: Path) -> int:
+    """Open a lock beneath an already validated parent directory descriptor."""
+    fd = os.open(
+        name,
+        os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW,
+        _SECURE_FILE_MODE,
+        dir_fd=parent_fd,
+    )
+    return _validate_lock_fd(fd, path)
+
+
+def _validate_lock_fd(fd: int, path: Path) -> int:
+    try:
+        st = os.fstat(fd)
+        if st.st_uid != os.getuid() or not stat.S_ISREG(st.st_mode):
+            raise PermissionError(f"insecure lock file: {path}")
+        if st.st_mode & 0o077:
+            os.fchmod(fd, _SECURE_FILE_MODE)
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
 
 
 def close_fd(fd: int) -> None:
@@ -380,12 +459,22 @@ def _read_manifest(
         and str(e.get("path", "")) == allowed.get(str(e.get("tag", "")))
     ]
     raw_journal = doc.get("journal")
+    raw_journal_path = (
+        str(raw_journal.get("path", "")) if isinstance(raw_journal, dict) else ""
+    )
+    journal_path_matches = raw_journal_path == str(paths.ownership_json) or (
+        bool(raw_journal_path)
+        and os.path.realpath(raw_journal_path)
+        == os.path.realpath(paths.ownership_json)
+    )
     journal = (
         _RecoveryEntry.from_dict(raw_journal)
         if isinstance(raw_journal, dict)
-        and str(raw_journal.get("path", "")) == str(paths.ownership_json)
+        and journal_path_matches
         else None
     )
+    if journal is not None and journal.path != str(paths.ownership_json):
+        journal = replace(journal, path=str(paths.ownership_json))
     return entries, journal
 
 
