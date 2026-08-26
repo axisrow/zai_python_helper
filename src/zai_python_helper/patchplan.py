@@ -345,12 +345,10 @@ def close_fd(fd: int) -> None:
 def _read_at(root_fd: int, name: str) -> str:
     """Read a state file relative to a pinned helper-directory fd."""
     fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=root_fd)
-    try:
-        with os.fdopen(fd, "r", encoding="utf-8") as stream:
-            return stream.read()
-    except OSError:
-        os.close(fd)
-        raise
+    # ``fdopen`` owns and closes ``fd`` when the context exits. Do not close
+    # it again: the descriptor number may already have been reused.
+    with os.fdopen(fd, "r", encoding="utf-8") as stream:
+        return stream.read()
 
 
 def _atomic_write_at(root_fd: int, name: str, data: bytes, mode: int) -> None:
@@ -532,8 +530,15 @@ def _read_manifest(
         and journal_path_matches
         else None
     )
-    if journal is not None and journal.path != str(paths.ownership_json):
-        journal = replace(journal, path=str(paths.ownership_json))
+    if journal is not None:
+        # The journal is the only legitimate non-config entry. Treat an
+        # unknown/crafted tag as untrusted and force the secret, pinned-root
+        # replay path rather than falling through to a path-based write.
+        journal = replace(
+            journal,
+            tag="ownership",
+            path=str(paths.ownership_json),
+        )
     return entries, journal
 
 
@@ -732,7 +737,7 @@ def apply_plan_under_lock(
     file write; if it raises, the lock is released and no manifest is written.
     ``journal_content`` is forwarded unchanged (see :func:`apply_plan_locked`).
     """
-    with ProcessLock(paths.lock_file) as lock:
+    with ProcessLock(paths.lock_file):
         return apply_plan_locked(
             paths, plan, on_locked=on_locked, journal_content=journal_content
         )

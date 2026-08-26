@@ -25,6 +25,7 @@ import pytest
 from zai_python_helper.core.planner import DeltaKind, FileDelta, FileTag, PatchPlan
 from zai_python_helper.patchplan import (
     ProcessLock,
+    _read_at,
     apply_plan_under_lock,
     has_pending_recovery,
     migrate_legacy_state,
@@ -47,6 +48,37 @@ def _write_json_delta(tag: FileTag, content: dict) -> FileDelta:
 
 def _paths(home: Path) -> Paths:
     return Paths.from_home(home, state_home=home)
+
+
+def test_read_at_does_not_double_close_owned_fd(tmp_path, monkeypatch):
+    """An fdopen failure must not close its already-owned descriptor again."""
+    state = tmp_path / "state"
+    state.mkdir()
+    real_open = os.open
+    real_close = os.close
+    fd = real_open(state / "value", os.O_CREAT | os.O_WRONLY, 0o600)
+    root_fd = real_open(state, os.O_RDONLY | os.O_DIRECTORY)
+
+    class FailingStream:
+        def __enter__(self):
+            return self
+
+        def read(self):
+            raise OSError("read failed")
+
+        def __exit__(self, *_args):
+            real_close(fd)
+
+    monkeypatch.setattr("zai_python_helper.patchplan.os.open", lambda *args, **kwargs: fd)
+    monkeypatch.setattr("zai_python_helper.patchplan.os.fdopen", lambda *args, **kwargs: FailingStream())
+    closes: list[int] = []
+    monkeypatch.setattr("zai_python_helper.patchplan.os.close", lambda value: closes.append(value))
+    try:
+        with pytest.raises(OSError, match="read failed"):
+            _read_at(root_fd, "value")
+        assert closes == []
+    finally:
+        real_close(root_fd)
 
 
 def test_migrate_legacy_state_moves_journal_and_recovery(tmp_path):
@@ -576,9 +608,9 @@ class TestApplyPlanUnderLock:
 
         real = patchplan._apply_entry
 
-        def tracing(entry):
+        def tracing(entry, **kwargs):
             order.append(entry.tag)
-            real(entry)
+            real(entry, **kwargs)
 
         patchplan._apply_entry = tracing
         try:
@@ -587,6 +619,30 @@ class TestApplyPlanUnderLock:
             patchplan._apply_entry = real
 
         assert order == ["settings", "ownership"]
+
+    def test_recover_unknown_journal_tag_uses_pinned_secret_path(self, tmp_path):
+        """A crafted journal tag cannot downgrade ownership.json to 0644."""
+        paths = _paths(tmp_path)
+        attacker_path = tmp_path / "attacker" / "ownership.json"
+        paths.recovery_json.parent.mkdir(parents=True, exist_ok=True)
+        paths.recovery_json.write_text(
+            json.dumps(
+                {
+                    "entries": [],
+                    "journal": {
+                        "tag": "settings",
+                        "path": str(attacker_path),
+                        "kind": "text",
+                        "content": '{"owned": true}\n',
+                    },
+                }
+            )
+        )
+
+        assert recover(paths) == []
+        assert paths.ownership_json.read_text() == '{"owned": true}\n'
+        assert paths.ownership_json.stat().st_mode & 0o777 == 0o600
+        assert not attacker_path.exists()
 
     def test_crash_mid_commit_leaves_journal_in_manifest_not_on_disk(self, tmp_path):
         """A kill during the file writes must NOT have made the journal durable.

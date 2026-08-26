@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 
 import pytest
 
@@ -641,6 +642,42 @@ class TestOwnershipJournalIO:
         path.write_text("[1, 2, 3]")
         with pytest.raises(ConfigurationError):
             OwnershipJournal(path).read()
+
+    def test_root_fd_read_does_not_double_close_owned_fd(self, tmp_path, monkeypatch):
+        """The fdopen context manager is the sole owner of a read descriptor."""
+        import zai_python_helper.ownership as ownership
+
+        state = tmp_path / "state"
+        state.mkdir()
+        path = state / "ownership.json"
+        path.write_text("{}")
+        real_open = os.open
+        real_close = os.close
+        fd = real_open(path, os.O_RDONLY)
+        root_fd = real_open(state, os.O_RDONLY | os.O_DIRECTORY)
+
+        class FailingStream:
+            def __enter__(self):
+                return self
+
+            def read(self):
+                raise OSError("read failed")
+
+            def __exit__(self, *_args):
+                real_close(fd)
+
+        monkeypatch.setattr(ownership.os, "open", lambda *args, **kwargs: fd)
+        monkeypatch.setattr(ownership.os, "fdopen", lambda *args, **kwargs: FailingStream())
+        closes: list[int] = []
+        monkeypatch.setattr(ownership.os, "close", lambda value: closes.append(value))
+        try:
+            from zai_python_helper.errors import ConfigurationError
+
+            with pytest.raises(ConfigurationError):
+                OwnershipJournal(path).read(root_fd=root_fd)
+            assert closes == []
+        finally:
+            real_close(root_fd)
 
     def test_write_replaces_existing_atomically(self, tmp_path):
         """A write replaces an existing journal wholesale with the given dict.
