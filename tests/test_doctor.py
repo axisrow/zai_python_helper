@@ -24,6 +24,7 @@ from zai_python_helper.doctor import (
     CheckResult,
     ProbeResult,
     render_check,
+    run_cli_doctor,
     run_doctor,
     urllib_post,
 )
@@ -88,6 +89,65 @@ def _write_settings(paths: Paths, env: dict[str, str] | None) -> None:
     paths.claude_settings.parent.mkdir(parents=True, exist_ok=True)
     doc = {"env": env} if env is not None else {}
     paths.claude_settings.write_text(json.dumps(doc))
+
+
+def _write_cli_config(paths: Paths, *, plan: str = "glm_coding_plan_global") -> None:
+    config = paths.claude_settings.parent.parent / ".chelper" / "config.yaml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(f"plan: {plan}\napi_key: test-key\n")
+
+
+class _CliResponse:
+    status = 200
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+
+def test_cli_doctor_reports_invalid_api_key(monkeypatch, tmp_path, capsys):
+    """The CLI-compatible doctor must not treat a rejected key as healthy."""
+    import urllib.error
+
+    from zai_python_helper import doctor
+
+    paths = Paths.from_home(tmp_path)
+    _write_cli_config(paths)
+    _write_settings(paths, {"ANTHROPIC_BASE_URL": _ZAI_URL})
+
+    def reject(*_args, **_kwargs):
+        raise urllib.error.HTTPError(
+            "https://api.z.ai", 401, "Unauthorized", {}, None
+        )
+
+    monkeypatch.setattr(doctor.urllib.request, "urlopen", reject)
+    assert run_cli_doctor(paths) == 0
+    out = capsys.readouterr().out
+    assert "API Key is invalid or expired" in out
+    assert "Suggestions:" in out
+    assert "All checks passed!" not in out
+
+
+def test_cli_doctor_reports_all_clear_when_healthy(monkeypatch, tmp_path, capsys):
+    """A valid API response and complete local setup produce the all-clear."""
+    from zai_python_helper import doctor
+
+    paths = Paths.from_home(tmp_path)
+    _write_cli_config(paths)
+    _write_settings(paths, {"ANTHROPIC_BASE_URL": _ZAI_URL})
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setattr(doctor.shutil, "which", lambda _command: "/usr/bin/tool")
+    monkeypatch.setattr(
+        doctor.urllib.request, "urlopen", lambda *_args, **_kwargs: _CliResponse()
+    )
+
+    assert run_cli_doctor(paths) == 0
+    out = capsys.readouterr().out
+    assert "✓ API Key & Network" in out
+    assert "All checks passed!" in out
+    assert "Suggestions:" not in out
 
 
 def _write_opencode_duplicate(
