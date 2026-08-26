@@ -297,6 +297,19 @@ def test_install_mcp_writes_section_and_entry_to_disk(_isolate_home):
     }
 
 
+def test_opencode_mcp_config_uses_upstream_four_space_indent(_isolate_home):
+    """OpenCode MCP install/uninstall writes match upstream JSON formatting."""
+    path = tool_config_path(Tool.OPENCODE, _isolate_home)
+    install_mcp(Tool.OPENCODE, "zread", _KEY, Region.GLOBAL, home=_isolate_home)
+    text = path.read_text(encoding="utf-8")
+    assert '    "mcp": {' in text
+    assert '        "zread": {' in text
+    assert '            "type": "remote"' in text
+
+    uninstall_mcp(Tool.OPENCODE, "zread", home=_isolate_home)
+    assert path.read_text(encoding="utf-8") == '{\n    \"mcp\": {}\n}'
+
+
 def test_install_mcp_preserves_foreign_and_is_idempotent(_isolate_home):
     """install deep-merges (foreign kept); re-install with same value is a no-op."""
     path = tool_config_path(Tool.CLAUDE_CODE, _isolate_home)
