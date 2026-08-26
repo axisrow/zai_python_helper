@@ -564,11 +564,13 @@ class OwnershipJournal:
             else:
                 fd = os.open(self.path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=root_fd)
                 try:
-                    with os.fdopen(fd, "r", encoding="utf-8") as stream:
-                        text = stream.read()
+                    stream = os.fdopen(fd, "r", encoding="utf-8")
                 except OSError:
+                    # fdopen did not acquire ownership when construction fails.
                     os.close(fd)
                     raise
+                with stream:
+                    text = stream.read()
         except FileNotFoundError:
             if root_fd is not None:
                 return {}
