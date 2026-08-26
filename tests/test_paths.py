@@ -60,3 +60,12 @@ def test_paths_default_uses_path_home(monkeypatch):
     paths = Paths.default()
     assert paths.state_dir != Path(fake_home) / ".zai-python-helper" / "state"
     assert Path(fake_home) not in paths.state_dir.parents
+
+
+@pytest.mark.parametrize("value", ["", "relative/state"])
+def test_paths_rejects_invalid_xdg_state_home(monkeypatch, tmp_path, value):
+    """Invalid XDG roots cannot redirect secrets into the CWD."""
+    monkeypatch.setenv("XDG_STATE_HOME", value)
+    paths = Paths.from_home(tmp_path)
+    assert tmp_path not in paths.state_dir.parents
+    assert paths.state_dir.is_absolute()
