@@ -36,16 +36,17 @@ def _find_our_index(models: list[dict[str, Any]], protocol: str) -> int | None:
     return None
 
 
-class _CustomModelApiKeyField:
+class _CustomModelField:
     """One protocol entry's ``apiKey`` in ``customModels[]`` as a ManagedField.
 
     ``protocol`` is the stable discriminator (anthropic/openai); ``key`` is the
     fixed synthetic journal key. Region- and index-agnostic.
     """
 
-    def __init__(self, protocol: str, key: str) -> None:
+    def __init__(self, protocol: str, key: str, field: str) -> None:
         self.protocol = protocol
         self.key = key
+        self.field = field
 
     def get(self, doc: dict[str, Any] | None) -> tuple[bool, str | None]:
         models = list((doc or {}).get("customModels") or [])
@@ -53,8 +54,8 @@ class _CustomModelApiKeyField:
         if idx is None:
             return False, None
         entry = models[idx]
-        present = "apiKey" in entry
-        return present, (entry["apiKey"] if present else None)
+        present = self.field in entry
+        return present, (entry[self.field] if present else None)
 
     def set_value(self, doc: dict[str, Any], value: str | None) -> dict[str, Any]:
         new_doc = dict(doc)
@@ -69,7 +70,7 @@ class _CustomModelApiKeyField:
                 # callers always set via plan_zai which establishes entries.
                 pass
             else:
-                models[idx]["apiKey"] = value
+                models[idx][self.field] = value
         if models:
             new_doc["customModels"] = models
         else:
@@ -128,8 +129,12 @@ class FactoryDroidTool(Tool):
         journal_records: dict[str, Any] | None = None,
     ) -> list[ManagedField]:
         return [
-            _CustomModelApiKeyField(fd.PROVIDER_ANTHROPIC, fd.JOURNAL_KEY_ANTHROPIC_APIKEY),
-            _CustomModelApiKeyField(fd.PROVIDER_OPENAI, fd.JOURNAL_KEY_OPENAI_APIKEY),
+            _CustomModelField(fd.PROVIDER_ANTHROPIC, fd.JOURNAL_KEY_ANTHROPIC_APIKEY, "apiKey"),
+            _CustomModelField(fd.PROVIDER_OPENAI, fd.JOURNAL_KEY_OPENAI_APIKEY, "apiKey"),
+            _CustomModelField(fd.PROVIDER_ANTHROPIC, fd.JOURNAL_KEY_ANTHROPIC_DISPLAY_NAME, "displayName"),
+            _CustomModelField(fd.PROVIDER_OPENAI, fd.JOURNAL_KEY_OPENAI_DISPLAY_NAME, "displayName"),
+            _CustomModelField(fd.PROVIDER_ANTHROPIC, fd.JOURNAL_KEY_ANTHROPIC_PROVIDER, "provider"),
+            _CustomModelField(fd.PROVIDER_OPENAI, fd.JOURNAL_KEY_OPENAI_PROVIDER, "provider"),
         ]
 
     def revert_key_set(self) -> tuple[str, ...]:

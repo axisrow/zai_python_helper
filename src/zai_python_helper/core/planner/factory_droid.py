@@ -11,14 +11,14 @@ Factory Droid config shape (per issue #7 / epic #1 spec D)::
     {
       "customModels": [
         {
-          "displayName": "Z.ai GLM Coding Plan (Anthropic)",  # contains marker
+          "displayName": "GLM-4.7 [GLM Coding Plan Global] - Anthropic",  # contains marker
           "provider": "anthropic",                              # protocol
           "model": "glm-4.7",
           "maxOutputTokens": 131072,
           "baseUrl": "<anthropic-endpoint>",                    # region+proto
           "apiKey": "<key>"
         },
-        { ...same with provider: "openai", baseUrl: <paas-endpoint>... }
+        { ...same with provider: "generic-chat-completion-api", baseUrl: <paas-endpoint>... }
       ],
       "<other-top-level-keys>": ...                           # preserved
     }
@@ -64,7 +64,10 @@ _MARKER = "GLM Coding Plan"
 # The two protocols we install, one entry each. Stable discriminators used as
 # ownership-journal sub-keys (never array index).
 PROVIDER_ANTHROPIC = "anthropic"
-PROVIDER_OPENAI = "openai"
+PROVIDER_OPENAI = "generic-chat-completion-api"
+# Older releases wrote ``openai``.  Continue recognizing it so activation can
+# replace a stale entry rather than leaving a duplicate managed model behind.
+_LEGACY_PROVIDER_OPENAI = "openai"
 OUR_PROTOCOLS: tuple[str, ...] = (PROVIDER_ANTHROPIC, PROVIDER_OPENAI)
 
 MODEL_ID = "glm-4.7"
@@ -110,19 +113,38 @@ def _protocol_of(entry: Any) -> str | None:
     if not isinstance(entry, dict):
         return None
     proto = entry.get("provider")
-    return proto if proto in OUR_PROTOCOLS else None
+    if proto == PROVIDER_ANTHROPIC:
+        return PROVIDER_ANTHROPIC
+    if proto in (PROVIDER_OPENAI, _LEGACY_PROVIDER_OPENAI):
+        return PROVIDER_OPENAI
+    return None
 
 
-def _canonical_display_name(provider: str) -> str:
+def _canonical_display_name(provider: str, region: Region) -> str:
     """The EXACT ``displayName`` the helper writes for ``provider``.
 
     Used as the provenance discriminator by the drift guard: the helper always
     writes this exact string, so an entry carrying it is one we wrote, while an
     entry merely containing the ``_MARKER`` substring may be user-authored.
     """
-    if provider == PROVIDER_ANTHROPIC:
-        return "Z.ai GLM Coding Plan (Anthropic)"
-    return "Z.ai GLM Coding Plan (OpenAI)"
+    plan_name = "Global" if region is Region.GLOBAL else "China"
+    protocol_name = "Anthropic" if provider == PROVIDER_ANTHROPIC else "Openai"
+    return f"GLM-4.7 [GLM Coding Plan {plan_name}] - {protocol_name}"
+
+
+def _is_canonical_display_name(value: Any, provider: str, region: Region) -> bool:
+    """Whether ``value`` is current or legacy helper-owned naming."""
+    if value in {
+        _canonical_display_name(provider, Region.GLOBAL),
+        _canonical_display_name(provider, Region.CHINA),
+    }:
+        return True
+    # Releases before upstream parity used a region-independent name.
+    return value in {
+        "Z.ai GLM Coding Plan (Anthropic)"
+        if provider == PROVIDER_ANTHROPIC
+        else "Z.ai GLM Coding Plan (OpenAI)"
+    }
 
 
 def _entry(provider: str, region: Region, auth_token: str) -> dict[str, Any]:
@@ -131,7 +153,7 @@ def _entry(provider: str, region: Region, auth_token: str) -> dict[str, Any]:
         base_url = anthropic_base_url_for_region(region)
     else:  # PROVIDER_OPENAI
         base_url = paas_base_url_for_region(region)
-    display = _canonical_display_name(provider)
+    display = _canonical_display_name(provider, region)
     return {
         "displayName": display,
         "provider": provider,
@@ -319,7 +341,7 @@ def _assert_no_managed_field_drift(models: list[Any], region: Region) -> None:
         first_by_proto[proto] = m
         canonical = want[proto]
         # The entry is ours iff the displayName is EXACTLY what _entry writes.
-        helper_written = m.get("displayName") == _canonical_display_name(proto)
+        helper_written = _is_canonical_display_name(m.get("displayName"), proto, region)
         drifted: list[str] = []
         for fld in _MANAGED_FIELDS:
             value = m.get(fld)
@@ -476,11 +498,22 @@ def plan_default(
 
 JOURNAL_KEY_ANTHROPIC_APIKEY = "customModels.anthropic.apiKey"
 JOURNAL_KEY_OPENAI_APIKEY = "customModels.openai.apiKey"
+JOURNAL_KEY_ANTHROPIC_DISPLAY_NAME = "customModels.anthropic.displayName"
+JOURNAL_KEY_OPENAI_DISPLAY_NAME = "customModels.openai.displayName"
+JOURNAL_KEY_ANTHROPIC_PROVIDER = "customModels.anthropic.provider"
+JOURNAL_KEY_OPENAI_PROVIDER = "customModels.openai.provider"
 
 
 def revert_key_set() -> tuple[str, ...]:
     """The closed set of journal keys ``use default`` must consider."""
-    return (JOURNAL_KEY_ANTHROPIC_APIKEY, JOURNAL_KEY_OPENAI_APIKEY)
+    return (
+        JOURNAL_KEY_ANTHROPIC_APIKEY,
+        JOURNAL_KEY_OPENAI_APIKEY,
+        JOURNAL_KEY_ANTHROPIC_DISPLAY_NAME,
+        JOURNAL_KEY_OPENAI_DISPLAY_NAME,
+        JOURNAL_KEY_ANTHROPIC_PROVIDER,
+        JOURNAL_KEY_OPENAI_PROVIDER,
+    )
 
 
 def _protocol_for_journal_key(key: str) -> str | None:
@@ -489,6 +522,18 @@ def _protocol_for_journal_key(key: str) -> str | None:
         return PROVIDER_ANTHROPIC
     if key == JOURNAL_KEY_OPENAI_APIKEY:
         return PROVIDER_OPENAI
+    if key in (JOURNAL_KEY_ANTHROPIC_DISPLAY_NAME, JOURNAL_KEY_ANTHROPIC_PROVIDER):
+        return PROVIDER_ANTHROPIC
+    if key in (JOURNAL_KEY_OPENAI_DISPLAY_NAME, JOURNAL_KEY_OPENAI_PROVIDER):
+        return PROVIDER_OPENAI
+    return None
+
+
+def _metadata_field_for_journal_key(key: str) -> str | None:
+    if key in (JOURNAL_KEY_ANTHROPIC_DISPLAY_NAME, JOURNAL_KEY_OPENAI_DISPLAY_NAME):
+        return "displayName"
+    if key in (JOURNAL_KEY_ANTHROPIC_PROVIDER, JOURNAL_KEY_OPENAI_PROVIDER):
+        return "provider"
     return None
 
 
@@ -562,6 +607,12 @@ def apply_revert_decisions(
             (i for i, m in enumerate(models) if _is_our_entry(m) and _protocol_of(m) == proto),
             None,
         )
+        metadata_field = _metadata_field_for_journal_key(key)
+        if metadata_field is not None:
+            if idx is not None and decision.action == RevertAction.RESTORE:
+                if decision.prior_present:
+                    models[idx][metadata_field] = decision.prior_value
+            continue
         if decision.action == RevertAction.RESTORE:
             if decision.prior_present:
                 # Prior had a key → ensure our entry exists with it.
