@@ -35,7 +35,8 @@ class DeltaKind(Enum):
     """The kind of mutation a :class:`FileDelta` represents.
 
     - ``WRITE_JSON``: write parsed JSON (``content`` is a ``dict``). The
-      backend serializes with ``indent=2`` + trailing newline.
+      backend uses the upstream indentation for the target file and no
+      trailing newline.
     - ``WRITE_TEXT``: write raw text (``content`` is a ``str``).
     - ``NOOP``: the file already matches the desired state; nothing to do.
       Kept (rather than omitted) so ``--dry-run`` can report that the file was

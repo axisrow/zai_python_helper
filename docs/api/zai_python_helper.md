@@ -156,7 +156,8 @@ Members:
 The kind of mutation a `FileDelta` represents.
 
 - `WRITE_JSON`: write parsed JSON (`content` is a `dict`). The
-  backend serializes with `indent=2` + trailing newline.
+  backend uses the upstream indentation for the target file and no
+  trailing newline.
 - `WRITE_TEXT`: write raw text (`content` is a `str`).
 - `NOOP`: the file already matches the desired state; nothing to do.
   Kept (rather than omitted) so `--dry-run` can report that the file was
@@ -174,7 +175,7 @@ Members:
 
 ### `FileDelta`
 
-*dataclass — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/core/planner/__init__.py#L69)*
+*dataclass — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/core/planner/__init__.py#L70)*
 
 A single file's intended mutation, addressed by semantic tag.
 
@@ -191,7 +192,7 @@ Attributes:
 
 ### `FileTag`
 
-*enum — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/core/planner/__init__.py#L50)*
+*enum — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/core/planner/__init__.py#L51)*
 
 Semantic identifier for a managed file (decoupled from its path).
 
@@ -215,7 +216,7 @@ Members:
 
 ### `PatchPlan`
 
-*dataclass — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/core/planner/__init__.py#L87)*
+*dataclass — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/core/planner/__init__.py#L88)*
 
 An ordered list of file deltas describing a complete activation.
 
@@ -853,7 +854,7 @@ directly; that naming split is what makes test isolation provable.
 
 ### `JsonBackend`
 
-*class — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/backends.py#L97)*
+*class — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/backends.py#L98)*
 
 Atomic JSON document writer/reader.
 
@@ -875,22 +876,21 @@ raises `ConfigurationError` rather than crashing with a bare
 #### `write()`
 
 ```python
-write(path: Path, doc: dict[str, Any]) -> None
+write(path: Path, doc: dict[str, Any], indent: int) -> None
 ```
 
 Serialize `doc` to pretty JSON and write it atomically to `path`.
 
-`indent=2` + `sort_keys=False` (preserve insertion order), without
-a trailing newline (matching the upstream JSON writers). Sorted keys
-would shuffle user-owned keys on every write, producing noisy diffs,
-so we keep insertion order. Config files remain mode `0600` because
-they may carry authentication credentials; this is an intentional
-security deviation from upstream's default `0644` mode.
+`indent` defaults to 2. Callers may select a tool-specific upstream
+format (OpenCode uses 4 spaces). Keys retain insertion order and the
+output has no trailing newline. Config files remain mode `0600`
+because they may carry authentication credentials; this is an
+intentional security deviation from upstream's default `0644` mode.
 
 #### `render()`
 
 ```python
-render(doc: dict[str, Any]) -> str
+render(doc: dict[str, Any], indent: int) -> str
 ```
 
 Render `doc` to the exact on-disk text (for diffing in --dry-run).
@@ -904,7 +904,7 @@ Pure: the bytes this backend WOULD write, without touching the FS.
 
 ### `ShellBackend`
 
-*class — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/backends.py#L154)*
+*class — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/backends.py#L159)*
 
 Owned marker-fenced block writer for shell rc files (ADR-003).
 

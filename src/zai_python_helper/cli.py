@@ -444,11 +444,17 @@ def _apply_plan(paths: Paths, plan: PatchPlan, *, dry_run: bool) -> list[FileTag
             if delta.kind == DeltaKind.WRITE_JSON:
                 cur_doc = JsonBackend.read(path)
                 cur_text = (
-                    JsonBackend.render(_redact_json_doc(cur_doc))
+                    JsonBackend.render(
+                        _redact_json_doc(cur_doc),
+                        indent=JsonBackend._indent_for_tag(delta.tag),
+                    )
                     if cur_doc is not None
                     else ""
                 )
-                des_text = JsonBackend.render(_redact_json_doc(delta.content))
+                des_text = JsonBackend.render(
+                    _redact_json_doc(delta.content),
+                    indent=JsonBackend._indent_for_tag(delta.tag),
+                )
             else:  # WRITE_TEXT
                 cur_text = _shell_managed_preview(ShellBackend.read(path))
                 des_text = _shell_managed_preview(delta.content)
@@ -456,7 +462,11 @@ def _apply_plan(paths: Paths, plan: PatchPlan, *, dry_run: bool) -> list[FileTag
             continue
 
         if delta.kind == DeltaKind.WRITE_JSON:
-            JsonBackend.write(path, delta.content)
+            JsonBackend.write(
+                path,
+                delta.content,
+                indent=JsonBackend._indent_for_tag(delta.tag),
+            )
         else:
             from zai_python_helper.backends import atomic_write_bytes
 

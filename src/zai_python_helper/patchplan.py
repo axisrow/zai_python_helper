@@ -219,7 +219,9 @@ def _delta_to_entry(delta: FileDelta, paths: Paths) -> _RecoveryEntry | None:
     if delta.kind == DeltaKind.WRITE_JSON:
         from zai_python_helper.backends import JsonBackend
 
-        content = JsonBackend.render(delta.content)
+        content = JsonBackend.render(
+            delta.content, indent=JsonBackend._indent_for_tag(delta.tag)
+        )
         kind = "json"
     else:  # WRITE_TEXT
         content = delta.content
