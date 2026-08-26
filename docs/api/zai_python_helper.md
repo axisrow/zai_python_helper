@@ -783,7 +783,7 @@ Value: `{Region.GLOBAL: 'https://api.z.ai/api/anthropic', Region.CHINA: 'https:/
 
 ### `Paths`
 
-*dataclass — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/paths.py#L29)*
+*dataclass — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/paths.py#L30)*
 
 Frozen bundle of every resolved filesystem path the tool touches.
 
@@ -811,7 +811,7 @@ Attributes:
 #### `from_home()`
 
 ```python
-from_home(cls, home: str | Path, cwd: str | Path | None) -> Paths
+from_home(cls, home: str | Path, cwd: str | Path | None, state_home: str | Path | None) -> Paths
 ```
 
 Resolve all paths off `home` via pure arithmetic (no IO).
@@ -828,10 +828,10 @@ The resolved paths:
 - `opencode`          = `home / ".config" / "opencode" / "opencode.json"`
 - `crush`             = `home / ".config" / "crush" / "crush.json"`
 - `factory_droid`     = `home / ".factory" / "settings.json"`
-- `ownership_json`   = `home / ".zai-python-helper" / "ownership.json"`
-- `recovery_json`    = `home / ".zai-python-helper" / "recovery.json"`
-- `lock_file`         = `home / ".zai-python-helper" / "lock"`
-- `state_dir`         = `home / ".zai-python-helper" / "state"`
+- `ownership_json`   = external state root / `ownership.json`
+- `recovery_json`    = external state root / `recovery.json`
+- `lock_file`         = external state root / `lock`
+- `state_dir`         = external state root / `state`
 - `project_claude_settings` = `cwd / ".claude" / "settings.json"`
 - `local_claude_settings` = `cwd / ".claude" / "settings.local.json"`
 
