@@ -60,10 +60,7 @@ def _isolate_home(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     # ``from_home`` is also used extensively by tests; keep its bookkeeping
     # isolated even when a callsite does not spell out state_home.
-    previous_state_home = os.environ.get("ZAI_PYTHON_HELPER_STATE_HOME")
-    os.environ["ZAI_PYTHON_HELPER_STATE_HOME"] = str(tmp_path)
+    state_env = pytest.MonkeyPatch()
+    state_env.setenv("ZAI_PYTHON_HELPER_STATE_HOME", str(tmp_path))
     yield tmp_path
-    if previous_state_home is None:
-        os.environ.pop("ZAI_PYTHON_HELPER_STATE_HOME", None)
-    else:
-        os.environ["ZAI_PYTHON_HELPER_STATE_HOME"] = previous_state_home
+    state_env.undo()
