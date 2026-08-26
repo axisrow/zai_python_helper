@@ -305,7 +305,7 @@ all-NOOP plan (idempotent).
 postconditions(region: Region, settings_doc: dict[str, Any] | None, zshrc_text: str) -> bool
 ```
 
-True iff `settings.json` + `.zshrc` reflect an active `use zai`.
+True iff `settings.json` reflects an active `use zai`.
 
 PURE predicate used by `status`/`doctor` to confirm the activation
 took effect. Checks:
@@ -313,7 +313,9 @@ took effect. Checks:
 - `settings.json` → `env` has `ANTHROPIC_AUTH_TOKEN` and
   `ANTHROPIC_BASE_URL` equal to the region's Z.ai URL, and does NOT
   have `ANTHROPIC_API_KEY`.
-- `.zshrc` carries our owned block (presence marker).
+The Phase-1 execution path intentionally does not manage `.zshrc`;
+legacy blocks are cleaned up only by the revert path.  Therefore this
+predicate deliberately checks the config file only.
 
 Note: this validates state, NOT secrets — it checks key presence and the
 base URL, never the token value (which may be redacted upstream).
@@ -854,7 +856,7 @@ directly; that naming split is what makes test isolation provable.
 
 ### `JsonBackend`
 
-*class — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/backends.py#L98)*
+*class — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/backends.py#L101)*
 
 Atomic JSON document writer/reader.
 
@@ -903,7 +905,7 @@ Pure: the bytes this backend WOULD write, without touching the FS.
 
 ### `ShellBackend`
 
-*class — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/backends.py#L158)*
+*class — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/backends.py#L161)*
 
 Owned marker-fenced block writer for shell rc files (ADR-003).
 

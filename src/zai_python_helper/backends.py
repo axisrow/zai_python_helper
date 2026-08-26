@@ -53,7 +53,10 @@ def atomic_write_bytes(path: Path, data: bytes) -> None:
     Raises:
         ConfigurationError: If the write or replace fails.
     """
-    path = Path(path)
+    # Rename the referent rather than the symlink itself.  Config files are
+    # commonly managed by dotfiles tools, which may make ~/.zshrc a symlink;
+    # replacing that path would silently detach it from its target.
+    path = Path(path).resolve()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         # mkstemp in the same dir → guaranteed same filesystem → atomic rename.

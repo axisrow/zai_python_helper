@@ -108,6 +108,20 @@ class TestForeignSurvival:
         out = remove_owned_block(install_owned_block(text))
         assert out == text
 
+    def test_remove_preserves_unrelated_blank_lines(self):
+        text = (
+            "before\n\n"
+            "export VALUE='line1\n\nline3'\n\n"
+            + MANAGED_BLOCK_BEGIN
+            + "\nlegacy\n"
+            + MANAGED_BLOCK_END
+            + "\n"
+        )
+        assert remove_owned_block(text) == (
+            "before\n\n"
+            "export VALUE='line1\n\nline3'\n"
+        )
+
     def test_multiple_installs_single_block(self):
         text = install_owned_block(install_owned_block(install_owned_block(FOREIGN)))
         assert text.count(MANAGED_BLOCK_BEGIN) == 1
@@ -176,6 +190,20 @@ class TestMalformedMarkersFailClosed:
 
 class TestShellBackendIO:
     def test_install_creates_file_when_absent(self, tmp_path):
+        rc = tmp_path / ".zshrc"
+        assert ShellBackend.install_block(rc)
+
+    def test_remove_preserves_symlinked_file(self, tmp_path):
+        target = tmp_path / "dotfiles.zshrc"
+        target.write_text(install_owned_block(FOREIGN))
+        rc = tmp_path / ".zshrc"
+        rc.symlink_to(target)
+
+        assert ShellBackend.remove_block(rc)
+        assert rc.is_symlink()
+        assert target.read_text() == FOREIGN
+
+    def test_install_mode_matches_upstream(self, tmp_path):
         rc = tmp_path / ".zshrc"
         assert ShellBackend.install_block(rc)
         text = rc.read_text()

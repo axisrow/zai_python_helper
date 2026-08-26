@@ -83,7 +83,7 @@ Auto-generated from `zai_python_helper.__all__` (the versioned contract, issue
 - `PatchPlan` (dataclass): An ordered list of file deltas describing a complete activation.
 - `plan_default(provider_spec: ProviderSpec, settings_doc: dict[str, Any] | None, zshrc_text: str) -> PatchPlan`: Plan the `use default` reversion for Claude Code.
 - `plan_zai(provider_spec: ProviderSpec, region: Region, settings_doc: dict[str, Any] | None, claude_json_doc: dict[str, Any] | None, zshrc_text: str, auth_token: str) -> PatchPlan`: Plan the `use zai` activation for Claude Code.
-- `postconditions(region: Region, settings_doc: dict[str, Any] | None, zshrc_text: str) -> bool`: True iff `settings.json` + `.zshrc` reflect an active `use zai`.
+- `postconditions(region: Region, settings_doc: dict[str, Any] | None, zshrc_text: str) -> bool`: True iff `settings.json` reflects an active `use zai`.
 - `base_url_for_region(region: Region) -> str`: Return the Z.ai Anthropic-compatible base URL for `region`.
 - `RevertAction` (enum): What `revert` decided to do with one managed key.
 - `RevertDecision` (dataclass): The outcome of `revert` for one key.
