@@ -112,7 +112,11 @@ class Paths:
             # is created and ownership-checked by ProcessLock before use.
             state_home = _state_home_from_env()
         home_id = hashlib.sha256(str(h).encode()).hexdigest()[:16]
-        helper_dir = Path(state_home) / "zai-python-helper" / home_id
+        # Pin the state root's current symlink target.  All transaction files
+        # then use the same canonical tree as the lock, even if the user-level
+        # XDG symlink is retargeted while a transaction is running.
+        state_root = Path(os.path.realpath(state_home))
+        helper_dir = state_root / "zai-python-helper" / home_id
         state_dir = helper_dir / "state"
         cwd_path = Path(cwd) if cwd is not None else Path.cwd()
         return cls(

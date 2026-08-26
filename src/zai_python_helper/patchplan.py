@@ -64,7 +64,7 @@ def _ensure_private_parent(path: Path) -> int:
     # protected.  Do not infer this from a basename: XDG_STATE_HOME may
     # legitimately live below a user directory with that name.
     if (
-        state_root.parent == Path("/var/tmp")
+        state_root.parent == Path(os.path.realpath("/var/tmp"))
         and state_root.name == f"zai-python-helper-{os.getuid()}"
     ):
         private_paths.add(state_root)

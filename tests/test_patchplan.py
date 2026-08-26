@@ -117,6 +117,7 @@ class TestProcessLock:
 
         with ProcessLock(paths.lock_file):
             pass
+        assert target in paths.lock_file.parents
         assert (target / "zai-python-helper").is_dir()
 
     def test_lock_rejects_lexical_parent_traversal(self, tmp_path):
