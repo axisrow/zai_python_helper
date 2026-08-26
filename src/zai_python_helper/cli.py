@@ -810,7 +810,7 @@ def _handle_use_zai(args: argparse.Namespace) -> int:
             current = journal.read()
             return journal.render(_merge_takeover_records(tool, current, records))
 
-        written = apply_plan_locked(paths, plan, journal_content=_journal_text)
+        apply_plan_locked(paths, plan, journal_content=_journal_text)
     # Match the pinned upstream `chelper auth reload <tool>` CLI.  File
     # changes remain observable through the filesystem contract; stdout is a
     # stable process contract and must not expose paths or configuration.
