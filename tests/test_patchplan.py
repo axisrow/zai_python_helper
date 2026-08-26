@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import os
 import threading
 import time
 from pathlib import Path
@@ -45,7 +46,7 @@ def _write_json_delta(tag: FileTag, content: dict) -> FileDelta:
 
 
 def _paths(home: Path) -> Paths:
-    return Paths.from_home(home)
+    return Paths.from_home(home, state_home=home)
 
 
 def test_migrate_legacy_state_moves_journal_and_recovery(tmp_path):
@@ -110,6 +111,29 @@ class TestProcessLock:
         with pytest.raises(OSError):
             with ProcessLock(lock_path):
                 pass
+
+    def test_lock_validation_closes_fd_when_chmod_fails(self, tmp_path, monkeypatch):
+        """A failed lock hardening operation must not leak its descriptor."""
+        from zai_python_helper import patchplan
+
+        lock_path = tmp_path / "lock"
+        lock_path.write_text("")
+        lock_path.chmod(0o644)
+        closed: list[int] = []
+        real_close = os.close
+
+        def fail_chmod(fd, mode):
+            raise OSError("filesystem refuses chmod")
+
+        def record_close(fd):
+            closed.append(fd)
+            real_close(fd)
+
+        monkeypatch.setattr(patchplan.os, "fchmod", fail_chmod)
+        monkeypatch.setattr(patchplan.os, "close", record_close)
+        with pytest.raises(OSError, match="refuses chmod"):
+            patchplan.os_open(lock_path)
+        assert closed
 
     def test_lock_is_exclusive_across_threads(self, tmp_path):
         """Two threads acquiring the same lock serialize (flock LOCK_EX).

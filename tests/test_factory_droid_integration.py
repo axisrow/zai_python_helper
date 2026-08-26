@@ -42,7 +42,7 @@ def _merge(tool, current, records):
 class TestApplyAndRevert:
     def test_revert_restores_legacy_metadata_after_activation(self, tool, tmp_path):
         """Upgrading old helper entries must remain reversible."""
-        paths = Paths.from_home(tmp_path)
+        paths = Paths.from_home(tmp_path, state_home=tmp_path)
         spec = _spec()
         seed = {
             "customModels": [
@@ -80,7 +80,7 @@ class TestApplyAndRevert:
         assert _read(paths) == seed
 
     def test_use_zai_writes_two_entries(self, tool, tmp_path):
-        paths = Paths.from_home(tmp_path)
+        paths = Paths.from_home(tmp_path, state_home=tmp_path)
         with ProcessLock(paths.lock_file):
             state = tool.read_state(paths)
             plan = tool.plan_zai(_spec(), Region.GLOBAL, state=state, auth_token=TOKEN)
@@ -92,7 +92,7 @@ class TestApplyAndRevert:
         assert all(m["model"] == "glm-4.7" for m in ours)
 
     def test_use_zai_is_idempotent(self, tool, tmp_path):
-        paths = Paths.from_home(tmp_path)
+        paths = Paths.from_home(tmp_path, state_home=tmp_path)
         spec = _spec()
         with ProcessLock(paths.lock_file):
             state = tool.read_state(paths)
@@ -102,7 +102,7 @@ class TestApplyAndRevert:
         assert plan2.is_empty
 
     def test_use_default_restores_prior_via_journal(self, tool, tmp_path):
-        paths = Paths.from_home(tmp_path)
+        paths = Paths.from_home(tmp_path, state_home=tmp_path)
         spec = _spec()
         seed = {
             "customModels": [{"displayName": "My Custom", "provider": "openai", "model": "gpt"}],
@@ -132,7 +132,7 @@ class TestApplyAndRevert:
 
     def test_use_default_refuses_when_key_changed_externally(self, tool, tmp_path):
         """External rotation of an entry's apiKey → REFUSE keeps the new value."""
-        paths = Paths.from_home(tmp_path)
+        paths = Paths.from_home(tmp_path, state_home=tmp_path)
         spec = _spec()
         journal = OwnershipJournal(paths.ownership_json)
 
@@ -166,7 +166,7 @@ class TestApplyAndRevert:
         one of OUR customModels entries must survive revert (analogous to the
         Crush #38 collapse fix). The entry is de-marked (our fields stripped)
         but the user's field is kept, not clobbered."""
-        paths = Paths.from_home(tmp_path)
+        paths = Paths.from_home(tmp_path, state_home=tmp_path)
         spec = _spec()
         journal = OwnershipJournal(paths.ownership_json)
 
@@ -199,7 +199,7 @@ class TestApplyAndRevert:
         assert not any(fd._is_our_entry(m) for m in models)
 
     def test_independent_of_other_tools(self, tool, tmp_path):
-        paths = Paths.from_home(tmp_path)
+        paths = Paths.from_home(tmp_path, state_home=tmp_path)
         JsonBackend.write(paths.crush, {"providers": {"openai": {"api_key": "x"}}})
         JsonBackend.write(paths.claude_settings, {"env": {"ANTHROPIC_AUTH_TOKEN": "cc"}})
 

@@ -8,7 +8,7 @@ from zai_python_helper.paths import Paths
 def test_paths_from_home_resolves_all_fields(_isolate_home):
     """Paths.from_home should resolve all fields off the given home."""
     home = _isolate_home
-    paths = Paths.from_home(home)
+    paths = Paths.from_home(home, state_home=home)
 
     assert paths.claude_settings == home / ".claude" / "settings.json"
     assert paths.claude_json == home / ".claude.json"
@@ -23,7 +23,7 @@ def test_paths_from_home_resolves_all_fields(_isolate_home):
 def test_paths_from_home_with_string(_isolate_home):
     """Paths.from_home should accept both str and Path."""
     home_str = str(_isolate_home)
-    paths = Paths.from_home(home_str)
+    paths = Paths.from_home(home_str, state_home=home_str)
 
     assert paths.claude_settings == _isolate_home / ".claude" / "settings.json"
 
@@ -32,7 +32,7 @@ def test_paths_frozen_immutable(_isolate_home):
     """Paths instances should be frozen (immutable)."""
     import dataclasses
 
-    paths = Paths.from_home(_isolate_home)
+    paths = Paths.from_home(_isolate_home, state_home=_isolate_home)
 
     with pytest.raises(dataclasses.FrozenInstanceError):  # pragma: no cover
         paths.claude_settings = "/some/other/path"
@@ -42,7 +42,7 @@ def test_paths_from_home_no_existence_check(_isolate_home):
     """Paths.from_home should succeed even if paths don't exist."""
     # Use a non-existent home path
     fake_home = _isolate_home / "nonexistent"
-    paths = Paths.from_home(fake_home)
+    paths = Paths.from_home(fake_home, state_home=_isolate_home)
 
     assert fake_home not in paths.state_dir.parents
     # No IO should have occurred

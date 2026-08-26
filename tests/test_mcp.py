@@ -431,14 +431,14 @@ def test_doctor_mcp_probe_none_then_installed(_isolate_home, capsys):
     )
 
     rc = run_doctor(
-        Paths.from_home(_isolate_home), color=False, environ={}, http_get=offline
+        Paths.from_home(_isolate_home, state_home=_isolate_home), color=False, environ={}, http_get=offline
     )
     assert "preset MCP servers" in capsys.readouterr().out
     assert rc == 0  # MCP must never fail doctor.
 
     install_mcp(Tool.CLAUDE_CODE, "zread", _KEY, Region.GLOBAL, home=_isolate_home)
     rc = run_doctor(
-        Paths.from_home(_isolate_home), color=False, environ={}, http_get=offline
+        Paths.from_home(_isolate_home, state_home=_isolate_home), color=False, environ={}, http_get=offline
     )
     out = capsys.readouterr().out
     assert "preset MCP servers" in out

@@ -29,7 +29,7 @@ TOKEN = "sk-integration-token"
 
 def _seed(home: Path, *, settings=None, claude_json=None, zshrc=None) -> Paths:
     """Write seeded config files under ``home`` and return resolved Paths."""
-    paths = Paths.from_home(home)
+    paths = Paths.from_home(home, state_home=home)
     paths.claude_settings.parent.mkdir(parents=True, exist_ok=True)
     if settings is not None:
         paths.claude_settings.write_text(json.dumps(settings))
@@ -72,7 +72,7 @@ class TestUseZai:
         assert rc == 0
 
         settings = json.loads(
-            (Paths.from_home(tmp_path).claude_settings).read_text()
+            (Paths.from_home(tmp_path, state_home=tmp_path).claude_settings).read_text()
         )
         env = settings["env"]
         # The exact managed block for global + DEFAULT mode.
@@ -98,7 +98,7 @@ class TestUseZai:
         _seed(tmp_path, claude_json={"theme": "dark"})
         _run(["use", "zai", "--region", "global", "--api-key", TOKEN])
 
-        doc = json.loads(Paths.from_home(tmp_path).claude_json.read_text())
+        doc = json.loads(Paths.from_home(tmp_path, state_home=tmp_path).claude_json.read_text())
         assert doc["hasCompletedOnboarding"] is True
         assert doc["theme"] == "dark"
 
@@ -107,7 +107,7 @@ class TestUseZai:
         _seed(tmp_path, zshrc="export PATH=/bin\nalias ll='ls -la'\n")
         _run(["use", "zai", "--region", "global", "--api-key", TOKEN])
 
-        text = Paths.from_home(tmp_path).zshrc.read_text()
+        text = Paths.from_home(tmp_path, state_home=tmp_path).zshrc.read_text()
         assert "export PATH=/bin" in text
         assert "alias ll='ls -la'" in text
 
@@ -122,13 +122,13 @@ class TestIdempotency:
         monkeypatch.setenv("HOME", str(tmp_path))
         _seed(tmp_path)
         _run(["use", "zai", "--mode", "default", "--api-key", TOKEN])
-        snapshot_settings = Paths.from_home(tmp_path).claude_settings.read_text()
+        snapshot_settings = Paths.from_home(tmp_path, state_home=tmp_path).claude_settings.read_text()
 
         # Second run.
         _run(["use", "zai", "--mode", "default", "--api-key", TOKEN])
 
-        assert Paths.from_home(tmp_path).claude_settings.read_text() == snapshot_settings
-        assert not Paths.from_home(tmp_path).zshrc.exists()
+        assert Paths.from_home(tmp_path, state_home=tmp_path).claude_settings.read_text() == snapshot_settings
+        assert not Paths.from_home(tmp_path, state_home=tmp_path).zshrc.exists()
 
     def test_second_use_zai_reports_no_changes(self, tmp_path, monkeypatch, capsys):
         monkeypatch.setenv("HOME", str(tmp_path))
@@ -166,7 +166,7 @@ class TestUseDefault:
         rc = _run(["use", "default", "--mode", "default", "--region", "global"])
         assert rc == 0
 
-        settings = json.loads(Paths.from_home(tmp_path).claude_settings.read_text())
+        settings = json.loads(Paths.from_home(tmp_path, state_home=tmp_path).claude_settings.read_text())
         env = settings["env"]
         # The four always-managed keys gone (restored to their absent prior).
         for key in (
@@ -181,9 +181,9 @@ class TestUseDefault:
     def test_default_does_not_touch_claude_json(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HOME", str(tmp_path))
         _seed(tmp_path, claude_json={"theme": "dark", "hasCompletedOnboarding": True})
-        before = Paths.from_home(tmp_path).claude_json.read_text()
+        before = Paths.from_home(tmp_path, state_home=tmp_path).claude_json.read_text()
         _run(["use", "default", "--region", "global"])
-        assert Paths.from_home(tmp_path).claude_json.read_text() == before
+        assert Paths.from_home(tmp_path, state_home=tmp_path).claude_json.read_text() == before
 
     def test_default_removes_zshrc_block_keeps_foreign(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HOME", str(tmp_path))
@@ -191,7 +191,7 @@ class TestUseDefault:
         _run(["use", "zai", "--api-key", TOKEN])
         _run(["use", "default", "--region", "global"])
 
-        text = Paths.from_home(tmp_path).zshrc.read_text()
+        text = Paths.from_home(tmp_path, state_home=tmp_path).zshrc.read_text()
         assert "zai-python-helper managed" not in text
         assert "export PATH=/bin" in text
 
@@ -211,7 +211,7 @@ class TestUseDefault:
         _run(["use", "zai", "--mode", "default", "--api-key", TOKEN])
         _run(["use", "default", "--mode", "default", "--region", "global"])
 
-        settings = json.loads(Paths.from_home(tmp_path).claude_settings.read_text())
+        settings = json.loads(Paths.from_home(tmp_path, state_home=tmp_path).claude_settings.read_text())
         # Foreign key survives; the managed ZAI keys are gone; AND the original
         # ANTHROPIC_API_KEY is RESTORED (not blindly deleted as in S2).
         assert settings["env"] == {"FOREIGN": "keep", "ANTHROPIC_API_KEY": "sk-old"}
@@ -228,7 +228,7 @@ class TestUseDefault:
         # Bare revert — defaults to ORIGINAL mode, which contributes no model keys.
         _run(["use", "default"])
 
-        env = json.loads(Paths.from_home(tmp_path).claude_settings.read_text()).get(
+        env = json.loads(Paths.from_home(tmp_path, state_home=tmp_path).claude_settings.read_text()).get(
             "env", {}
         )
         for stale in (
@@ -283,7 +283,7 @@ class TestOwnershipJournalE2E:
         _seed(tmp_path)
         _run(["use", "zai", "--api-key", TOKEN])
 
-        journal = Paths.from_home(tmp_path).ownership_json
+        journal = Paths.from_home(tmp_path, state_home=tmp_path).ownership_json
         assert journal.exists()
         mode = journal.stat().st_mode & 0o777
         assert mode == 0o600
@@ -317,7 +317,7 @@ class TestOwnershipJournalE2E:
         _run(["use", "zai", "--api-key", TOKEN])  # repeat — must not clobber prior
         _run(["use", "default", "--region", "global"])
 
-        env = json.loads(Paths.from_home(tmp_path).claude_settings.read_text()).get(
+        env = json.loads(Paths.from_home(tmp_path, state_home=tmp_path).claude_settings.read_text()).get(
             "env", {}
         )
         # ORIGINAL values restored, not the Z.ai token.
@@ -346,7 +346,7 @@ class TestOwnershipJournalE2E:
         _run(["use", "zai", "--api-key", "sk-zai-2"])  # rotate
         _run(["use", "default", "--region", "global"])
 
-        env = json.loads(Paths.from_home(tmp_path).claude_settings.read_text()).get(
+        env = json.loads(Paths.from_home(tmp_path, state_home=tmp_path).claude_settings.read_text()).get(
             "env", {}
         )
         # The ORIGINAL user token is restored — NOT the previous Z.ai token.
@@ -372,7 +372,7 @@ class TestOwnershipJournalE2E:
         capsys.readouterr()
 
         # User manually adds a NEW API key after activation.
-        settings_path = Paths.from_home(tmp_path).claude_settings
+        settings_path = Paths.from_home(tmp_path, state_home=tmp_path).claude_settings
         doc = json.loads(settings_path.read_text())
         doc.setdefault("env", {})["ANTHROPIC_API_KEY"] = "sk-user-new-after-zai"
         settings_path.write_text(json.dumps(doc))
@@ -395,7 +395,7 @@ class TestOwnershipJournalE2E:
         _run(["use", "zai", "--api-key", TOKEN])
         _run(["use", "default", "--region", "global"])
 
-        env = json.loads(Paths.from_home(tmp_path).claude_settings.read_text()).get(
+        env = json.loads(Paths.from_home(tmp_path, state_home=tmp_path).claude_settings.read_text()).get(
             "env", {}
         )
         # The user's ORIGINAL token is back — not the Z.ai one, not deleted.
@@ -413,7 +413,7 @@ class TestOwnershipJournalE2E:
         capsys.readouterr()
 
         # The user manually edits the token to something we never set.
-        settings_path = Paths.from_home(tmp_path).claude_settings
+        settings_path = Paths.from_home(tmp_path, state_home=tmp_path).claude_settings
         doc = json.loads(settings_path.read_text())
         doc["env"]["ANTHROPIC_AUTH_TOKEN"] = "sk-edited-by-user"
         settings_path.write_text(json.dumps(doc))
@@ -433,12 +433,12 @@ class TestOwnershipJournalE2E:
         _seed(tmp_path, settings={"env": {"ANTHROPIC_API_KEY": "sk-original"}})
         _run(["use", "zai", "--api-key", TOKEN])
         _run(["use", "default", "--region", "global"])
-        snapshot = Paths.from_home(tmp_path).claude_settings.read_text()
+        snapshot = Paths.from_home(tmp_path, state_home=tmp_path).claude_settings.read_text()
         capsys.readouterr()
 
         _run(["use", "default", "--region", "global"])
         # State unchanged by the second revert.
-        assert Paths.from_home(tmp_path).claude_settings.read_text() == snapshot
+        assert Paths.from_home(tmp_path, state_home=tmp_path).claude_settings.read_text() == snapshot
         assert "no changes" in capsys.readouterr().out.lower()
 
     def test_completed_cycle_does_not_resurrect_deleted_removal_key(
@@ -461,7 +461,7 @@ class TestOwnershipJournalE2E:
         monkeypatch.setenv("HOME", str(tmp_path))
         p1 = "sk-user-apikey-P1"
         _seed(tmp_path, settings={"env": {"ANTHROPIC_API_KEY": p1}})
-        settings_path = Paths.from_home(tmp_path).claude_settings
+        settings_path = Paths.from_home(tmp_path, state_home=tmp_path).claude_settings
 
         # use zai removes the user's API key (ownership-by-removal).
         _run(["use", "zai", "--api-key", TOKEN])
@@ -507,7 +507,7 @@ class TestOwnershipJournalE2E:
         )
         _run(["use", "default", "--region", "global"])
 
-        env = json.loads(Paths.from_home(tmp_path).claude_settings.read_text()).get(
+        env = json.loads(Paths.from_home(tmp_path, state_home=tmp_path).claude_settings.read_text()).get(
             "env", {}
         )
         # No provenance → keys left untouched (NOT blindly deleted).
@@ -528,7 +528,7 @@ class TestOwnershipJournalE2E:
         with its own activation — leaving a clean state and no manifest.
         """
         monkeypatch.setenv("HOME", str(tmp_path))
-        paths = Paths.from_home(tmp_path)
+        paths = Paths.from_home(tmp_path, state_home=tmp_path)
         # Hand-craft a manifest from a prior interrupted run: settings final
         # state recorded, but the file itself never landed on disk.
         paths.recovery_json.parent.mkdir(parents=True, exist_ok=True)
@@ -604,7 +604,7 @@ class TestRevertJournalAtomicity:
         _seed(tmp_path, settings={"env": {"ANTHROPIC_AUTH_TOKEN": prior}})
         _run(["use", "zai", "--api-key", TOKEN])
 
-        paths = Paths.from_home(tmp_path)
+        paths = Paths.from_home(tmp_path, state_home=tmp_path)
         self._crash_on(monkeypatch, "settings")
         with pytest.raises(RuntimeError):
             _run(["use", "default", "--region", "global"])
@@ -634,7 +634,7 @@ class TestRevertJournalAtomicity:
         _seed(tmp_path, settings={"env": {"ANTHROPIC_AUTH_TOKEN": prior}})
         _run(["use", "zai", "--api-key", TOKEN])
 
-        paths = Paths.from_home(tmp_path)
+        paths = Paths.from_home(tmp_path, state_home=tmp_path)
         self._crash_on(monkeypatch, "settings")
         with pytest.raises(RuntimeError):
             _run(["use", "default", "--region", "global"])
@@ -668,7 +668,7 @@ class TestRevertJournalAtomicity:
         _run(["use", "zai", "--api-key", TOKEN])
         _run(["use", "default", "--region", "global"])
 
-        paths = Paths.from_home(tmp_path)
+        paths = Paths.from_home(tmp_path, state_home=tmp_path)
         record = json.loads(paths.ownership_json.read_text())["claude_code"][
             "ANTHROPIC_AUTH_TOKEN"
         ]
@@ -693,13 +693,13 @@ class TestDryRun:
         assert rc == 0
 
         # settings.json untouched.
-        assert json.loads(Paths.from_home(tmp_path).claude_settings.read_text()) == {
+        assert json.loads(Paths.from_home(tmp_path, state_home=tmp_path).claude_settings.read_text()) == {
             "env": {"FOO": "bar"}
         }
         # .zshrc was never created.
-        assert not Paths.from_home(tmp_path).zshrc.exists()
+        assert not Paths.from_home(tmp_path, state_home=tmp_path).zshrc.exists()
         # .claude.json was never created.
-        assert not Paths.from_home(tmp_path).claude_json.exists()
+        assert not Paths.from_home(tmp_path, state_home=tmp_path).claude_json.exists()
 
         out = capsys.readouterr().out
         assert "no files written" in out

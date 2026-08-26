@@ -271,13 +271,16 @@ def os_open(path: Path) -> int:
     fd = os.open(
         str(path), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, _SECURE_FILE_MODE
     )
-    st = os.fstat(fd)
-    if st.st_uid != os.getuid() or not stat.S_ISREG(st.st_mode):
+    try:
+        st = os.fstat(fd)
+        if st.st_uid != os.getuid() or not stat.S_ISREG(st.st_mode):
+            raise PermissionError(f"insecure lock file: {path}")
+        if st.st_mode & 0o077:
+            os.fchmod(fd, _SECURE_FILE_MODE)
+        return fd
+    except BaseException:
         os.close(fd)
-        raise PermissionError(f"insecure lock file: {path}")
-    if st.st_mode & 0o077:
-        os.fchmod(fd, _SECURE_FILE_MODE)
-    return fd
+        raise
 
 
 def close_fd(fd: int) -> None:

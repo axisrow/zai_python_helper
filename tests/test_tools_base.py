@@ -186,7 +186,7 @@ class TestEnvField:
 
 class TestResolvePath:
     def test_known_tags_resolve(self, tmp_path):
-        paths = Paths.from_home(tmp_path)
+        paths = Paths.from_home(tmp_path, state_home=tmp_path)
         assert resolve_path(paths, FileTag.SETTINGS) == paths.claude_settings
         assert resolve_path(paths, FileTag.ZSHRC) == paths.zshrc
         assert resolve_path(paths, FileTag.OPENCODE) == paths.opencode
@@ -195,7 +195,7 @@ class TestResolvePath:
 
     def test_new_paths_under_home(self, tmp_path):
         """S6 tool paths resolve under the injected home (HOME isolation)."""
-        paths = Paths.from_home(tmp_path)
+        paths = Paths.from_home(tmp_path, state_home=tmp_path)
         assert paths.opencode == tmp_path / ".config" / "opencode" / "opencode.json"
         assert paths.crush == tmp_path / ".config" / "crush" / "crush.json"
         assert paths.factory_droid == tmp_path / ".factory" / "settings.json"

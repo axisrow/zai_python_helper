@@ -169,7 +169,7 @@ def test_render_check_color_wraps_marker():
 
 def test_catches_wrong_endpoint(tmp_path):
     """A non-Z.ai ANTHROPIC_BASE_URL → endpoint FAIL → exit 1."""
-    paths = Paths.from_home(tmp_path)
+    paths = Paths.from_home(tmp_path, state_home=tmp_path)
     _write_settings(paths, {"ANTHROPIC_BASE_URL": _WRONG_URL})
     code, out = _run(paths, environ={"ZAI_API_KEY": "k"})
     assert code == 1
@@ -180,7 +180,7 @@ def test_catches_wrong_endpoint(tmp_path):
 
 def test_accepts_zai_endpoint(tmp_path):
     """An api.z.ai base URL → endpoint PASS."""
-    paths = Paths.from_home(tmp_path)
+    paths = Paths.from_home(tmp_path, state_home=tmp_path)
     _write_settings(paths, {"ANTHROPIC_BASE_URL": _ZAI_URL})
     code, out = _run(paths, environ={})
     # No FAIL: settings ok + endpoint ok + key absent (WARN) + probe skipped
@@ -195,7 +195,7 @@ def test_accepts_zai_endpoint(tmp_path):
 
 
 def test_opencode_duplicate_check_skipped_when_absent(tmp_path):
-    paths = Paths.from_home(tmp_path)
+    paths = Paths.from_home(tmp_path, state_home=tmp_path)
     _write_settings(paths, {"ANTHROPIC_BASE_URL": _ZAI_URL})
     code, out = _run(paths, environ={})
     assert code == 0
@@ -203,7 +203,7 @@ def test_opencode_duplicate_check_skipped_when_absent(tmp_path):
 
 
 def test_opencode_duplicate_check_fails_when_unattributable(tmp_path):
-    paths = Paths.from_home(tmp_path)
+    paths = Paths.from_home(tmp_path, state_home=tmp_path)
     _write_settings(paths, {"ANTHROPIC_BASE_URL": _ZAI_URL})
     _write_opencode_duplicate(paths, global_key="user-global", china_key="user-china")
     code, out = _run(paths, environ={})
@@ -213,7 +213,7 @@ def test_opencode_duplicate_check_fails_when_unattributable(tmp_path):
 
 
 def test_opencode_duplicate_check_warns_when_helper_entry_is_attributable(tmp_path):
-    paths = Paths.from_home(tmp_path)
+    paths = Paths.from_home(tmp_path, state_home=tmp_path)
     _write_settings(paths, {"ANTHROPIC_BASE_URL": _ZAI_URL})
     _write_opencode_duplicate(
         paths,
@@ -228,7 +228,7 @@ def test_opencode_duplicate_check_warns_when_helper_entry_is_attributable(tmp_pa
 
 
 def test_opencode_duplicate_check_fails_for_retired_record(tmp_path):
-    paths = Paths.from_home(tmp_path)
+    paths = Paths.from_home(tmp_path, state_home=tmp_path)
     _write_settings(paths, {"ANTHROPIC_BASE_URL": _ZAI_URL})
     _write_opencode_duplicate(
         paths,
@@ -249,7 +249,7 @@ def test_opencode_duplicate_check_fails_for_retired_record(tmp_path):
 
 def test_missing_settings_is_not_configured(tmp_path):
     """An untouched HOME is a valid diagnostic state, not a failure."""
-    paths = Paths.from_home(tmp_path)
+    paths = Paths.from_home(tmp_path, state_home=tmp_path)
     code, out = _run(paths, environ={})
     assert code == 0
     assert "settings.json env block" in out
@@ -258,7 +258,7 @@ def test_missing_settings_is_not_configured(tmp_path):
 
 def test_settings_without_env_block_is_not_configured(tmp_path):
     """A valid settings document without helper configuration only warns."""
-    paths = Paths.from_home(tmp_path)
+    paths = Paths.from_home(tmp_path, state_home=tmp_path)
     _write_settings(paths, None)
     code, out = _run(paths, environ={})
     assert code == 0
@@ -267,7 +267,7 @@ def test_settings_without_env_block_is_not_configured(tmp_path):
 
 def test_settings_without_base_url_is_not_configured(tmp_path):
     """An incomplete env block only warns; malformed JSON is the failure."""
-    paths = Paths.from_home(tmp_path)
+    paths = Paths.from_home(tmp_path, state_home=tmp_path)
     _write_settings(paths, {"OTHER": "x"})
     code, out = _run(paths, environ={})
     assert code == 0
@@ -276,7 +276,7 @@ def test_settings_without_base_url_is_not_configured(tmp_path):
 
 def test_malformed_settings_fails(tmp_path):
     """A broken settings document is a real diagnostic failure."""
-    paths = Paths.from_home(tmp_path)
+    paths = Paths.from_home(tmp_path, state_home=tmp_path)
     paths.claude_settings.parent.mkdir(parents=True)
     paths.claude_settings.write_text("{")
     code, out = _run(paths, environ={})
@@ -300,7 +300,7 @@ def _probe_setup(httpserver, status: int, tmp_path):
     httpserver.expect_request(_PROBE_PATH, method="POST").respond_with_data(
         "ok", status=status
     )
-    paths = Paths.from_home(tmp_path)
+    paths = Paths.from_home(tmp_path, state_home=tmp_path)
     seam, base, host = _httpserver_seam(httpserver)
     _write_settings(paths, {"ANTHROPIC_BASE_URL": base})
     return paths, {"http_get": seam, "extra_zai_hosts": frozenset({host})}
@@ -401,7 +401,7 @@ def test_http_probe_uses_auth_token_from_settings(httpserver: HTTPServer, tmp_pa
 def test_probe_skipped_when_endpoint_fails_no_key_sent(tmp_path):
     """A FAILED endpoint (pointed at Anthropic) → probe SKIPPED, and the key
     is NEVER transmitted. Regression for credential-disclosure finding."""
-    paths = Paths.from_home(tmp_path)
+    paths = Paths.from_home(tmp_path, state_home=tmp_path)
     _write_settings(paths, {"ANTHROPIC_BASE_URL": _WRONG_URL})
 
     def seam_must_not_be_called(_url, _headers, _body):
@@ -418,7 +418,7 @@ def test_probe_skipped_when_endpoint_fails_no_key_sent(tmp_path):
 
 def test_probe_skipped_when_no_base_url_no_key_sent(tmp_path):
     """No base URL → endpoint warns and probe is skipped, no key sent."""
-    paths = Paths.from_home(tmp_path)
+    paths = Paths.from_home(tmp_path, state_home=tmp_path)
     _write_settings(paths, {"OTHER": "x"})  # no ANTHROPIC_BASE_URL → settings FAIL
 
     def seam_must_not_be_called(_url, _headers, _body):
@@ -436,7 +436,7 @@ def test_probe_skipped_for_unrecognized_host_no_key_sent(tmp_path):
     SKIPPED, key NEVER sent. Regression for the round-2 Codex finding: the
     gate must be PASS-only, not just "not FAIL", or an attacker controlling
     ANTHROPIC_BASE_URL harvests the API key."""
-    paths = Paths.from_home(tmp_path)
+    paths = Paths.from_home(tmp_path, state_home=tmp_path)
     _write_settings(paths, {"ANTHROPIC_BASE_URL": "https://attacker.example/api/anthropic"})
 
     def seam_must_not_be_called(_url, _headers, _body):
@@ -564,7 +564,7 @@ def test_offline_is_warn_not_fail(tmp_path):
     ``http_get`` seam returns an offline error — emulating no network. doctor
     must degrade to WARN, not FAIL the run.
     """
-    paths = Paths.from_home(tmp_path)
+    paths = Paths.from_home(tmp_path, state_home=tmp_path)
     _write_settings(paths, {"ANTHROPIC_BASE_URL": _ZAI_URL})
 
     def offline_se(_url, _headers, _body):
@@ -578,7 +578,7 @@ def test_offline_is_warn_not_fail(tmp_path):
 
 def test_no_key_warns_and_skips_probe(tmp_path):
     """No key anywhere → key WARN + probe WARN (skipped); exit 0."""
-    paths = Paths.from_home(tmp_path)
+    paths = Paths.from_home(tmp_path, state_home=tmp_path)
     _write_settings(paths, {"ANTHROPIC_BASE_URL": _ZAI_URL})
     code, out = _run(paths, environ={})
     assert code == 0
@@ -589,7 +589,7 @@ def test_no_key_warns_and_skips_probe(tmp_path):
 
 def test_http_seam_raises_is_warn(tmp_path):
     """A seam that raises (contract violation) → WARN, not a crash."""
-    paths = Paths.from_home(tmp_path)
+    paths = Paths.from_home(tmp_path, state_home=tmp_path)
     _write_settings(paths, {"ANTHROPIC_BASE_URL": _ZAI_URL})
 
     def raising_se(_url, _headers, _body):
@@ -611,7 +611,7 @@ def test_mixed_pass_and_warn_exits_zero(tmp_path):
     settings ok + endpoint ok + no key (WARN) + probe skipped (WARN): the
     canonical "configured but not keyed / offline" state must NOT fail.
     """
-    paths = Paths.from_home(tmp_path)
+    paths = Paths.from_home(tmp_path, state_home=tmp_path)
     _write_settings(paths, {"ANTHROPIC_BASE_URL": _ZAI_URL})
     code, _ = _run(paths, environ={})
     assert code == 0
@@ -619,7 +619,7 @@ def test_mixed_pass_and_warn_exits_zero(tmp_path):
 
 def test_one_fail_exits_one(tmp_path):
     """Any single FAIL → exit 1, even alongside PASSes/WARNs."""
-    paths = Paths.from_home(tmp_path)
+    paths = Paths.from_home(tmp_path, state_home=tmp_path)
     # Wrong endpoint → endpoint FAIL; everything else may pass/warn.
     _write_settings(paths, {"ANTHROPIC_BASE_URL": _WRONG_URL})
     code, _ = _run(paths, environ={"ZAI_API_KEY": "k"})
@@ -633,7 +633,7 @@ def test_one_fail_exits_one(tmp_path):
 
 def test_shell_export_warns(tmp_path):
     """An ``export ANTHROPIC_*`` in ~/.zshrc → WARN (override risk), exit 0."""
-    paths = Paths.from_home(tmp_path)
+    paths = Paths.from_home(tmp_path, state_home=tmp_path)
     _write_settings(paths, {"ANTHROPIC_BASE_URL": _ZAI_URL})
     paths.zshrc.write_text("export ANTHROPIC_BASE_URL=https://example.com\n")
     code, out = _run(paths, environ={})
@@ -644,7 +644,7 @@ def test_shell_export_warns(tmp_path):
 
 def test_no_zshrc_no_shell_check(tmp_path):
     """No ~/.zshrc → no shell-override check emitted at all."""
-    paths = Paths.from_home(tmp_path)
+    paths = Paths.from_home(tmp_path, state_home=tmp_path)
     _write_settings(paths, {"ANTHROPIC_BASE_URL": _ZAI_URL})
     code, out = _run(paths, environ={})
     assert code == 0
@@ -707,7 +707,7 @@ def test_project_settings_override_detects_attacker_url(tmp_path):
     # Write user settings (simulated HOME) with a VALID token and Z.ai URL.
     user_home = tmp_path / "home"
     user_home.mkdir()
-    paths = Paths.from_home(user_home, cwd=project_dir)
+    paths = Paths.from_home(user_home, cwd=project_dir, state_home=user_home)
 
     _write_settings(paths, {"ANTHROPIC_BASE_URL": _ZAI_URL, "ANTHROPIC_AUTH_TOKEN": "real-token"})
 
@@ -756,7 +756,7 @@ def test_local_settings_override_detects_attacker_url(tmp_path):
 
     user_home = tmp_path / "home"
     user_home.mkdir()
-    paths = Paths.from_home(user_home, cwd=project_dir)
+    paths = Paths.from_home(user_home, cwd=project_dir, state_home=user_home)
 
     # User settings: valid Z.ai config with token.
     _write_settings(paths, {"ANTHROPIC_BASE_URL": _ZAI_URL, "ANTHROPIC_AUTH_TOKEN": "real-token"})
