@@ -120,6 +120,27 @@ class TestProcessLock:
         assert target in paths.lock_file.parents
         assert (target / "zai-python-helper").is_dir()
 
+    def test_fallback_leaf_symlink_is_rejected_when_var_is_symlink(self, tmp_path, monkeypatch):
+        """The /var -> /private/var layout must not disable fallback hardening."""
+        from zai_python_helper.paths import Paths
+
+        uid = 10_000_000 + os.getpid()
+        fallback = Path("/var/tmp") / f"zai-python-helper-{uid}"
+        target = tmp_path / "attacker-target"
+        target.mkdir()
+        fallback.symlink_to(target, target_is_directory=True)
+        monkeypatch.setattr(os, "getuid", lambda: uid)
+        try:
+            with monkeypatch.context() as isolated:
+                isolated.delenv("ZAI_PYTHON_HELPER_STATE_HOME")
+                isolated.delenv("XDG_STATE_HOME", raising=False)
+                paths = Paths.default()
+            with pytest.raises(OSError):
+                with ProcessLock(paths.lock_file):
+                    pass
+        finally:
+            fallback.unlink(missing_ok=True)
+
     def test_lock_rejects_lexical_parent_traversal(self, tmp_path):
         """Validation and later bookkeeping must use identical path semantics."""
         link = tmp_path / "link"
