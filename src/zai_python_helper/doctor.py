@@ -752,7 +752,8 @@ def run_doctor(
     results: list[CheckResult] = []
 
     if progress_stream is not None:
-        print("Running health check...", file=progress_stream)
+        # Match the pinned upstream CLI's non-TTY spinner completion prefix.
+        print("- Running health check...", file=progress_stream)
 
     def _emit(result: CheckResult) -> CheckResult:
         results.append(result)
