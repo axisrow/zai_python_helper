@@ -102,8 +102,12 @@ def _open_private_parent(path: Path, *, create: bool, harden: bool = False) -> i
             except BaseException:
                 os.close(next_fd)
                 raise
-            os.close(fd)
+            previous_fd = fd
+            # Transfer ownership before close: if close itself fails, the
+            # outer finally owns only next_fd and cannot double-close a reused
+            # previous descriptor number.
             fd = next_fd
+            os.close(previous_fd)
         result = fd
         fd = -1
         return result
