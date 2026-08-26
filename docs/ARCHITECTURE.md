@@ -134,6 +134,25 @@ bookkeeping out of the Phase-1 HOME artifact set without weakening revert.
 
 ---
 
+## ADR-006: Pinned state-root descriptors and legacy manifest paths (HARD)
+
+State bookkeeping is addressed relative to the validated helper-directory
+descriptor retained by `ProcessLock`. The descriptor is opened with
+`O_NOFOLLOW`, ownership/mode checked, and held until the lock is released;
+manifest and ownership-journal reads, writes, replacement, and removal use
+`dir_fd` operations on it. No state operation re-resolves the configured
+state-root path after lock acquisition. This closes the validation/use TOCTOU
+window for configured symlink roots.
+
+For compatibility, a recovery manifest's historical absolute ownership-journal
+path is treated as legacy metadata, not as an authority for I/O. During the
+transition, both canonical and legacy path spellings are accepted when the
+manifest names `ownership.json`; recovery always writes the journal relative
+to the pinned root. Thus manifests written before state-root canonicalization
+continue to recover without silently migrating or losing their journal update.
+
+**Status:** Accepted for v1.1 (issue #111).
+
 ## v2 live state (decided, deferred implementation)
 
 > Resolved by architecture review; recorded so v1 doesn't preclude it.

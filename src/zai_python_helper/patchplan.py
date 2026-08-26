@@ -198,6 +198,7 @@ def _rewrite_legacy_journal_path(
 # the lock correct both cross-thread and cross-process on every platform.
 _INTRA_LOCKS_GUARD = _threading.Lock()
 _INTRA_LOCKS: dict[str, _threading.Lock] = {}
+_LOCK_CONTEXT = _threading.local()
 
 
 def _intra_lock(path: Path) -> _threading.Lock:
@@ -234,6 +235,10 @@ class ProcessLock:
         self._fd: int | None = None
         self._intra: _threading.Lock | None = None
         self._held_intra = False
+        # The validated helper directory is pinned for the whole lock scope.
+        # State files must be addressed through this descriptor, never by
+        # resolving ``self.path`` again (issue #111).
+        self.root_fd: int | None = None
 
     def acquire(self) -> None:
         """Take the in-process lock, then open the file and take flock."""
@@ -245,10 +250,9 @@ class ProcessLock:
         # 2) Cross-process serialization (flock). Create the file + parent dir.
         try:
             parent_fd = _ensure_private_parent(self.path)
-            try:
-                self._fd = os_open_at(parent_fd, self.path.name, self.path)
-            finally:
-                os.close(parent_fd)
+            self.root_fd = parent_fd
+            self._fd = os_open_at(parent_fd, self.path.name, self.path)
+            _LOCK_CONTEXT.root_fd = self.root_fd
             fcntl.flock(self._fd, fcntl.LOCK_EX)
         except BaseException:
             # Close the fd we opened (if flock failed) and release the intra
@@ -259,6 +263,12 @@ class ProcessLock:
                 with contextlib.suppress(OSError):
                     close_fd(self._fd)
                 self._fd = None
+            if self.root_fd is not None:
+                with contextlib.suppress(OSError):
+                    os.close(self.root_fd)
+                self.root_fd = None
+            if getattr(_LOCK_CONTEXT, "root_fd", None) is not None:
+                _LOCK_CONTEXT.root_fd = None
             self._release_intra()
             raise
 
@@ -275,6 +285,12 @@ class ProcessLock:
             with contextlib.suppress(OSError):
                 close_fd(self._fd)
             self._fd = None
+        if self.root_fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(self.root_fd)
+            self.root_fd = None
+        if getattr(_LOCK_CONTEXT, "root_fd", None) is not None:
+            _LOCK_CONTEXT.root_fd = None
         self._release_intra()
 
     def __enter__(self) -> ProcessLock:
@@ -324,6 +340,37 @@ def close_fd(fd: int) -> None:
     import os
 
     os.close(fd)
+
+
+def _read_at(root_fd: int, name: str) -> str:
+    """Read a state file relative to a pinned helper-directory fd."""
+    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=root_fd)
+    try:
+        with os.fdopen(fd, "r", encoding="utf-8") as stream:
+            return stream.read()
+    except OSError:
+        os.close(fd)
+        raise
+
+
+def _atomic_write_at(root_fd: int, name: str, data: bytes, mode: int) -> None:
+    """Atomically replace a state file without leaving the pinned directory."""
+    # mkstemp has no dir_fd parameter; use O_EXCL with a random tempfile name
+    # while keeping both creation and rename descriptor-relative.
+    temporary = f".{name}.{next(tempfile._get_candidate_names())}.tmp"
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode, dir_fd=root_fd)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary, mode, dir_fd=root_fd)
+        os.replace(temporary, name, src_dir_fd=root_fd, dst_dir_fd=root_fd)
+        os.fsync(root_fd)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(temporary, dir_fd=root_fd)
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -407,6 +454,8 @@ def _write_manifest(
     path: Path,
     entries: list[_RecoveryEntry],
     journal: _RecoveryEntry | None = None,
+    *,
+    root_fd: int | None = None,
 ) -> None:
     """Persist the recovery manifest atomically at 0600 (may carry secrets).
 
@@ -422,11 +471,14 @@ def _write_manifest(
     text = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
     from zai_python_helper.ownership import _atomic_write_secret
 
-    _atomic_write_secret(path, text.encode("utf-8"))
+    if root_fd is None:
+        _atomic_write_secret(path, text.encode("utf-8"))
+    else:
+        _atomic_write_at(root_fd, path.name, text.encode("utf-8"), _SECURE_FILE_MODE)
 
 
 def _read_manifest(
-    path: Path, paths: Paths
+    path: Path, paths: Paths, *, root_fd: int | None = None
 ) -> tuple[list[_RecoveryEntry], _RecoveryEntry | None]:
     """Parse a recovery manifest → ``(entries, journal)``.
 
@@ -439,10 +491,14 @@ def _read_manifest(
     ``journal`` is the ownership journal's intended final content when the
     interrupted run carried one (issue #60), else ``None``.
     """
-    if not path.exists():
-        return [], None
     try:
-        doc = json.loads(path.read_text(encoding="utf-8"))
+        if root_fd is None:
+            if not path.exists():
+                return [], None
+            raw = path.read_text(encoding="utf-8")
+        else:
+            raw = _read_at(root_fd, path.name)
+        doc = json.loads(raw)
     except (OSError, json.JSONDecodeError):
         return [], None
     if not isinstance(doc, dict):
@@ -462,10 +518,13 @@ def _read_manifest(
     raw_journal_path = (
         str(raw_journal.get("path", "")) if isinstance(raw_journal, dict) else ""
     )
-    journal_path_matches = raw_journal_path == str(paths.ownership_json) or (
-        bool(raw_journal_path)
-        and os.path.realpath(raw_journal_path)
-        == os.path.realpath(paths.ownership_json)
+    # The manifest itself is read from the pinned helper directory.  The
+    # stored path is legacy metadata and is deliberately not canonicalized:
+    # accept old symlink/relative spellings, but always replay ownership.json
+    # in the pinned directory (the transition policy is documented in ADR-006).
+    journal_path_matches = (
+        isinstance(raw_journal, dict)
+        and Path(raw_journal_path).name == paths.ownership_json.name
     )
     journal = (
         _RecoveryEntry.from_dict(raw_journal)
@@ -478,13 +537,16 @@ def _read_manifest(
     return entries, journal
 
 
-def _remove_manifest(path: Path) -> None:
+def _remove_manifest(path: Path, *, root_fd: int | None = None) -> None:
     """Delete the recovery manifest (commit complete). Best-effort + silent."""
     with contextlib.suppress(FileNotFoundError, OSError):
-        path.unlink()
+        if root_fd is None:
+            path.unlink()
+        else:
+            os.unlink(path.name, dir_fd=root_fd)
 
 
-def _apply_entry(entry: _RecoveryEntry) -> None:
+def _apply_entry(entry: _RecoveryEntry, *, root_fd: int | None = None) -> None:
     """Write one recovery entry to disk atomically (idempotent replay)."""
     data = entry.content.encode("utf-8")
     if entry.tag == "ownership":
@@ -493,7 +555,10 @@ def _apply_entry(entry: _RecoveryEntry) -> None:
         # crash; config entries use the upstream-parity 0644 writer.
         from zai_python_helper.ownership import _atomic_write_secret
 
-        _atomic_write_secret(Path(entry.path), data)
+        if root_fd is None:
+            _atomic_write_secret(Path(entry.path), data)
+        else:
+            _atomic_write_at(root_fd, "ownership.json", data, _SECURE_FILE_MODE)
         return
     from zai_python_helper.backends import atomic_write_bytes
 
@@ -535,24 +600,26 @@ def recover(paths: Paths) -> list[str]:
         The list of tags (e.g. ``["settings", "zshrc"]``) that recovery
         wrote, in manifest order. Empty if no manifest existed.
     """
-    with ProcessLock(paths.lock_file):
-        entries, journal = _read_manifest(paths.recovery_json, paths)
+    with ProcessLock(paths.lock_file) as lock:
+        # The context is intentionally explicit so future state I/O cannot
+        # accidentally regress to path-based access.
+        entries, journal = _read_manifest(paths.recovery_json, paths, root_fd=lock.root_fd)
         if not entries and journal is None:
             # An absent/empty manifest means nothing to recover. Ensure no
             # stale (e.g. zero-byte) manifest lingers.
-            _remove_manifest(paths.recovery_json)
+            _remove_manifest(paths.recovery_json, root_fd=lock.root_fd)
             return []
         applied = []
         for entry in entries:
-            _apply_entry(entry)
+            _apply_entry(entry, root_fd=lock.root_fd)
             applied.append(entry.tag)
         # Replay the ownership journal LAST, mirroring commit order: the
         # journal's ``active=False`` retirement only becomes durable once the
         # RESTORE it describes is durable (issue #60). It is not reported as a
         # recovered tag — it is bookkeeping, not a managed config file.
         if journal is not None:
-            _apply_entry(journal)
-        _remove_manifest(paths.recovery_json)
+            _apply_entry(journal, root_fd=lock.root_fd)
+        _remove_manifest(paths.recovery_json, root_fd=lock.root_fd)
         return applied
 
 
@@ -622,19 +689,25 @@ def apply_plan_locked(
     # Persist the manifest BEFORE any managed-file write so a crash at any
     # later point is recoverable. The manifest holds final content, so
     # recovery is a pure replay (no re-read of live state).
-    _write_manifest(paths.recovery_json, entries, journal_entry)
+    # apply_plan_locked is only public as a lock-scoped operation.  Use the
+    # held descriptor when available; path fallback is retained for callers
+    # that provide a compatible lock implementation in tests.
+    root_fd = getattr(_LOCK_CONTEXT, "root_fd", None)
+    _write_manifest(paths.recovery_json, entries, journal_entry, root_fd=root_fd)
     # Commit every file. On FULL success, drop the manifest (commit complete).
     # On a PARTIAL failure, LEAVE the manifest so the next invocation rolls
     # forward — deleting it here would strand mixed state with no recovery
     # path (S3 regression fix, Codex finding #4).
     for entry in entries:
+        # These are user configuration paths, not state-root paths. Keep the
+        # original call shape as an intentional test/extension seam.
         _apply_entry(entry)
     # Journal LAST: its ``active=False`` retirement must not become durable
     # before the RESTORE it describes (issue #60). If we die here, the manifest
     # survives and recovery finishes both halves.
     if journal_entry is not None:
-        _apply_entry(journal_entry)
-    _remove_manifest(paths.recovery_json)
+        _apply_entry(journal_entry, root_fd=root_fd)
+    _remove_manifest(paths.recovery_json, root_fd=root_fd)
     return written
 
 
@@ -659,7 +732,7 @@ def apply_plan_under_lock(
     file write; if it raises, the lock is released and no manifest is written.
     ``journal_content`` is forwarded unchanged (see :func:`apply_plan_locked`).
     """
-    with ProcessLock(paths.lock_file):
+    with ProcessLock(paths.lock_file) as lock:
         return apply_plan_locked(
             paths, plan, on_locked=on_locked, journal_content=journal_content
         )

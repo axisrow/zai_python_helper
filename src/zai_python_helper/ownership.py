@@ -547,7 +547,7 @@ class OwnershipJournal:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
 
-    def read(self) -> dict[str, Any]:
+    def read(self, *, root_fd: int | None = None) -> dict[str, Any]:
         """Parse the journal file → dict, or ``{}`` if absent/empty.
 
         A malformed journal raises :class:`ConfigurationError` (never a bare
@@ -556,10 +556,23 @@ class OwnershipJournal:
         """
         from zai_python_helper.errors import ConfigurationError
 
-        if not self.path.exists():
-            return {}
         try:
-            text = self.path.read_text(encoding="utf-8")
+            if root_fd is None:
+                if not self.path.exists():
+                    return {}
+                text = self.path.read_text(encoding="utf-8")
+            else:
+                fd = os.open(self.path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=root_fd)
+                try:
+                    with os.fdopen(fd, "r", encoding="utf-8") as stream:
+                        text = stream.read()
+                except OSError:
+                    os.close(fd)
+                    raise
+        except FileNotFoundError:
+            if root_fd is not None:
+                return {}
+            raise
         except OSError as e:
             raise ConfigurationError(f"Failed to read {self.path}: {e}") from e
         if not text.strip():
@@ -575,6 +588,18 @@ class OwnershipJournal:
             )
         return doc
 
+    def exists(self, *, root_fd: int | None = None) -> bool:
+        """Test existence without re-resolving the state-root path."""
+        if root_fd is None:
+            return self.path.exists()
+        try:
+            fd = os.open(self.path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=root_fd)
+        except FileNotFoundError:
+            return False
+        else:
+            os.close(fd)
+            return True
+
     @staticmethod
     def render(records: dict[str, Any]) -> str:
         """Serialize ``records`` to the exact on-disk journal text.
@@ -588,14 +613,20 @@ class OwnershipJournal:
         """
         return json.dumps(records or {}, indent=2, ensure_ascii=False) + "\n"
 
-    def write(self, records: dict[str, Any]) -> None:
+    def write(self, records: dict[str, Any], *, root_fd: int | None = None) -> None:
         """Serialize ``records`` to pretty JSON and write atomically at 0600.
 
         The file is created mode ``0600`` (credentials may be present) via the
         temp+fsync+``os.replace`` path, so a crash never leaves a partial or
         world-readable journal. Rendering is :meth:`render`.
         """
-        _atomic_write_secret(self.path, self.render(records).encode("utf-8"))
+        data = self.render(records).encode("utf-8")
+        if root_fd is None:
+            _atomic_write_secret(self.path, data)
+            return
+        from zai_python_helper.patchplan import _atomic_write_at
+
+        _atomic_write_at(root_fd, self.path.name, data, _JOURNAL_FILE_MODE)
 
 
 def _atomic_write_secret(path: Path, data: bytes) -> None:
