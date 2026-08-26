@@ -1,5 +1,6 @@
 """Smoke tests for CLI argument parsing and --help output."""
 
+import os
 import subprocess
 import sys
 
@@ -81,6 +82,25 @@ def test_invoke_status():
     assert "Claude Code" in result.stdout
     # Captured stdout is not a tty → plain text, no ANSI escapes.
     assert "\033[" not in result.stdout
+
+
+def test_invoke_doctor_empty_home_uses_health_stdout_and_progress_stderr(tmp_path):
+    """An empty HOME is diagnostic success; results/progress use their channels."""
+    env = {
+        "HOME": str(tmp_path),
+        "PATH": "/usr/bin:/bin",
+        "PYTHONPATH": os.path.join(os.getcwd(), "src"),
+    }
+    result = subprocess.run(
+        [sys.executable, "-m", "zai_python_helper", "doctor"],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert result.returncode == 0
+    assert "settings.json env block" in result.stdout
+    assert "Running health check..." in result.stderr
+    assert "Running health check..." not in result.stdout
 
 
 def test_invoke_list():

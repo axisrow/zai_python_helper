@@ -247,31 +247,41 @@ def test_opencode_duplicate_check_fails_for_retired_record(tmp_path):
 # --------------------------------------------------------------------------- #
 
 
-def test_missing_settings_fails(tmp_path):
-    """No settings.json at all → settings FAIL → exit 1."""
+def test_missing_settings_is_not_configured(tmp_path):
+    """An untouched HOME is a valid diagnostic state, not a failure."""
     paths = Paths.from_home(tmp_path)
     code, out = _run(paths, environ={})
-    assert code == 1
+    assert code == 0
     assert "settings.json env block" in out
-    assert "not found" in out
+    assert "not configured" in out
 
 
-def test_settings_without_env_block_fails(tmp_path):
-    """settings.json with no env mapping → settings FAIL."""
+def test_settings_without_env_block_is_not_configured(tmp_path):
+    """A valid settings document without helper configuration only warns."""
     paths = Paths.from_home(tmp_path)
     _write_settings(paths, None)
     code, out = _run(paths, environ={})
-    assert code == 1
-    assert "missing or unreadable env block" in out
+    assert code == 0
+    assert "not configured" in out
 
 
-def test_settings_without_base_url_fails(tmp_path):
-    """env block present but no ANTHROPIC_BASE_URL → settings FAIL."""
+def test_settings_without_base_url_is_not_configured(tmp_path):
+    """An incomplete env block only warns; malformed JSON is the failure."""
     paths = Paths.from_home(tmp_path)
     _write_settings(paths, {"OTHER": "x"})
     code, out = _run(paths, environ={})
-    assert code == 1
+    assert code == 0
     assert "no ANTHROPIC_BASE_URL" in out
+
+
+def test_malformed_settings_fails(tmp_path):
+    """A broken settings document is a real diagnostic failure."""
+    paths = Paths.from_home(tmp_path)
+    paths.claude_settings.parent.mkdir(parents=True)
+    paths.claude_settings.write_text("{")
+    code, out = _run(paths, environ={})
+    assert code == 1
+    assert "unreadable settings" in out
 
 
 # --------------------------------------------------------------------------- #
@@ -407,7 +417,7 @@ def test_probe_skipped_when_endpoint_fails_no_key_sent(tmp_path):
 
 
 def test_probe_skipped_when_no_base_url_no_key_sent(tmp_path):
-    """No base URL at all → endpoint FAIL → probe skipped, no key sent."""
+    """No base URL → endpoint warns and probe is skipped, no key sent."""
     paths = Paths.from_home(tmp_path)
     _write_settings(paths, {"OTHER": "x"})  # no ANTHROPIC_BASE_URL → settings FAIL
 
@@ -417,7 +427,7 @@ def test_probe_skipped_when_no_base_url_no_key_sent(tmp_path):
     code, out = _run(
         paths, environ={"ZAI_API_KEY": "secret"}, http_get=seam_must_not_be_called
     )
-    assert code == 1
+    assert code == 0
     assert "skipped" in out
 
 

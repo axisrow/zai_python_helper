@@ -918,9 +918,11 @@ def _handle_doctor(args: argparse.Namespace) -> int:
     (``0`` unless a check FAILs; WARNs alone → ``0``) and its own rendering,
     so this handler neither prints nor catches — it just returns the int.
     """
+    import sys
+
     from zai_python_helper.doctor import run_doctor
 
-    return run_doctor(Paths.default())
+    return run_doctor(Paths.default(), progress_stream=sys.stderr)
 
 
 # --------------------------------------------------------------------------- #

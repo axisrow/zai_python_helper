@@ -9,7 +9,8 @@ no network, and one tool being down must not abort the rest of the run.
 Per tool (Claude Code first — the v1 front door), the chain is:
 
   1. **settings.json env block** — present + carries ``ANTHROPIC_BASE_URL``
-     (the postcondition source). Missing/unreadable → FAIL.
+     (the postcondition source). Missing/incomplete → WARN; malformed JSON →
+     FAIL.
   2. **Z.ai endpoint postcondition** — ``ANTHROPIC_BASE_URL`` host matches a
      known Z.ai region host (``api.z.ai`` / ``api.zai.cn``). A non-Z.ai host
      (e.g. left pointing at the real Anthropic, or a typo) → FAIL: the chain
@@ -308,26 +309,20 @@ def _read_settings_env(paths: Paths) -> dict[str, str] | None:
     The two "absent" cases are deliberately conflated: doctor's first check
     reports "no env block" either way, and downstream checks key off None.
 
-    Any read/parse error is folded to None — doctor treats an unreadable
-    settings.json the same as a missing one at this layer (the check result
-    will surface the reason). Uses JsonBackend through the resolver (S2 layer),
-    per the security fix requirement.
+    Malformed settings are allowed to propagate so the diagnostic can
+    distinguish a real configuration problem from an unconfigured HOME.
 
     READ-ONLY: performs zero writes; only reads through the resolver.
     """
-    try:
-        # Extract home from claude_settings (~/home/.claude/settings.json -> ~/home)
-        home = paths.claude_settings.parent.parent.parent
-        return resolve_effective_env(
-            user_settings_path=paths.claude_settings,
-            project_settings_path=paths.project_claude_settings,
-            local_settings_path=paths.local_claude_settings,
-            cwd=paths.cwd,
-            home=home,
-        )
-    except Exception:
-        # Fold any read/parse error to None — doctor reports, never raises.
-        return None
+    # Extract home from claude_settings (~/home/.claude/settings.json -> ~/home)
+    home = paths.claude_settings.parent.parent.parent
+    return resolve_effective_env(
+        user_settings_path=paths.claude_settings,
+        project_settings_path=paths.project_claude_settings,
+        local_settings_path=paths.local_claude_settings,
+        cwd=paths.cwd,
+        home=home,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -339,31 +334,41 @@ def _check_settings_env(paths: Paths) -> tuple[CheckResult, dict[str, str] | Non
     """settings.json carries an ``env`` block (the postcondition source).
 
     Returns the check result AND the parsed env block (for downstream checks)
-    so the file is read exactly once. A missing/unreadable file or a missing
-    env block is a FAIL — without settings there is no configured chain.
+    so the file is read exactly once. An absent or incomplete configuration is
+    a WARN because an untouched HOME is a valid diagnostic state. Malformed
+    JSON is a FAIL.
     """
     name = "settings.json env block"
     if not paths.claude_settings.exists():
         result = CheckResult(
             name=name,
-            verdict="fail",
-            detail=f"not found at {paths.claude_settings}",
+            verdict="warn",
+            detail=f"not configured (no file at {paths.claude_settings})",
             hint="run `zai-python-helper use zai` to configure Claude Code",
         )
         return result, None
-    env = _read_settings_env(paths)
-    if env is None:
+    try:
+        env = _read_settings_env(paths)
+    except Exception as exc:  # noqa: BLE001 - render config failures as checks.
         result = CheckResult(
             name=name,
             verdict="fail",
-            detail="missing or unreadable env block",
+            detail=f"unreadable settings: {exc}",
+            hint="fix the settings JSON before running doctor again",
+        )
+        return result, None
+    if env is None:
+        result = CheckResult(
+            name=name,
+            verdict="warn",
+            detail="not configured (no env block)",
             hint="settings.json has no `env` mapping or failed to parse",
         )
         return result, None
     if "ANTHROPIC_BASE_URL" not in env:
         result = CheckResult(
             name=name,
-            verdict="fail",
+            verdict="warn",
             detail="env block has no ANTHROPIC_BASE_URL",
             hint="run `zai-python-helper use zai` to set the Z.ai endpoint",
         )
@@ -400,7 +405,12 @@ def _check_zai_endpoint(
     """
     name = "Z.ai endpoint"
     if env is None:
-        return CheckResult(name=name, verdict="fail", detail="no base URL", hint="")
+        return CheckResult(
+            name=name,
+            verdict="warn",
+            detail="not configured (no base URL)",
+            hint="run `zai-python-helper use zai` to configure Claude Code",
+        )
     base_url = env.get("ANTHROPIC_BASE_URL", "")
     host = _host_of(base_url)
     trusted = _ZAI_HOSTS | (extra_hosts or frozenset())
@@ -700,6 +710,7 @@ def run_doctor(
     environ: Mapping[str, str] | None = None,
     color: bool | None = None,
     extra_zai_hosts: frozenset[str] | None = None,
+    progress_stream=None,
 ) -> int:
     """Run the doctor diagnostic pipeline and print verdicts.
 
@@ -728,6 +739,8 @@ def run_doctor(
             for the credentialed probe). Production passes ``None`` — only the
             canonical region hosts are trusted, so an unrecognized host never
             silently receives the API key. Tests pass the httpserver host.
+        progress_stream: optional stream for service/progress output. The CLI
+            uses stderr so health-check results remain on stdout.
 
     Returns:
         ``0`` if no check has verdict ``"fail"``; ``1`` otherwise. WARNs do
@@ -737,6 +750,9 @@ def run_doctor(
     """
     env = environ if environ is not None else os.environ
     results: list[CheckResult] = []
+
+    if progress_stream is not None:
+        print("Running health check...", file=progress_stream)
 
     def _emit(result: CheckResult) -> CheckResult:
         results.append(result)
