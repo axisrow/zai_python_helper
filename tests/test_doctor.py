@@ -217,12 +217,12 @@ def test_cli_doctor_rejects_unknown_plan(monkeypatch, tmp_path, capsys):
     paths = Paths.from_home(tmp_path)
     _write_cli_config(paths, plan="glm_coding_plan_typo")
     _write_settings(paths, None)
+    class _UnexpectedOpener:
+        def open(self, *_args, **_kwargs):
+            raise AssertionError("unknown plan must not make a request")
+
     monkeypatch.setattr(
-        doctor.urllib.request,
-        "urlopen",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("unknown plan must not make a request")
-        ),
+        doctor.urllib.request, "build_opener", lambda *_args: _UnexpectedOpener()
     )
     assert run_cli_doctor(paths) == 0
     out = capsys.readouterr().out
