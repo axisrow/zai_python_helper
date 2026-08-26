@@ -187,8 +187,17 @@ class TestUseDefault:
 
     def test_default_removes_zshrc_block_keeps_foreign(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HOME", str(tmp_path))
-        _seed(tmp_path, zshrc="export PATH=/bin\n")
-        _run(["use", "zai", "--api-key", TOKEN])
+        # A block can only be present from a pre-Phase-1 activation: fresh
+        # activation intentionally leaves .zshrc untouched.
+        _seed(
+            tmp_path,
+            zshrc=(
+                "export PATH=/bin\n\n"
+                "# >>> zai-python-helper managed >>>\n"
+                "# legacy managed body\n"
+                "# <<< zai-python-helper managed <<<\n"
+            ),
+        )
         _run(["use", "default", "--region", "global"])
 
         text = Paths.from_home(tmp_path).zshrc.read_text()

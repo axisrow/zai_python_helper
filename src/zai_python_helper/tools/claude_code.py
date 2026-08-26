@@ -110,16 +110,21 @@ class ClaudeCodeTool(Tool):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _phase1_config_plan(plan: PatchPlan) -> PatchPlan:
+    def _phase1_config_plan(
+        plan: PatchPlan, *, include_legacy_zshrc_cleanup: bool = False
+    ) -> PatchPlan:
         """Keep execution byte-compatible: Phase 1 never edits ``.zshrc``.
 
         The pure planner retains the owned shell-block transform for callers
-        that explicitly use that API.  The upstream execution path does not
-        create or modify a shell rc file, however, so the adapter excludes
-        that optional bookkeeping delta from normal activation/revert.
+        that explicitly use that API.  The upstream activation path does not
+        create or modify a shell rc file, however, so normal activation
+        excludes that optional bookkeeping delta.  Revert opts into the
+        cleanup only to remove blocks left by pre-Phase-1 versions.
         """
         return PatchPlan(deltas=tuple(
-            delta for delta in plan.deltas if delta.tag != FileTag.ZSHRC
+            delta
+            for delta in plan.deltas
+            if include_legacy_zshrc_cleanup or delta.tag != FileTag.ZSHRC
         ))
 
     def plan_zai(
@@ -147,11 +152,14 @@ class ClaudeCodeTool(Tool):
         decisions: dict[str, Any],
         journal_records: dict[str, Any] | None = None,
     ) -> PatchPlan:
-        return self._phase1_config_plan(cc_plan_revert(
-            decisions,
-            settings_doc=state.get(FileTag.SETTINGS),
-            zshrc_text=state.get(FileTag.ZSHRC, ""),
-        ))
+        return self._phase1_config_plan(
+            cc_plan_revert(
+                decisions,
+                settings_doc=state.get(FileTag.SETTINGS),
+                zshrc_text=state.get(FileTag.ZSHRC, ""),
+            ),
+            include_legacy_zshrc_cleanup=True,
+        )
 
     # ------------------------------------------------------------------
     # Ownership descriptor

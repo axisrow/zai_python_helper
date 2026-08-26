@@ -398,8 +398,8 @@ class TestPostconditions:
             zshrc_text="",
         )
 
-    def test_missing_block_fails(self):
-        assert not postconditions(
+    def test_missing_block_is_allowed_in_phase1(self):
+        assert postconditions(
             Region.GLOBAL,
             settings_doc={
                 "env": {"ANTHROPIC_AUTH_TOKEN": "x", "ANTHROPIC_BASE_URL": GLOBAL_URL}
