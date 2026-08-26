@@ -529,7 +529,20 @@ def write_config(path: Path, doc: dict[str, Any]) -> None:
     """
     from zai_python_helper.backends import JsonBackend
 
-    JsonBackend.write(Path(path), doc)
+    config_path = Path(path)
+    # OpenCode's upstream MCP manager renders opencode.json with four-space
+    # indentation (the same format used by its activate/revert writer).  The
+    # other tool managers use the backend default of two spaces.  Keep the
+    # writer seam's simple ``(path, doc)`` contract while selecting the
+    # tool-specific format from the canonical path.
+    indent = (
+        4
+        if config_path.name == "opencode.json"
+        and config_path.parent.name == "opencode"
+        and config_path.parent.parent.name == ".config"
+        else 2
+    )
+    JsonBackend.write(config_path, doc, indent=indent)
 
 
 # --------------------------------------------------------------------------- #
