@@ -96,6 +96,9 @@ class TestProcessLock:
             with ProcessLock(state_root / "zai-python-helper" / "home" / "lock"):
                 pass
         assert not (target / "zai-python-helper").exists()
+        state_root.unlink()
+        with ProcessLock(state_root / "zai-python-helper" / "home" / "lock"):
+            pass
 
     def test_precreated_lock_symlink_is_rejected(self, tmp_path):
         """The lock itself must also be opened without following symlinks."""

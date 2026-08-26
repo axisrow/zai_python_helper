@@ -85,8 +85,7 @@ def _ensure_private_parent(path: Path) -> None:
             except BaseException:
                 os.close(next_fd)
                 raise
-            finally:
-                os.close(fd)
+            os.close(fd)
             fd = next_fd
     finally:
         os.close(fd)
@@ -226,8 +225,8 @@ class ProcessLock:
         self._intra = intra
         self._held_intra = True
         # 2) Cross-process serialization (flock). Create the file + parent dir.
-        _ensure_private_parent(self.path)
         try:
+            _ensure_private_parent(self.path)
             self._fd = os_open(self.path)
             fcntl.flock(self._fd, fcntl.LOCK_EX)
         except BaseException:

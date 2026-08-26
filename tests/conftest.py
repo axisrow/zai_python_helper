@@ -15,12 +15,39 @@ import pytest
 
 @pytest.fixture(scope="session", autouse=True)
 def _no_new_production_state_artifacts():
-    """Tests must not create durable production state under /var/tmp."""
+    """Tests must not create or modify durable production state under /var/tmp."""
     root = Path("/var/tmp")
-    before = set(root.glob("zai-python-helper-*"))
+
+    def snapshot():
+        state = {}
+        for entry in root.glob("zai-python-helper-*"):
+            if entry.is_symlink():
+                state[str(entry)] = ("symlink", entry.readlink())
+                continue
+            if entry.is_dir():
+                for path in (entry, *entry.rglob("*")):
+                    if path.is_symlink():
+                        state[str(path)] = ("symlink", path.readlink())
+                    elif path.is_file():
+                        stat_result = path.stat()
+                        state[str(path)] = (
+                            "file",
+                            stat_result.st_mode,
+                            path.read_bytes(),
+                        )
+                    elif path.is_dir():
+                        state[str(path)] = ("dir", path.stat().st_mode)
+            elif entry.is_file():
+                state[str(entry)] = ("file", entry.stat().st_mode, entry.read_bytes())
+        return state
+
+    before = snapshot()
     yield
-    leaked = set(root.glob("zai-python-helper-*")) - before
-    assert not leaked, f"test leaked production state into /var/tmp: {sorted(leaked)}"
+    after = snapshot()
+    leaked = sorted(set(before) ^ set(after))
+    changed = sorted(path for path in set(before) & set(after) if before[path] != after[path])
+    leaked.extend(changed)
+    assert not leaked, f"test leaked production state into /var/tmp: {leaked}"
 
 
 @pytest.fixture(autouse=True)
