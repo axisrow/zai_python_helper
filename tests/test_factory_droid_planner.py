@@ -397,6 +397,10 @@ class TestRegionHelpers:
         assert set(fd.revert_key_set()) == {
             "customModels.anthropic.apiKey",
             "customModels.openai.apiKey",
+            "customModels.anthropic.displayName",
+            "customModels.openai.displayName",
+            "customModels.anthropic.provider",
+            "customModels.openai.provider",
         }
 
 

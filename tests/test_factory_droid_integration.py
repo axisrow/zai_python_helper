@@ -40,6 +40,45 @@ def _merge(tool, current, records):
 
 
 class TestApplyAndRevert:
+    def test_revert_restores_legacy_metadata_after_activation(self, tool, tmp_path):
+        """Upgrading old helper entries must remain reversible."""
+        paths = Paths.from_home(tmp_path)
+        spec = _spec()
+        seed = {
+            "customModels": [
+                {
+                    "displayName": "Z.ai GLM Coding Plan (Anthropic)",
+                    "provider": "anthropic",
+                    "model": "glm-4.7",
+                    "maxOutputTokens": 131072,
+                    "baseUrl": "https://api.z.ai/api/anthropic",
+                    "apiKey": "OLD-A",
+                },
+                {
+                    "displayName": "Z.ai GLM Coding Plan (OpenAI)",
+                    "provider": "openai",
+                    "model": "glm-4.7",
+                    "maxOutputTokens": 131072,
+                    "baseUrl": "https://api.z.ai/api/coding/paas/v4",
+                    "apiKey": "OLD-O",
+                },
+            ]
+        }
+        JsonBackend.write(paths.factory_droid, seed)
+        journal = OwnershipJournal(paths.ownership_json)
+
+        with ProcessLock(paths.lock_file):
+            state = tool.read_state(paths)
+            plan = tool.plan_zai(spec, Region.GLOBAL, state=state, auth_token=TOKEN)
+            journal.write(_merge(tool, journal.read(), tool.extract_takeover(plan, state, spec)))
+            apply_plan_locked(paths, plan)
+        with ProcessLock(paths.lock_file):
+            state = tool.read_state(paths)
+            decisions, _ = tool.revert_decisions(journal.read(), state)
+            apply_plan_locked(paths, tool.plan_revert(state=state, decisions=decisions))
+
+        assert _read(paths) == seed
+
     def test_use_zai_writes_two_entries(self, tool, tmp_path):
         paths = Paths.from_home(tmp_path)
         with ProcessLock(paths.lock_file):

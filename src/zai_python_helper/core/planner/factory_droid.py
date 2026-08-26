@@ -498,11 +498,22 @@ def plan_default(
 
 JOURNAL_KEY_ANTHROPIC_APIKEY = "customModels.anthropic.apiKey"
 JOURNAL_KEY_OPENAI_APIKEY = "customModels.openai.apiKey"
+JOURNAL_KEY_ANTHROPIC_DISPLAY_NAME = "customModels.anthropic.displayName"
+JOURNAL_KEY_OPENAI_DISPLAY_NAME = "customModels.openai.displayName"
+JOURNAL_KEY_ANTHROPIC_PROVIDER = "customModels.anthropic.provider"
+JOURNAL_KEY_OPENAI_PROVIDER = "customModels.openai.provider"
 
 
 def revert_key_set() -> tuple[str, ...]:
     """The closed set of journal keys ``use default`` must consider."""
-    return (JOURNAL_KEY_ANTHROPIC_APIKEY, JOURNAL_KEY_OPENAI_APIKEY)
+    return (
+        JOURNAL_KEY_ANTHROPIC_APIKEY,
+        JOURNAL_KEY_OPENAI_APIKEY,
+        JOURNAL_KEY_ANTHROPIC_DISPLAY_NAME,
+        JOURNAL_KEY_OPENAI_DISPLAY_NAME,
+        JOURNAL_KEY_ANTHROPIC_PROVIDER,
+        JOURNAL_KEY_OPENAI_PROVIDER,
+    )
 
 
 def _protocol_for_journal_key(key: str) -> str | None:
@@ -511,6 +522,18 @@ def _protocol_for_journal_key(key: str) -> str | None:
         return PROVIDER_ANTHROPIC
     if key == JOURNAL_KEY_OPENAI_APIKEY:
         return PROVIDER_OPENAI
+    if key in (JOURNAL_KEY_ANTHROPIC_DISPLAY_NAME, JOURNAL_KEY_ANTHROPIC_PROVIDER):
+        return PROVIDER_ANTHROPIC
+    if key in (JOURNAL_KEY_OPENAI_DISPLAY_NAME, JOURNAL_KEY_OPENAI_PROVIDER):
+        return PROVIDER_OPENAI
+    return None
+
+
+def _metadata_field_for_journal_key(key: str) -> str | None:
+    if key in (JOURNAL_KEY_ANTHROPIC_DISPLAY_NAME, JOURNAL_KEY_OPENAI_DISPLAY_NAME):
+        return "displayName"
+    if key in (JOURNAL_KEY_ANTHROPIC_PROVIDER, JOURNAL_KEY_OPENAI_PROVIDER):
+        return "provider"
     return None
 
 
@@ -584,6 +607,12 @@ def apply_revert_decisions(
             (i for i, m in enumerate(models) if _is_our_entry(m) and _protocol_of(m) == proto),
             None,
         )
+        metadata_field = _metadata_field_for_journal_key(key)
+        if metadata_field is not None:
+            if idx is not None and decision.action == RevertAction.RESTORE:
+                if decision.prior_present:
+                    models[idx][metadata_field] = decision.prior_value
+            continue
         if decision.action == RevertAction.RESTORE:
             if decision.prior_present:
                 # Prior had a key → ensure our entry exists with it.
