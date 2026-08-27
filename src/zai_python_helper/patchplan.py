@@ -246,7 +246,7 @@ def state_transaction(paths: Paths):
             raise RuntimeError("ProcessLock acquired without pinned state")
         with contextlib.ExitStack() as stack:
             sources: dict[str, tuple[Path, PinnedStateDirectory]] = {}
-            pending = _read_legacy_handoff(lock.state)
+            _initialized, pending = _read_legacy_handoff(lock.state)
             # Reserve every old lock namespace even when its tree does not yet
             # exist. An already-started old process may be paused before mkdir
             # and must still serialize with this complete transaction.
@@ -273,6 +273,12 @@ def state_transaction(paths: Paths):
                 expected = legacy_candidates[-1][1] / "ownership.json"
                 if pending.journal_path != expected:
                     raise RuntimeError("invalid legacy state handoff record")
+            if (
+                pending is not None
+                and pending.source == "active"
+                and pending.journal_path != paths.ownership_json
+            ):
+                raise RuntimeError("invalid legacy state handoff record")
             for label, legacy_dir, create in legacy_candidates:
                 if legacy_dir == lock.state.path:
                     continue
@@ -316,11 +322,12 @@ def _migrate_legacy_state_locked(
     pre-0.1 HOME state. A secure active-root handoff record makes mirroring and
     source cleanup resumable if the process exits between filesystem steps.
     """
-    pending = _read_legacy_handoff(destination)
+    initialized, pending = _read_legacy_handoff(destination)
     snapshots = {
         label: _snapshot_legacy_state(source)
         for label, (_legacy_dir, source) in sources.items()
     }
+    active_snapshot = _snapshot_legacy_state(destination)
 
     selected: _LegacyGeneration | None = None
     runtime_snapshot = snapshots.get("runtime")
@@ -350,9 +357,20 @@ def _migrate_legacy_state_locked(
         and home_snapshot is not None
         and _has_legacy_state(home_snapshot)
     ):
-        selected = _live_legacy_generation(sources, "home", home_snapshot)
+        if initialized or not _has_legacy_state(active_snapshot):
+            selected = _live_legacy_generation(sources, "home", home_snapshot)
+        else:
+            # Before the first reconciliation, existing active XDG state is a
+            # newer generation than a HOME file left behind by old migration.
+            # Persist this cleanup as a resumable active generation so a crash
+            # cannot make the remaining HOME subset look newly reappeared.
+            selected = _LegacyGeneration(
+                "active", paths.ownership_json, active_snapshot
+            )
 
     if selected is None:
+        if not initialized:
+            _write_legacy_handoff(destination, None)
         return []
 
     _write_legacy_handoff(destination, selected)
@@ -371,9 +389,11 @@ def _migrate_legacy_state_locked(
 
     if selected.source in sources:
         _unlink_legacy_state(sources[selected.source][1])
-    if selected.source == "runtime" and "home" in sources:
+    if selected.source in {"runtime", "active"} and "home" in sources:
         _unlink_legacy_state(sources["home"][1])
     _write_legacy_handoff(destination, None)
+    if selected.source == "active":
+        return []
     return [name for name, data in selected.files.items() if data is not None]
 
 
@@ -419,25 +439,27 @@ def _unlink_legacy_state(source: PinnedStateDirectory) -> None:
 
 def _read_legacy_handoff(
     destination: PinnedStateDirectory,
-) -> _LegacyGeneration | None:
+) -> tuple[bool, _LegacyGeneration | None]:
     try:
         raw = destination.read_text(_LEGACY_HANDOFF_NAME)
     except FileNotFoundError:
-        return None
+        return False, None
     try:
         document = json.loads(raw)
         if not isinstance(document, dict) or document.get("version") != 1:
             raise ValueError
+        if document.get("initialized") is not True:
+            raise ValueError
         progress = document.get("in_progress")
         if progress is None:
-            return None
+            return True, None
         if not isinstance(progress, dict):
             raise ValueError
         label = progress.get("source")
         journal_path = progress.get("journal_path")
         encoded = progress.get("files")
         if (
-            label not in {"runtime", "home"}
+            label not in {"runtime", "home", "active"}
             or not isinstance(journal_path, str)
             or Path(journal_path).name != "ownership.json"
             or not isinstance(encoded, dict)
@@ -454,7 +476,7 @@ def _read_legacy_handoff(
                 files[name] = base64.b64decode(value, validate=True)
             else:
                 raise ValueError
-        return _LegacyGeneration(label, Path(journal_path), files)
+        return True, _LegacyGeneration(label, Path(journal_path), files)
     except (ValueError, TypeError, json.JSONDecodeError) as exc:
         raise RuntimeError("invalid legacy state handoff record") from exc
 
@@ -463,23 +485,23 @@ def _write_legacy_handoff(
     destination: PinnedStateDirectory,
     progress: _LegacyGeneration | None,
 ) -> None:
-    if progress is None:
-        destination.unlink(_LEGACY_HANDOFF_NAME)
-        return
-    encoded_progress = {
-        "source": progress.source,
-        "journal_path": str(progress.journal_path),
-        "files": {
-            name: (
-                None
-                if progress.files[name] is None
-                else base64.b64encode(progress.files[name]).decode()
-            )
-            for name in _LEGACY_STATE_NAMES
-        },
-    }
+    encoded_progress = None
+    if progress is not None:
+        encoded_progress = {
+            "source": progress.source,
+            "journal_path": str(progress.journal_path),
+            "files": {
+                name: (
+                    None
+                    if progress.files[name] is None
+                    else base64.b64encode(progress.files[name]).decode()
+                )
+                for name in _LEGACY_STATE_NAMES
+            },
+        }
     document = {
         "version": 1,
+        "initialized": True,
         "in_progress": encoded_progress,
     }
     data = (json.dumps(document, indent=2, ensure_ascii=False) + "\n").encode()

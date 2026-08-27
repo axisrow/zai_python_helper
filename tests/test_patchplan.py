@@ -278,7 +278,7 @@ def test_migrate_legacy_generation_resumes_after_interruption(
     assert paths.recovery_json.read_bytes() == recovery
     assert not (runtime / "ownership.json").exists()
     assert not (runtime / "recovery.json").exists()
-    assert not handoff.exists()
+    assert json.loads(handoff.read_text())["in_progress"] is None
 
 
 def test_pending_runtime_handoff_resumes_without_live_runtime_candidate(tmp_path):
@@ -305,14 +305,18 @@ def test_pending_runtime_handoff_resumes_without_live_runtime_candidate(tmp_path
             }
         )
     )
-    original = PinnedStateDirectory.unlink
+    original = PinnedStateDirectory.atomic_write
 
-    def interrupt_finalize(state, name, *, missing_ok=True):
-        if state.path == paths.lock_file.parent and name == "legacy-handoff.json":
+    def interrupt_finalize(state, name, data, mode):
+        if (
+            state.path == paths.lock_file.parent
+            and name == "legacy-handoff.json"
+            and json.loads(data)["in_progress"] is None
+        ):
             raise OSError("interrupted handoff finalization")
-        original(state, name, missing_ok=missing_ok)
+        original(state, name, data, mode)
 
-    with mock.patch.object(PinnedStateDirectory, "unlink", interrupt_finalize):
+    with mock.patch.object(PinnedStateDirectory, "atomic_write", interrupt_finalize):
         with pytest.raises(OSError, match="interrupted handoff finalization"):
             migrate_legacy_state(paths)
 
@@ -328,7 +332,69 @@ def test_pending_runtime_handoff_resumes_without_live_runtime_candidate(tmp_path
         assert migrate_legacy_state(resumed) == ["ownership.json", "recovery.json"]
     manifest = json.loads(resumed.recovery_json.read_text())
     assert manifest["journal"]["path"] == str(resumed.ownership_json)
-    assert not (resumed.lock_file.parent / "legacy-handoff.json").exists()
+    handoff = resumed.lock_file.parent / "legacy-handoff.json"
+    assert json.loads(handoff.read_text())["in_progress"] is None
+
+
+def test_initial_reconciliation_preserves_existing_xdg_generation(tmp_path):
+    """An XDG generation outranks HOME debris left by an older migration."""
+    home = tmp_path / "home"
+    home.mkdir()
+    legacy = home / ".zai-python-helper"
+    legacy.mkdir(mode=0o700)
+    (legacy / "ownership.json").write_text('{"source": "stale-home"}\n')
+    (legacy / "recovery.json").write_text('{"source": "stale-home"}\n')
+    paths = Paths.from_home(home, state_home=tmp_path / "xdg-state")
+    with ProcessLock(paths) as lock:
+        assert lock.state is not None
+        lock.state.atomic_write(
+            "ownership.json", b'{"source": "active-xdg"}\n', 0o600
+        )
+        lock.state.atomic_write(
+            "recovery.json", b'{"source": "active-xdg"}\n', 0o600
+        )
+
+    assert migrate_legacy_state(paths) == []
+    assert json.loads(paths.ownership_json.read_text()) == {"source": "active-xdg"}
+    assert json.loads(paths.recovery_json.read_text()) == {"source": "active-xdg"}
+    assert not (legacy / "ownership.json").exists()
+    assert not (legacy / "recovery.json").exists()
+    handoff = json.loads((paths.lock_file.parent / "legacy-handoff.json").read_text())
+    assert handoff["initialized"] is True
+    assert handoff["in_progress"] is None
+
+
+def test_initial_xdg_cleanup_resumes_without_importing_home_subset(tmp_path):
+    """Interrupted stale-HOME cleanup retains the authoritative active snapshot."""
+    home = tmp_path / "home"
+    home.mkdir()
+    legacy = home / ".zai-python-helper"
+    legacy.mkdir(mode=0o700)
+    (legacy / "ownership.json").write_text('{"source": "stale-home"}\n')
+    (legacy / "recovery.json").write_text('{"source": "stale-home"}\n')
+    paths = Paths.from_home(home, state_home=tmp_path / "xdg-state")
+    with ProcessLock(paths) as lock:
+        assert lock.state is not None
+        lock.state.atomic_write(
+            "ownership.json", b'{"source": "active-xdg"}\n', 0o600
+        )
+    original = PinnedStateDirectory.unlink
+
+    def interrupt_cleanup(state, name, *, missing_ok=True):
+        if state.path == legacy and name == "recovery.json":
+            raise OSError("interrupted stale HOME cleanup")
+        original(state, name, missing_ok=missing_ok)
+
+    with mock.patch.object(PinnedStateDirectory, "unlink", interrupt_cleanup):
+        with pytest.raises(OSError, match="interrupted stale HOME cleanup"):
+            migrate_legacy_state(paths)
+
+    assert not (legacy / "ownership.json").exists()
+    assert (legacy / "recovery.json").exists()
+    assert migrate_legacy_state(paths) == []
+    assert json.loads(paths.ownership_json.read_text()) == {"source": "active-xdg"}
+    assert not paths.recovery_json.exists()
+    assert not (legacy / "recovery.json").exists()
 
 
 def test_migrate_legacy_state_waits_for_legacy_process_lock(tmp_path):

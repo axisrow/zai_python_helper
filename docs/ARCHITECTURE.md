@@ -174,7 +174,9 @@ transaction. A secret-grade, descriptor-relative handoff record in the active
 root makes generation mirroring and legacy cleanup resumable after interruption.
 It retains comparison-only journal metadata, while any resumed runtime lock path
 is reconstructed and validated from the fixed legacy namespace rather than
-trusted from the record or current environment overrides.
+trusted from the record or current environment overrides. Its completed state
+also distinguishes stale HOME debris during the first XDG reconciliation from
+a HOME generation that genuinely reappears after lock handoff.
 
 **Status:** Superseded and strengthened for v1.1 (issues #111 and #116).
 
