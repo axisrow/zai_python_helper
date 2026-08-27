@@ -172,6 +172,9 @@ files from different generations are never combined. Reappearing runtime state
 written after a lock handoff replaces the active generation on the next
 transaction. A secret-grade, descriptor-relative handoff record in the active
 root makes generation mirroring and legacy cleanup resumable after interruption.
+It retains comparison-only journal metadata, while any resumed runtime lock path
+is reconstructed and validated from the fixed legacy namespace rather than
+trusted from the record or current environment overrides.
 
 **Status:** Superseded and strengthened for v1.1 (issues #111 and #116).
 

@@ -281,6 +281,56 @@ def test_migrate_legacy_generation_resumes_after_interruption(
     assert not handoff.exists()
 
 
+def test_pending_runtime_handoff_resumes_without_live_runtime_candidate(tmp_path):
+    """Persisted rewrite metadata survives an explicit state-root override."""
+    home = tmp_path / "home"
+    home.mkdir()
+    state_home = home / ".local" / "state"
+    runtime = tmp_path / "legacy-runtime"
+    runtime.mkdir(mode=0o700)
+    paths = replace(
+        Paths.from_home(home, state_home=state_home),
+        legacy_runtime_dir=runtime,
+    )
+    (runtime / "ownership.json").write_text('{"generation": "runtime"}\n')
+    (runtime / "recovery.json").write_text(
+        json.dumps(
+            {
+                "entries": [],
+                "journal": {
+                    "tag": "ownership",
+                    "path": str(runtime / "ownership.json"),
+                    "content": "{}\n",
+                },
+            }
+        )
+    )
+    original = PinnedStateDirectory.unlink
+
+    def interrupt_finalize(state, name, *, missing_ok=True):
+        if state.path == paths.lock_file.parent and name == "legacy-handoff.json":
+            raise OSError("interrupted handoff finalization")
+        original(state, name, missing_ok=missing_ok)
+
+    with mock.patch.object(PinnedStateDirectory, "unlink", interrupt_finalize):
+        with pytest.raises(OSError, match="interrupted handoff finalization"):
+            migrate_legacy_state(paths)
+
+    assert not (runtime / "ownership.json").exists()
+    assert not (runtime / "recovery.json").exists()
+    resumed = Paths.from_home(home, state_home=state_home)
+    assert resumed.legacy_runtime_dir is None
+
+    with mock.patch(
+        "zai_python_helper.patchplan._expected_legacy_runtime_dir",
+        return_value=runtime,
+    ):
+        assert migrate_legacy_state(resumed) == ["ownership.json", "recovery.json"]
+    manifest = json.loads(resumed.recovery_json.read_text())
+    assert manifest["journal"]["path"] == str(resumed.ownership_json)
+    assert not (resumed.lock_file.parent / "legacy-handoff.json").exists()
+
+
 def test_migrate_legacy_state_waits_for_legacy_process_lock(tmp_path):
     """Migration cannot copy/unlink state while an old process is committing."""
     legacy = tmp_path / "legacy-state"
