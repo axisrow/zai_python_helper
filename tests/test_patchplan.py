@@ -781,27 +781,23 @@ class TestProcessLock:
 
         assert (safe / "zai-python-helper").is_dir()
 
-    def test_user_retargetable_home_symlink_fails_closed(
-        self, tmp_path, monkeypatch
+    @pytest.mark.parametrize("entry_kind", ["directory", "symlink"])
+    def test_replaceable_default_home_entry_fails_closed(
+        self, tmp_path, monkeypatch, entry_kind
     ):
-        """A mutable HOME alias cannot split config and state lock domains."""
+        """A replaceable HOME entry cannot split state and lock domains."""
         monkeypatch.delenv("ZAI_PYTHON_HELPER_STATE_HOME")
         monkeypatch.delenv("XDG_STATE_HOME", raising=False)
-        first = tmp_path / "home-a"
-        second = tmp_path / "home-b"
-        first.mkdir()
-        second.mkdir()
         home = tmp_path / "home"
-        home.symlink_to(first, target_is_directory=True)
+        if entry_kind == "symlink":
+            target = tmp_path / "target"
+            target.mkdir()
+            home.symlink_to(target, target_is_directory=True)
+        else:
+            home.mkdir()
         paths = Paths.from_home(home)
 
-        with pytest.raises(PermissionError, match="insecure state symlink"):
-            with ProcessLock(paths):
-                pass
-
-        home.unlink()
-        home.symlink_to(second, target_is_directory=True)
-        with pytest.raises(PermissionError, match="insecure state symlink"):
+        with pytest.raises(PermissionError, match="replaceable managed HOME"):
             with ProcessLock(paths):
                 pass
 

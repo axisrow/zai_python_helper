@@ -807,6 +807,7 @@ Attributes:
 - `lock_file`: `Path`
 - `state_dir`: `Path`
 - `legacy_runtime_dir`: `Path | None`
+- `state_home_follows_home`: `bool`
 - `project_claude_settings`: `Path`
 - `local_claude_settings`: `Path`
 - `cwd`: `Path`

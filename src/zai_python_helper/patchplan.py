@@ -252,6 +252,7 @@ def _open_directory_tree(
     private_paths: set[Path],
     controlled_paths: set[Path],
     allow_user_symlinks: bool,
+    require_stable_final_parent: bool = False,
 ) -> int:
     """Walk, validate, and pin ``directory`` from the filesystem root."""
     if ".." in directory.parts:
@@ -261,7 +262,13 @@ def _open_directory_tree(
     fd = os.open(parts[0] or os.sep, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     current = Path(parts[0] or os.sep)
     try:
-        for part in parts[1:]:
+        for index, part in enumerate(parts[1:]):
+            if require_stable_final_parent and index == len(parts) - 2:
+                parent_st = os.fstat(fd)
+                if parent_st.st_uid != 0 or parent_st.st_mode & 0o022:
+                    raise PermissionError(
+                        f"replaceable managed HOME namespace: {directory}"
+                    )
             current /= part
             next_fd = _open_state_component(
                 fd,
@@ -348,10 +355,8 @@ def _open_transaction_coordinator(paths: Paths | None, state_fd: int) -> int:
         harden=False,
         private_paths=set(),
         controlled_paths={home},
-        # A user-retargetable HOME alias would redirect both the default state
-        # root and path-based config writes between transactions. Root-owned
-        # aliases remain usable because the invoking user cannot replace them.
         allow_user_symlinks=False,
+        require_stable_final_parent=paths.state_home_follows_home,
     )
 
 
@@ -984,10 +989,6 @@ class ProcessLock:
         """Pin state, then take the stable coordinator and state lock leases."""
         if getattr(_LOCK_CONTEXT, "active_lock", None) is not None:
             raise RuntimeError("nested ProcessLock acquisition is forbidden")
-        # State setup itself performs no journal/config I/O. The managed HOME
-        # coordinator is then pinned and locked before the state lock or any
-        # transaction operation, so safe XDG retargets cannot split the lock
-        # domain for commands that mutate the same HOME configuration.
         try:
             parent_fd = _ensure_private_parent(self.path)
             self.state = PinnedStateDirectory(self.path.parent, parent_fd)

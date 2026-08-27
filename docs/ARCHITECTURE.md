@@ -165,8 +165,11 @@ acquisition validates the replacement independently.
 
 The managed-HOME walk is stricter than the configurable state-root walk:
 symlink components are accepted only when their directory entry is below a
-root-owned, non-writable parent. A user-retargetable HOME alias fails closed.
-Otherwise the same alias change could redirect both default state and
+root-owned, non-writable parent. When the state root is the HOME-derived
+default, the HOME entry itself must also live below such a stable parent, so a
+regular directory cannot be renamed and replaced into a fresh state and lock
+domain. A user-retargetable HOME alias or replaceable default HOME fails
+closed. Otherwise the same entry change could redirect both default state and
 path-based tool configuration between acquisitions, splitting the journals and
 coordinator that are supposed to serialize those writes. Root-controlled
 system aliases remain supported because the invoking user cannot retarget

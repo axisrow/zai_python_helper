@@ -75,6 +75,9 @@ class Paths:
     # Pre-#116 production fallback, retained only as a descriptor-validated
     # migration source. It is never selected for new state I/O.
     legacy_runtime_dir: Path | None
+    # Whether the default state root is derived from HOME and therefore moves
+    # with it. ProcessLock uses this to reject a replaceable HOME namespace.
+    state_home_follows_home: bool
     # Project-scoped Claude settings (relative to CWD, if any).
     # Added for issue #23: credential egress gap fix.
     project_claude_settings: Path
@@ -120,11 +123,13 @@ class Paths:
         """
         h = Path(home)
         legacy_runtime_root: Path | None = None
+        state_home_follows_home = False
         # ``state_home`` is an injection seam. When omitted, use the explicit
         # XDG root or its private per-user default and retain the old shared
         # /var/tmp root only as a migration source.
         if state_home is None:
             state_home, legacy_runtime_root = _state_home_from_env(h)
+            state_home_follows_home = legacy_runtime_root is not None
         configured_state_home = Path(state_home)
         home_id = hashlib.sha256(str(h).encode()).hexdigest()[:16]
         # Keep the configured spelling intact.  Resolving it here would make
@@ -150,6 +155,7 @@ class Paths:
                 if legacy_runtime_root is not None
                 else None
             ),
+            state_home_follows_home=state_home_follows_home,
             project_claude_settings=cwd_path / ".claude" / "settings.json",
             local_claude_settings=cwd_path / ".claude" / "settings.local.json",
             cwd=cwd_path,
