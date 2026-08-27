@@ -139,10 +139,22 @@ HOME artifact set without weakening revert.
 
 State bookkeeping is addressed through one explicit `PinnedStateDirectory`
 capability retained by `ProcessLock`. Its helper-directory descriptor is
-opened once with `O_NOFOLLOW`, ownership/mode checked, and held until the lock
-is released. Lock, manifest, and ownership-journal reads, writes, replacement,
-and removal use basename-only `dir_fd` operations on that capability. There is
-no optional descriptor or path-based fallback after lock acquisition.
+opened through a descriptor-relative component walk, ownership/mode checked,
+and held until the lock is released. `Paths` retains the configured XDG spelling
+without probing or resolving it. Existing symlinks are followed only from a
+validated parent that another uid cannot replace; application-owned components
+never follow symlinks, and missing components are created and reopened relative
+to the already-pinned parent. Thus there is no resolve/check followed by a
+separate pathname open. Lock, manifest, and ownership-journal reads, writes,
+replacement, and removal use basename-only `dir_fd` operations on the pinned
+capability, with no path-based fallback after acquisition.
+
+The in-process lock is keyed by the pinned helper-directory `(device, inode)`,
+not by its lexical path. This keeps aliases in one lock domain on BSD systems,
+where a second `flock` in the same process does not itself serialize threads.
+Replacing the configured path after acquisition cannot redirect the held
+capability; a later acquisition validates the replacement independently and
+fails closed for a foreign-owned or writable state root.
 
 `ProcessLock` nesting in one thread is not a supported use case and is rejected
 before a second lock is acquired. The pinned capability is passed explicitly

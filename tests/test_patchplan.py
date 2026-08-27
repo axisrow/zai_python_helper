@@ -564,6 +564,39 @@ def test_state_transaction_fails_closed_for_unpinnable_home_legacy_tree(tmp_path
 
 
 class TestProcessLock:
+    def test_precreated_configured_root_symlink_to_attacker_target_fails_closed(
+        self, tmp_path
+    ):
+        """A hostile root present before Paths construction is never trusted."""
+        attacker = tmp_path / "attacker-state"
+        attacker.mkdir()
+        attacker.chmod(0o777)
+        state_home = tmp_path / "state-link"
+        state_home.symlink_to(attacker, target_is_directory=True)
+
+        paths = Paths.from_home(tmp_path / "home", state_home=state_home)
+
+        with pytest.raises(PermissionError, match="insecure state directory"):
+            with ProcessLock(paths):
+                pass
+        assert not (attacker / "zai-python-helper").exists()
+
+    def test_configured_root_symlink_planted_after_paths_fails_closed(
+        self, tmp_path
+    ):
+        """Pure path construction leaves no later check/use gap to exploit."""
+        state_home = tmp_path / "state-link"
+        paths = Paths.from_home(tmp_path / "home", state_home=state_home)
+        attacker = tmp_path / "attacker-state"
+        attacker.mkdir()
+        attacker.chmod(0o777)
+        state_home.symlink_to(attacker, target_is_directory=True)
+
+        with pytest.raises(PermissionError, match="insecure state directory"):
+            with ProcessLock(paths):
+                pass
+        assert not (attacker / "zai-python-helper").exists()
+
     def test_precreated_lock_symlink_is_rejected(self, tmp_path):
         """The lock itself must also be opened without following symlinks."""
         lock_path = tmp_path / "lock"
@@ -595,8 +628,73 @@ class TestProcessLock:
 
         with ProcessLock(paths.lock_file):
             pass
-        assert target in paths.lock_file.parents
+        assert state_home in paths.lock_file.parents
         assert (target / "zai-python-helper").is_dir()
+
+    def test_state_root_replacement_cannot_redirect_held_capability(self, tmp_path):
+        """A root replacement after flock cannot redirect descriptor I/O."""
+        state_home = tmp_path / "state"
+        paths = Paths.from_home(tmp_path / "home", state_home=state_home)
+        attacker = tmp_path / "attacker"
+        attacker.mkdir()
+        attacker.chmod(0o777)
+        original = tmp_path / "state-original"
+
+        with ProcessLock(paths) as lock:
+            assert lock.state is not None
+            state_home.rename(original)
+            state_home.symlink_to(attacker, target_is_directory=True)
+            lock.state.atomic_write("ownership.json", b'{"pinned": true}\n', 0o600)
+
+        persisted = (
+            original
+            / "zai-python-helper"
+            / paths.lock_file.parent.name
+            / "ownership.json"
+        )
+        assert persisted.read_text() == '{"pinned": true}\n'
+        assert not (attacker / "zai-python-helper").exists()
+        with pytest.raises(PermissionError, match="insecure state directory"):
+            with ProcessLock(paths):
+                pass
+
+    def test_thread_lock_uses_pinned_inode_across_lexical_aliases(
+        self, tmp_path, monkeypatch
+    ):
+        """BSD-style flock semantics cannot bypass the in-process lock by alias."""
+        target = tmp_path / "actual-state"
+        target.mkdir()
+        alias = tmp_path / "state-link"
+        alias.symlink_to(target, target_is_directory=True)
+        direct = Paths.from_home(tmp_path / "home", state_home=target)
+        through_alias = replace(
+            direct,
+            lock_file=alias / direct.lock_file.relative_to(target),
+        )
+        order: list[str] = []
+        first_holds = threading.Event()
+
+        # BSD flock is process-associated and does not serialize two fresh fds
+        # in one process. A no-op accurately isolates our threading layer.
+        monkeypatch.setattr(fcntl, "flock", lambda *_args: None)
+
+        def worker(paths, name, signal=False):
+            with ProcessLock(paths):
+                if signal:
+                    first_holds.set()
+                order.append(f"{name}-enter")
+                time.sleep(0.05 if signal else 0)
+                order.append(f"{name}-exit")
+
+        first = threading.Thread(target=worker, args=(direct, "A", True))
+        second = threading.Thread(target=worker, args=(through_alias, "B"))
+        first.start()
+        assert first_holds.wait(timeout=2)
+        second.start()
+        first.join(timeout=2)
+        second.join(timeout=2)
+
+        assert order == ["A-enter", "A-exit", "B-enter", "B-exit"]
 
     @settings(
         max_examples=12,
@@ -890,15 +988,15 @@ class TestProcessLock:
 
 
 class TestRecover:
-    def test_recover_accepts_legacy_lexical_journal_path(self, tmp_path):
-        """Canonical state roots must preserve pending pre-upgrade journals."""
+    def test_recover_accepts_legacy_canonical_journal_path(self, tmp_path):
+        """Lexical state roots preserve pending pre-upgrade canonical journals."""
         target = tmp_path / "state-target"
         target.mkdir()
         state_link = tmp_path / "state-link"
         state_link.symlink_to(target, target_is_directory=True)
         paths = Paths.from_home(tmp_path, state_home=state_link)
         paths.recovery_json.parent.mkdir(parents=True)
-        old_journal = state_link / paths.ownership_json.relative_to(target)
+        old_journal = target / paths.ownership_json.relative_to(state_link)
         paths.recovery_json.write_text(
             json.dumps(
                 {

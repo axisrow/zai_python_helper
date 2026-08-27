@@ -64,16 +64,29 @@ class _LegacyGeneration:
 
 
 def _open_private_parent(path: Path, *, create: bool, harden: bool = False) -> int:
-    """Open the state parent without following attacker-controlled entries."""
+    """Create, validate, and pin the state parent without path re-resolution.
+
+    Every component is first opened relative to the already-pinned parent with
+    ``O_NOFOLLOW``.  A configured XDG path may contain a symlink only when its
+    directory entry lives below an ancestor that another uid cannot replace;
+    following that stable entry is then a single kernel open and the resulting
+    directory is validated by descriptor.  Application-owned components never
+    follow symlinks.
+
+    This deliberately performs no preliminary ``resolve``/``exists`` pass:
+    creation, opening, validation, and all later state I/O share one descriptor
+    chain, so there is no checked pathname that is subsequently used afresh.
+    """
     if ".." in Path(path.parent).parts:
         raise ValueError(f"state path must not contain '..': {path.parent}")
     parent = Path(os.path.abspath(path.parent))
     parts = parent.parts
-    state_root = parent.parent.parent
     private_paths = {parent}
+    controlled_paths: set[Path] = set()
     if parent.parent.name == "zai-python-helper":
         private_paths.add(parent.parent)
-    protected_paths = private_paths
+        controlled_paths.add(parent.parent.parent)
+    state_root = parent.parent.parent
     # The fallback root itself is predictable and therefore must also be
     # protected.  Do not infer this from a basename: XDG_STATE_HOME may
     # legitimately live below a user directory with that name.
@@ -83,7 +96,6 @@ def _open_private_parent(path: Path, *, create: bool, harden: bool = False) -> i
         and state_root.name == f"zai-python-helper-{os.getuid()}"
     ):
         private_paths.add(state_root)
-        protected_paths.add(state_root)
     fd = os.open(parts[0] or os.sep, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     current = Path(parts[0] or os.sep)
     try:
@@ -94,17 +106,43 @@ def _open_private_parent(path: Path, *, create: bool, harden: bool = False) -> i
                     os.mkdir(part, mode=0o700, dir_fd=fd)
                 except FileExistsError:
                     pass
-            # macOS exposes /var as a system symlink.  Permit such trusted
-            # ancestors, but never follow symlinks once entering our state
-            # directory (the predictable attacker-controlled component).
-            protected = current in protected_paths
             private = current in private_paths
-            flags = os.O_RDONLY | os.O_DIRECTORY
-            if protected:
-                flags |= os.O_NOFOLLOW
-            next_fd = os.open(part, flags, dir_fd=fd)
+            controlled = current in controlled_paths
+            flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+            try:
+                next_fd = os.open(part, flags, dir_fd=fd)
+            except OSError as exc:
+                # ``O_NOFOLLOW|O_DIRECTORY`` reports a platform-specific
+                # ELOOP/ENOTDIR for a symlink.  Inspecting and then following
+                # it is safe only below a parent that another uid cannot
+                # mutate. Same-uid and root processes are outside this local
+                # cross-user threat boundary.
+                try:
+                    entry = os.stat(part, dir_fd=fd, follow_symlinks=False)
+                except OSError:
+                    raise exc from None
+                if not stat.S_ISLNK(entry.st_mode):
+                    raise exc from None
+                parent_st = os.fstat(fd)
+                if private or parent_st.st_mode & 0o022:
+                    raise PermissionError(
+                        f"insecure state symlink: {current}"
+                    ) from exc
+                next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY, dir_fd=fd)
             try:
                 st = os.fstat(next_fd)
+                if not stat.S_ISDIR(st.st_mode):
+                    raise PermissionError(f"insecure state directory: {current}")
+                writable_by_others = bool(st.st_mode & 0o022)
+                trusted_sticky = bool(
+                    st.st_uid == 0
+                    and st.st_mode & stat.S_ISVTX
+                    and writable_by_others
+                )
+                if writable_by_others and not trusted_sticky and not private:
+                    raise PermissionError(f"insecure state directory: {current}")
+                if controlled and st.st_uid != os.getuid():
+                    raise PermissionError(f"insecure state directory: {current}")
                 # Only application state directories are tightened; arbitrary
                 # existing ancestors such as /tmp or a user's XDG root are untouched.
                 if private and st.st_uid != os.getuid():
@@ -685,18 +723,19 @@ def _rewrite_migrated_manifest(
 # pure-flock lock cannot serialize two THREADS of one process — which is
 # exactly what our concurrency tests (and a multi-threaded caller) need.
 #
-# We therefore layer an in-process ``threading.Lock`` (one per resolved path)
-# UNDER the ``flock``: the threading.Lock serializes threads within this
-# process, and ``flock`` serializes separate processes. Together they make
-# the lock correct both cross-thread and cross-process on every platform.
+# We therefore layer an in-process ``threading.Lock`` (one per pinned state
+# directory inode) UNDER the ``flock``: the threading.Lock serializes threads
+# within this process, and ``flock`` serializes separate processes. Together
+# they make the lock correct cross-thread and cross-process on every platform.
 _INTRA_LOCKS_GUARD = _threading.Lock()
-_INTRA_LOCKS: dict[str, _threading.Lock] = {}
+_INTRA_LOCKS: dict[tuple[int, int], _threading.Lock] = {}
 _LOCK_CONTEXT = _threading.local()
 
 
-def _intra_lock(path: Path) -> _threading.Lock:
-    """Return the process-wide threading.Lock keyed by the lock-file path."""
-    key = str(path)
+def _intra_lock(state_fd: int) -> _threading.Lock:
+    """Return the threading lock for a pinned state-directory inode."""
+    st = os.fstat(state_fd)
+    key = (st.st_dev, st.st_ino)
     with _INTRA_LOCKS_GUARD:
         lock = _INTRA_LOCKS.get(key)
         if lock is None:
@@ -710,9 +749,10 @@ class ProcessLock:
 
     Two-layer, for correctness on every platform:
 
-    1. An in-process ``threading.Lock`` (one per resolved ``path``) serializes
-       THREADS of this process. Needed because BSD ``flock`` does not block a
-       second fd opened by the same process (see the module note above).
+    1. An in-process ``threading.Lock`` keyed by the pinned state-directory
+       inode serializes THREADS of this process, including lexical path aliases.
+       Needed because BSD ``flock`` does not block a second fd opened by the
+       same process (see the module note above).
     2. A blocking ``fcntl.flock(LOCK_EX)`` on ``path`` serializes separate
        PROCESSES (and survives the process if it crashes — the lock is
        released when the holding fd closes / the process exits).
@@ -735,18 +775,21 @@ class ProcessLock:
         self.state: PinnedStateDirectory | None = None
 
     def acquire(self) -> None:
-        """Take the in-process lock, then open the file and take flock."""
+        """Pin state, then take its inode lock and cross-process flock."""
         if getattr(_LOCK_CONTEXT, "active_lock", None) is not None:
             raise RuntimeError("nested ProcessLock acquisition is forbidden")
-        # 1) In-process serialization (threads).
-        intra = _intra_lock(self.path)
-        intra.acquire()
-        self._intra = intra
-        self._held_intra = True
-        # 2) Cross-process serialization (flock). Create the file + parent dir.
+        # Pin before choosing the in-process lock key. Lexical aliases of the
+        # same state directory must serialize on BSD, where a second flock in
+        # one process does not block merely because it used another path.
         try:
             parent_fd = _ensure_private_parent(self.path)
             self.state = PinnedStateDirectory(self.path.parent, parent_fd)
+            intra = _intra_lock(parent_fd)
+            intra.acquire()
+            self._intra = intra
+            self._held_intra = True
+            # Cross-process serialization. The lock file is opened only below
+            # the same descriptor that supplied the inode-keyed thread lock.
             self._fd = os_open_at(parent_fd, self.path.name, self.path)
             fcntl.flock(self._fd, fcntl.LOCK_EX)
             _LOCK_CONTEXT.active_lock = self
