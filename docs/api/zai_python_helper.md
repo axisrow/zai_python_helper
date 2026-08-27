@@ -785,7 +785,7 @@ Value: `{Region.GLOBAL: 'https://api.z.ai/api/anthropic', Region.CHINA: 'https:/
 
 ### `Paths`
 
-*dataclass — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/paths.py#L53)*
+*dataclass — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/paths.py#L41)*
 
 Frozen bundle of every resolved filesystem path the tool touches.
 
@@ -806,7 +806,6 @@ Attributes:
 - `recovery_json`: `Path`
 - `lock_file`: `Path`
 - `state_dir`: `Path`
-- `legacy_runtime_dir`: `Path | None`
 - `state_home_follows_home`: `bool`
 - `project_claude_settings`: `Path`
 - `local_claude_settings`: `Path`

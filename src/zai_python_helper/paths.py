@@ -27,27 +27,15 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-def _state_home_from_env(home: Path) -> tuple[Path, Path | None]:
-    """Return the configured state root and any legacy runtime root.
-
-    Older releases fell back to the predictable shared path
-    ``/var/tmp/zai-python-helper-<uid>``.  A different local user can reserve
-    that path before the real user starts the helper and cause a permanent
-    availability failure.  Fresh installations instead use the XDG default
-    below HOME, whose ancestors are not writable by other users.  The old
-    root is returned only as a migration source; it is never authoritative
-    for new I/O.
-    """
+def _state_home_from_env(home: Path) -> tuple[Path, bool]:
+    """Return the configured state root and whether it follows ``home``."""
     override = os.environ.get("ZAI_PYTHON_HELPER_STATE_HOME", "")
     xdg = os.environ.get("XDG_STATE_HOME", "")
     if override and Path(override).is_absolute():
-        return Path(override), None
+        return Path(override), False
     if xdg and Path(xdg).is_absolute():
-        return Path(xdg), None
-    return (
-        home / ".local" / "state",
-        Path("/var/tmp") / f"zai-python-helper-{os.getuid()}",
-    )
+        return Path(xdg), False
+    return home / ".local" / "state", True
 
 
 @dataclass(frozen=True)
@@ -72,9 +60,6 @@ class Paths:
     recovery_json: Path
     lock_file: Path
     state_dir: Path
-    # Pre-#116 production fallback, retained only as a descriptor-validated
-    # migration source. It is never selected for new state I/O.
-    legacy_runtime_dir: Path | None
     # Whether the default state root is derived from HOME and therefore moves
     # with it. ProcessLock uses this to reject a replaceable HOME namespace.
     state_home_follows_home: bool
@@ -122,14 +107,11 @@ class Paths:
                 a specific path to simulate running from a project directory.
         """
         h = Path(home)
-        legacy_runtime_root: Path | None = None
         state_home_follows_home = False
         # ``state_home`` is an injection seam. When omitted, use the explicit
-        # XDG root or its private per-user default and retain the old shared
-        # /var/tmp root only as a migration source.
+        # XDG root or its private per-user default.
         if state_home is None:
-            state_home, legacy_runtime_root = _state_home_from_env(h)
-            state_home_follows_home = legacy_runtime_root is not None
+            state_home, state_home_follows_home = _state_home_from_env(h)
         configured_state_home = Path(state_home)
         home_id = hashlib.sha256(str(h).encode()).hexdigest()[:16]
         # Keep the configured spelling intact.  Resolving it here would make
@@ -150,11 +132,6 @@ class Paths:
             recovery_json=helper_dir / "recovery.json",
             lock_file=helper_dir / "lock",
             state_dir=state_dir,
-            legacy_runtime_dir=(
-                legacy_runtime_root / "zai-python-helper" / home_id
-                if legacy_runtime_root is not None
-                else None
-            ),
             state_home_follows_home=state_home_follows_home,
             project_claude_settings=cwd_path / ".claude" / "settings.json",
             local_claude_settings=cwd_path / ".claude" / "settings.local.json",

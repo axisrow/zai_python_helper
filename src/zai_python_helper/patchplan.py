@@ -6,8 +6,8 @@ crash *between* files — or two concurrent ``use`` invocations — leaves mixed
 state. This module makes the whole multi-file activation a transaction:
 
 1. **Process lock** (:class:`ProcessLock`): an exclusive ``fcntl.flock`` on
-   ``~/.zai-python-helper/lock``. Two concurrent ``use`` calls serialize on
-   it — one runs to completion before the other starts.
+   the canonical XDG state-root lock. Two concurrent ``use`` calls serialize
+   on it — one runs to completion before the other starts.
 2. **Staged commit** (:func:`apply_plan_under_lock`): before touching any
    managed file, write a ``recovery.json`` manifest of the *final* content
    of every file the plan will write. Then write each file via the existing
@@ -28,7 +28,6 @@ content), so they are written mode ``0600``.
 
 from __future__ import annotations
 
-import base64
 import contextlib
 import errno
 import fcntl
@@ -48,21 +47,7 @@ from zai_python_helper.paths import Paths
 # same posture as the secrets file. Reuse ownership's secret-grade atomic
 # writer so both stay consistent.
 _SECURE_FILE_MODE = 0o600
-_LEGACY_STATE_NAMES = ("ownership.json", "recovery.json")
-_LEGACY_HANDOFF_NAME = "legacy-handoff.json"
 _TRANSACTION_COORDINATOR_NAME = ".zai-python-helper.lock"
-_LegacyIdentity = tuple[int, int, int, int]
-
-
-@dataclass(frozen=True)
-class _LegacyGeneration:
-    """Persisted generation; ``journal_path`` is comparison metadata only."""
-
-    source: str
-    journal_path: Path
-    files: dict[str, bytes | None]
-    cleanup_baseline: dict[str, bytes | None] | None = None
-    cleanup_identities: dict[str, _LegacyIdentity | None] | None = None
 
 
 _MAX_STATE_SYMLINKS = 40
@@ -318,16 +303,6 @@ def _open_private_parent(path: Path, *, create: bool, harden: bool = False) -> i
     if parent.parent.name == "zai-python-helper":
         private_paths.add(parent.parent)
         controlled_paths.add(parent.parent.parent)
-    state_root = parent.parent.parent
-    # The fallback root itself is predictable and therefore must also be
-    # protected.  Do not infer this from a basename: XDG_STATE_HOME may
-    # legitimately live below a user directory with that name.
-    if (
-        Path(os.path.realpath(state_root.parent))
-        == Path(os.path.realpath("/var/tmp"))
-        and state_root.name == f"zai-python-helper-{os.getuid()}"
-    ):
-        private_paths.add(state_root)
     return _open_directory_tree(
         parent,
         create=create,
@@ -409,24 +384,6 @@ class PinnedStateDirectory:
     def read_text(self, name: str) -> str:
         return _read_at(self.fd, self._name(name))
 
-    def read_bytes(self, name: str) -> bytes:
-        fd = self.open_file(name, os.O_RDONLY)
-        try:
-            stream = os.fdopen(fd, "rb")
-        except OSError:
-            os.close(fd)
-            raise
-        with stream:
-            return stream.read()
-
-    def identity(self, name: str) -> _LegacyIdentity:
-        fd = self.open_file(name, os.O_RDONLY)
-        try:
-            st = os.fstat(fd)
-            return (st.st_dev, st.st_ino, st.st_mtime_ns, st.st_size)
-        finally:
-            os.close(fd)
-
     def exists(self, name: str) -> bool:
         try:
             fd = self.open_file(name, os.O_RDONLY)
@@ -457,458 +414,6 @@ class PinnedStateDirectory:
 
     def __exit__(self, *exc: object) -> None:
         self.close()
-
-
-def migrate_legacy_state(paths: Paths) -> list[str]:
-    """Reconcile older bookkeeping generations into the active state root.
-
-    Older releases used first ``~/.zai-python-helper`` and then a predictable
-    runtime tree. Losing or mixing their journal/recovery generation could make
-    ``use default`` restore the wrong values. Both old locks are retained for
-    the complete transaction, and state that reappears after a lock handoff is
-    imported by the next transaction. Fresh installations remain a no-op.
-    """
-    with state_transaction(paths) as (_lock, moved):
-        return moved
-
-
-@contextlib.contextmanager
-def state_transaction(paths: Paths):
-    """Hold new and legacy locks for one complete mutating operation.
-
-    The legacy lock lease intentionally outlives migration. An old-version
-    process may have started before us but not reached its lock yet; retaining
-    the lease through recovery and commit prevents that process from entering
-    its legacy critical section midway through the new-root transaction.
-    """
-    with ProcessLock(paths) as lock:
-        if lock.state is None:
-            raise RuntimeError("ProcessLock acquired without pinned state")
-        with contextlib.ExitStack() as stack:
-            sources: dict[str, tuple[Path, PinnedStateDirectory]] = {}
-            _initialized, pending = _read_legacy_handoff(lock.state)
-            # Reserve every old lock namespace even when its tree does not yet
-            # exist. An already-started old process may be paused before mkdir
-            # and must still serialize with this complete transaction.
-            legacy_candidates: list[tuple[str, Path, bool]] = []
-            runtime_dir = paths.legacy_runtime_dir
-            if pending is not None and pending.source == "runtime":
-                runtime_dir = runtime_dir or _expected_legacy_runtime_dir(paths)
-                if pending.journal_path != runtime_dir / "ownership.json":
-                    raise RuntimeError("invalid legacy state handoff record")
-            if runtime_dir is not None:
-                legacy_candidates.append(
-                    ("runtime", runtime_dir, True)
-                )
-            # The runtime tree superseded the pre-0.1 HOME tree. Acquire it
-            # first and migrate its newer state before considering HOME.
-            legacy_candidates.append(
-                (
-                    "home",
-                    paths.claude_settings.parent.parent / ".zai-python-helper",
-                    True,
-                )
-            )
-            if pending is not None and pending.source == "home":
-                expected = legacy_candidates[-1][1] / "ownership.json"
-                if pending.journal_path != expected:
-                    raise RuntimeError("invalid legacy state handoff record")
-            # Active journal paths are comparison metadata only. The parser
-            # already restricts them to the ownership basename, and all I/O is
-            # descriptor-relative. Accept the canonical spelling persisted by
-            # the previous release when Paths now retains an XDG symlink.
-            for label, legacy_dir, create in legacy_candidates:
-                if legacy_dir == lock.state.path:
-                    continue
-                try:
-                    source = PinnedStateDirectory.open(
-                        legacy_dir, create=create, harden=True
-                    )
-                except OSError:
-                    if label == "runtime":
-                        # A foreign-owned predictable /var/tmp root is an
-                        # attacker reservation, not an authority and not a
-                        # reason to deny the victim access to private state.
-                        continue
-                    # Pre-0.1 ProcessLock followed HOME symlinks. Continuing
-                    # without pinning that exact lock namespace would let an
-                    # already-started old process race the active transaction.
-                    raise
-                if source is None:
-                    continue
-                source_st = os.fstat(source.fd)
-                active_st = os.fstat(lock.state.fd)
-                if (source_st.st_dev, source_st.st_ino) == (
-                    active_st.st_dev,
-                    active_st.st_ino,
-                ):
-                    # A lexical legacy path may alias the active XDG helper
-                    # directory. Never flock, migrate, or clean the active
-                    # generation as though it were an independent source.
-                    source.close()
-                    continue
-                stack.enter_context(source)
-                stack.enter_context(_locked_legacy_state(source))
-                sources[label] = (legacy_dir, source)
-            moved = _migrate_legacy_state_locked(paths, lock.state, sources)
-            yield lock, moved
-
-
-def _expected_legacy_runtime_dir(paths: Paths) -> Path:
-    """Reconstruct the fixed pre-#116 runtime namespace independent of env."""
-    return (
-        Path("/var/tmp")
-        / f"zai-python-helper-{os.getuid()}"
-        / "zai-python-helper"
-        / paths.lock_file.parent.name
-    )
-
-
-def _migrate_legacy_state_locked(
-    paths: Paths,
-    destination: PinnedStateDirectory,
-    sources: dict[str, tuple[Path, PinnedStateDirectory]],
-) -> list[str]:
-    """Mirror one authoritative legacy state generation into the active root.
-
-    ``ownership.json`` and ``recovery.json`` are one generation, never two
-    independent migration candidates. The former runtime generation outranks
-    pre-0.1 HOME state. A secure active-root handoff record makes mirroring and
-    source cleanup resumable if the process exits between filesystem steps.
-    """
-    initialized, pending = _read_legacy_handoff(destination)
-    snapshots = {
-        label: _snapshot_legacy_state(source)
-        for label, (_legacy_dir, source) in sources.items()
-    }
-    active_snapshot = _snapshot_legacy_state(destination)
-
-    selected: _LegacyGeneration | None = None
-    runtime_snapshot = snapshots.get("runtime")
-    if runtime_snapshot is not None and _has_legacy_state(runtime_snapshot):
-        if not (
-            pending is not None
-            and pending.source == "runtime"
-            and _is_cleanup_residue(runtime_snapshot, pending.files)
-        ):
-            selected = _live_legacy_generation(sources, "runtime", runtime_snapshot)
-
-    home_snapshot = snapshots.get("home")
-    home_identities = (
-        _snapshot_legacy_identities(sources["home"][1])
-        if "home" in sources
-        else None
-    )
-    if selected is None and pending is not None:
-        live = snapshots.get(pending.source)
-        if (
-            pending.source == "home"
-            and live is not None
-            and _has_legacy_state(live)
-            and not _is_cleanup_residue(live, pending.files)
-        ):
-            selected = _live_legacy_generation(sources, "home", live)
-        elif (
-            pending.source == "active"
-            and pending.cleanup_baseline is not None
-            and home_snapshot is not None
-            and _has_legacy_state(home_snapshot)
-            and not (
-                _is_cleanup_residue(home_snapshot, pending.cleanup_baseline)
-                and pending.cleanup_identities is not None
-                and home_identities is not None
-                and _is_identity_residue(
-                    home_identities, pending.cleanup_identities
-                )
-            )
-        ):
-            selected = _live_legacy_generation(sources, "home", home_snapshot)
-        else:
-            selected = pending
-
-    if (
-        selected is None
-        and home_snapshot is not None
-        and _has_legacy_state(home_snapshot)
-    ):
-        if initialized or not _has_legacy_state(active_snapshot):
-            selected = _live_legacy_generation(sources, "home", home_snapshot)
-        else:
-            # Before the first reconciliation, existing active XDG state is a
-            # newer generation than a HOME file left behind by old migration.
-            # Persist this cleanup as a resumable active generation so a crash
-            # cannot make the remaining HOME subset look newly reappeared.
-            selected = _LegacyGeneration(
-                "active",
-                paths.ownership_json,
-                active_snapshot,
-                cleanup_baseline=home_snapshot,
-                cleanup_identities=home_identities,
-            )
-
-    if selected is None:
-        if not initialized:
-            _write_legacy_handoff(destination, None)
-        return []
-
-    _write_legacy_handoff(destination, selected)
-
-    for name, data in selected.files.items():
-        if data is None:
-            destination.unlink(name)
-            continue
-        if name == "recovery.json":
-            data = _rewrite_migrated_manifest(
-                data,
-                selected.journal_path,
-                paths.ownership_json,
-            )
-        destination.atomic_write(name, data, _SECURE_FILE_MODE)
-
-    if selected.source in sources:
-        _unlink_legacy_state(sources[selected.source][1])
-    if selected.source in {"runtime", "active"} and "home" in sources:
-        _unlink_legacy_state(sources["home"][1])
-    _write_legacy_handoff(destination, None)
-    if selected.source == "active":
-        return []
-    return [name for name, data in selected.files.items() if data is not None]
-
-
-def _live_legacy_generation(
-    sources: dict[str, tuple[Path, PinnedStateDirectory]],
-    label: str,
-    files: dict[str, bytes | None],
-) -> _LegacyGeneration:
-    legacy_dir = sources[label][0]
-    return _LegacyGeneration(label, legacy_dir / "ownership.json", files)
-
-
-def _snapshot_legacy_state(
-    source: PinnedStateDirectory,
-) -> dict[str, bytes | None]:
-    snapshot: dict[str, bytes | None] = {}
-    for name in _LEGACY_STATE_NAMES:
-        try:
-            snapshot[name] = source.read_bytes(name)
-        except FileNotFoundError:
-            snapshot[name] = None
-    return snapshot
-
-
-def _snapshot_legacy_identities(
-    source: PinnedStateDirectory,
-) -> dict[str, _LegacyIdentity | None]:
-    identities: dict[str, _LegacyIdentity | None] = {}
-    for name in _LEGACY_STATE_NAMES:
-        try:
-            identities[name] = source.identity(name)
-        except FileNotFoundError:
-            identities[name] = None
-    return identities
-
-
-def _has_legacy_state(files: dict[str, bytes | None]) -> bool:
-    return any(data is not None for data in files.values())
-
-
-def _is_cleanup_residue(
-    current: dict[str, bytes | None], pending: dict[str, bytes | None]
-) -> bool:
-    """Return whether live files are an unchanged subset of a pending copy."""
-    return all(
-        data is None or data == pending[name]
-        for name, data in current.items()
-    )
-
-
-def _is_identity_residue(
-    current: dict[str, _LegacyIdentity | None],
-    baseline: dict[str, _LegacyIdentity | None],
-) -> bool:
-    return all(
-        identity is None or identity == baseline[name]
-        for name, identity in current.items()
-    )
-
-
-def _unlink_legacy_state(source: PinnedStateDirectory) -> None:
-    for name in _LEGACY_STATE_NAMES:
-        source.unlink(name)
-
-
-def _read_legacy_handoff(
-    destination: PinnedStateDirectory,
-) -> tuple[bool, _LegacyGeneration | None]:
-    try:
-        raw = destination.read_text(_LEGACY_HANDOFF_NAME)
-    except FileNotFoundError:
-        return False, None
-    try:
-        document = json.loads(raw)
-        if not isinstance(document, dict) or document.get("version") != 1:
-            raise ValueError
-        if document.get("initialized") is not True:
-            raise ValueError
-        progress = document.get("in_progress")
-        if progress is None:
-            return True, None
-        if not isinstance(progress, dict):
-            raise ValueError
-        label = progress.get("source")
-        journal_path = progress.get("journal_path")
-        encoded = progress.get("files")
-        encoded_baseline = progress.get("cleanup_baseline")
-        encoded_identities = progress.get("cleanup_identities")
-        if (
-            label not in {"runtime", "home", "active"}
-            or not isinstance(journal_path, str)
-            or Path(journal_path).name != "ownership.json"
-            or not isinstance(encoded, dict)
-        ):
-            raise ValueError
-        if set(encoded) != set(_LEGACY_STATE_NAMES):
-            raise ValueError
-        files: dict[str, bytes | None] = {}
-        for name in _LEGACY_STATE_NAMES:
-            value = encoded[name]
-            if value is None:
-                files[name] = None
-            elif isinstance(value, str):
-                files[name] = base64.b64decode(value, validate=True)
-            else:
-                raise ValueError
-        cleanup_baseline = None
-        cleanup_identities = None
-        if encoded_baseline is not None:
-            if (
-                label != "active"
-                or not isinstance(encoded_baseline, dict)
-                or not isinstance(encoded_identities, dict)
-            ):
-                raise ValueError
-            if (
-                set(encoded_baseline) != set(_LEGACY_STATE_NAMES)
-                or set(encoded_identities) != set(_LEGACY_STATE_NAMES)
-            ):
-                raise ValueError
-            cleanup_baseline = {}
-            cleanup_identities = {}
-            for name in _LEGACY_STATE_NAMES:
-                value = encoded_baseline[name]
-                if value is None:
-                    cleanup_baseline[name] = None
-                elif isinstance(value, str):
-                    cleanup_baseline[name] = base64.b64decode(value, validate=True)
-                else:
-                    raise ValueError
-                identity = encoded_identities[name]
-                if identity is None:
-                    cleanup_identities[name] = None
-                elif (
-                    isinstance(identity, list)
-                    and len(identity) == 4
-                    and all(type(part) is int for part in identity)
-                ):
-                    cleanup_identities[name] = tuple(identity)
-                else:
-                    raise ValueError
-        elif label == "active":
-            raise ValueError
-        elif encoded_identities is not None:
-            raise ValueError
-        return True, _LegacyGeneration(
-            label,
-            Path(journal_path),
-            files,
-            cleanup_baseline,
-            cleanup_identities,
-        )
-    except (ValueError, TypeError, json.JSONDecodeError) as exc:
-        raise RuntimeError("invalid legacy state handoff record") from exc
-
-
-def _write_legacy_handoff(
-    destination: PinnedStateDirectory,
-    progress: _LegacyGeneration | None,
-) -> None:
-    encoded_progress = None
-    if progress is not None:
-        encoded_progress = {
-            "source": progress.source,
-            "journal_path": str(progress.journal_path),
-            "files": {
-                name: (
-                    None
-                    if progress.files[name] is None
-                    else base64.b64encode(progress.files[name]).decode()
-                )
-                for name in _LEGACY_STATE_NAMES
-            },
-            "cleanup_baseline": (
-                None
-                if progress.cleanup_baseline is None
-                else {
-                    name: (
-                        None
-                        if progress.cleanup_baseline[name] is None
-                        else base64.b64encode(
-                            progress.cleanup_baseline[name]
-                        ).decode()
-                    )
-                    for name in _LEGACY_STATE_NAMES
-                }
-            ),
-            "cleanup_identities": (
-                None
-                if progress.cleanup_identities is None
-                else {
-                    name: (
-                        None
-                        if progress.cleanup_identities[name] is None
-                        else list(progress.cleanup_identities[name])
-                    )
-                    for name in _LEGACY_STATE_NAMES
-                }
-            ),
-        }
-    document = {
-        "version": 1,
-        "initialized": True,
-        "in_progress": encoded_progress,
-    }
-    data = (json.dumps(document, indent=2, ensure_ascii=False) + "\n").encode()
-    destination.atomic_write(_LEGACY_HANDOFF_NAME, data, _SECURE_FILE_MODE)
-
-
-@contextlib.contextmanager
-def _locked_legacy_state(state: PinnedStateDirectory):
-    """Serialize migration with processes still using the legacy state tree."""
-    lock_path = state.path / "lock"
-    fd = os_open_at(state.fd, lock_path.name, lock_path)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
-        with contextlib.suppress(OSError):
-            fcntl.flock(fd, fcntl.LOCK_UN)
-        with contextlib.suppress(OSError):
-            close_fd(fd)
-
-
-def _rewrite_migrated_manifest(
-    data: bytes, legacy_journal: Path, current_journal: Path
-) -> bytes:
-    """Update a migrated manifest's stale absolute journal reference."""
-    try:
-        document = json.loads(data.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        return data
-    journal = document.get("journal") if isinstance(document, dict) else None
-    if not isinstance(journal, dict) or journal.get("path") != str(legacy_journal):
-        return data
-    journal["path"] = str(current_journal)
-    return (json.dumps(document, indent=2, ensure_ascii=False) + "\n").encode()
 
 
 # ---------------------------------------------------------------------------
@@ -963,8 +468,8 @@ class ProcessLock:
        ``flock`` does not block a second fd opened by the same process.
     3. Blocking ``flock`` leases on a writable regular file opened relative to
        that directory and on the current state lock serialize separate
-       processes and retain old lock compatibility. The regular coordinator
-       also works where NFS implements ``flock`` as a write lock.
+       processes. The regular coordinator also works where NFS implements
+       ``flock`` as a write lock.
 
     A context manager: :meth:`__enter__` takes both layers, :meth:`__exit__`
     releases both. Nesting is rejected before the second lock is acquired.
@@ -1012,8 +517,8 @@ class ProcessLock:
                 self._coordinator_fd = coordinator_fd
             if coordinator_fd is not None:
                 fcntl.flock(coordinator_fd, fcntl.LOCK_EX)
-            # Retain the state-file lease for compatibility with the previous
-            # implementation and legacy migration processes.
+            # Retain the state-file lease for compatibility with older lock
+            # files in the current canonical state directory.
             self._fd = os_open_at(parent_fd, self.path.name, self.path)
             fcntl.flock(self._fd, fcntl.LOCK_EX)
             _LOCK_CONTEXT.active_lock = self
@@ -1293,9 +798,10 @@ def _read_manifest(
         str(raw_journal.get("path", "")) if isinstance(raw_journal, dict) else ""
     )
     # The manifest itself is read from the pinned helper directory.  The
-    # stored path is legacy metadata and is deliberately not canonicalized:
-    # accept old symlink/relative spellings, but always replay ownership.json
-    # in the pinned directory (the transition policy is documented in ADR-006).
+    # The stored path is metadata and is deliberately not canonicalized:
+    # accept historical symlink/relative spellings, but always replay
+    # ownership.json in the pinned directory (the policy is documented in
+    # ADR-006).
     journal_path_matches = (
         isinstance(raw_journal, dict)
         and Path(raw_journal_path).name == paths.ownership_json.name
@@ -1381,14 +887,14 @@ def recover(paths: Paths) -> list[str]:
         The list of tags (e.g. ``["settings", "zshrc"]``) that recovery
         wrote, in manifest order. Empty if no manifest existed.
     """
-    with state_transaction(paths) as (lock, _moved):
+    with ProcessLock(paths) as lock:
         if lock.state is None:
             raise RuntimeError("ProcessLock acquired without pinned state")
         return recover_locked(paths, lock.state)
 
 
 def recover_locked(paths: Paths, state: PinnedStateDirectory) -> list[str]:
-    """Replay recovery while the caller retains new and legacy lock leases."""
+    """Replay recovery while the caller retains the canonical state lock."""
     entries, journal = _read_manifest(state, paths)
     if not entries and journal is None:
         # An absent/empty manifest means nothing to recover. Ensure no stale

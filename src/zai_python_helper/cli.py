@@ -754,18 +754,17 @@ def _handle_use_zai(args: argparse.Namespace) -> int:
     # must serialize the state used to PLAN, not only the writes — otherwise a
     # concurrent ``use default`` could restore the prior between our read and
     # our commit, and we would journal the (now-stale) value we read as the
-    # prior. Recovery also runs under this lock (it takes the lock itself, so
-    # it serializes with us) before we read any state.
+    # prior. Recovery also runs under this lock before we read any state.
     from zai_python_helper.ownership import OwnershipJournal
     from zai_python_helper.patchplan import (
+        ProcessLock,
         apply_plan_locked,
         recover_locked,
-        state_transaction,
     )
 
-    with state_transaction(paths) as (lock, _moved):
+    with ProcessLock(paths) as lock:
         if lock.state is None:
-            raise RuntimeError("state transaction opened without pinned state")
+            raise RuntimeError("process lock opened without pinned state")
         _run_recovery(paths, lambda _paths: recover_locked(paths, lock.state))
         # Read state, plan, and capture ownership — all inside the lock so a
         # concurrent revert cannot mutate the config between our read and our
@@ -849,9 +848,9 @@ def _handle_use_default(args: argparse.Namespace) -> int:
 
     from zai_python_helper.ownership import OwnershipJournal
     from zai_python_helper.patchplan import (
+        ProcessLock,
         apply_plan_locked,
         recover_locked,
-        state_transaction,
     )
 
     print(f"Reverting to default provider (tool: {tool.name}, region: {region.value})")
@@ -875,9 +874,9 @@ def _handle_use_default(args: argparse.Namespace) -> int:
     # inside ONE held ProcessLock (ADR-005 / S3 finding #6): a concurrent
     # ``use zai`` must not be able to change the config between our decision
     # read and our commit (which would make the decisions stale).
-    with state_transaction(paths) as (lock, _moved):
+    with ProcessLock(paths) as lock:
         if lock.state is None:
-            raise RuntimeError("state transaction opened without pinned state")
+            raise RuntimeError("process lock opened without pinned state")
         _run_recovery(paths, lambda _paths: recover_locked(paths, lock.state))
         state = tool.read_state(paths)
         journal = OwnershipJournal(paths.ownership_json)

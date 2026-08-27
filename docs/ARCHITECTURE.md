@@ -135,88 +135,44 @@ HOME artifact set without weakening revert.
 
 ---
 
-## ADR-006: Pinned state-root descriptors and legacy manifest paths (HARD)
+## ADR-006: Single canonical state root and pinned descriptors (HARD)
 
-State bookkeeping is addressed through one explicit `PinnedStateDirectory`
-capability retained by `ProcessLock`. Its helper-directory descriptor is
-opened through a descriptor-relative component walk, ownership/mode checked,
-and held until the lock is released. `Paths` retains the configured XDG spelling
-without probing or resolving it. Existing symlinks are followed only from a
-validated parent that another uid cannot replace, and their targets are walked
-through the same validation one component at a time. Application-owned
-components never follow symlinks, and missing components are created and
-reopened relative to the already-pinned parent. Thus there is no resolve/check
-followed by a separate pathname open. Lock, manifest, and ownership-journal
-reads, writes, replacement, and removal use basename-only `dir_fd` operations
-on the pinned capability, with no path-based fallback after acquisition.
+State bookkeeping is addressed only through the current canonical XDG state
+root: `$ZAI_PYTHON_HELPER_STATE_HOME` when it is an absolute path, then
+`$XDG_STATE_HOME` when it is an absolute path, otherwise
+`$HOME/.local/state`. The helper stores `ownership.json`,
+`recovery.json`, `lock`, and `state/` below
+`zai-python-helper/<home-id>/` in that root. No other location is read or
+written automatically.
 
-The pinned managed-HOME directory is the stable transaction namespace. Its
-`(device, inode)` keys the in-process lock, while a private writable regular
-lock file opened relative to that descriptor carries the cross-process
-`flock`; the current state lock remains held as a compatibility lease. Using a
-regular file also supports NFS implementations that translate `flock` into a
-write lock and therefore reject an exclusive lock on a read-only directory
-descriptor. Consequently aliases and even an accepted retarget of the
-configured XDG symlink remain in one lock domain for commands mutating the same
-HOME. This extra in-process layer is required on BSD, where a second `flock` in
-one process does not itself serialize threads. Replacing the configured path
-after acquisition cannot redirect the held state capability, and a later
-acquisition validates the replacement independently.
+The pre-0.1 `~/.zai-python-helper` tree and the former predictable
+`/var/tmp/zai-python-helper-<uid>` tree are intentionally no longer
+automatically migrated. This is a breaking change: upgrades from those
+versions start with an empty canonical root, and users who need ownership
+tracking must run `zai-python-helper use zai` again. Any future migration must
+be an explicit, one-shot user-invoked command rather than hidden behavior in
+normal commands.
 
-The managed-HOME walk is stricter than the configurable state-root walk:
-symlink components are accepted only when their directory entry is below a
-root-owned, non-writable parent. When the state root is the HOME-derived
-default, the HOME entry itself must also live below such a stable parent, so a
-regular directory cannot be renamed and replaced into a fresh state and lock
-domain. A user-retargetable HOME alias or replaceable default HOME fails
-closed. Otherwise the same entry change could redirect both default state and
-path-based tool configuration between acquisitions, splitting the journals and
-coordinator that are supposed to serialize those writes. Root-controlled
-system aliases remain supported because the invoking user cannot retarget
-their entries.
+The configured state path is kept lexically in `Paths` and is opened only at
+the write boundary. `ProcessLock` walks every component descriptor-relatively
+with `O_NOFOLLOW`, validates ownership and mode from the opened descriptor,
+creates missing components relative to the pinned parent, and retains the
+validated helper-directory descriptor for the complete transaction. Lock,
+manifest, and journal operations use basename-only `dir_fd` calls on that
+capability; no path-based fallback is permitted after acquisition.
 
-`ProcessLock` nesting in one thread is not a supported use case and is rejected
-before a second lock is acquired. The pinned capability is passed explicitly
-to lock-scoped operations; it is never stored in a replaceable thread-local FD
-slot. This makes a nested callback fail closed instead of silently redirecting
-the outer transaction after a directory swap.
+A pinned managed-HOME directory and writable coordinator file provide stable
+transaction locking across configured state-root aliases and retargets. An
+in-process inode-keyed lock supplements `flock` on BSD, where separate file
+descriptors in one process do not necessarily block each other. Replaceable
+default-HOME namespaces are rejected because they could split the state and
+configuration lock domains.
 
-For compatibility, a recovery manifest's historical absolute ownership-journal
-path is treated as legacy metadata, not as an authority for I/O. During the
-transition, both canonical and legacy path spellings are accepted when the
-manifest names `ownership.json`; recovery always writes the journal relative
-to the pinned root. Thus manifests written before state-root canonicalization
-continue to recover without silently migrating or losing their journal update.
+Recovery manifests may contain historical absolute or symlinked journal-path
+metadata. That string is never used as an authority for I/O: recovery always
+replays `ownership.json` through the pinned canonical descriptor.
 
-The former predictable `/var/tmp/zai-python-helper-<uid>` fallback is migration
-input only. Fresh state uses the private XDG default. A legacy runtime tree is
-read only through its own validated descriptor; foreign-owned, symlinked, or
-non-directory reservations are ignored rather than denying service, while a
-safe current-user tree is migrated atomically into the active pinned root.
-That availability exception applies only to the predictable runtime namespace;
-an unpinnable HOME legacy tree fails closed because pre-0.1 locks followed HOME
-symlinks and must still be serialized during cross-version handoff.
-Both supported legacy trees (the pre-0.1 HOME tree and the former runtime tree)
-are safely reserved when absent, and their flocks are retained through
-migration, recovery, planning, and commit. Thus an already-started old-version
-process cannot create its tree and enter its former critical section midway
-through the new-root transaction. When both trees contain state, the newer
-runtime tree is authoritative for the complete ownership/recovery generation;
-files from different generations are never combined. Reappearing runtime state
-written after a lock handoff replaces the active generation on the next
-transaction. A secret-grade, descriptor-relative handoff record in the active
-root makes generation mirroring and legacy cleanup resumable after interruption.
-It retains comparison-only journal metadata, while any resumed runtime lock path
-is reconstructed and validated from the fixed legacy namespace rather than
-trusted from the record or current environment overrides. Its completed state
-also distinguishes stale HOME debris during the first XDG reconciliation from
-a HOME generation that genuinely reappears after lock handoff. Interrupted
-active-state preservation records the exact HOME cleanup baseline, so changed
-HOME files from a queued old process supersede stale cleanup state on resume.
-Descriptor-derived file identities distinguish a newly recreated generation
-even when its bytes happen to match the stale baseline exactly.
-
-**Status:** Superseded and strengthened for v1.1 (issues #111 and #116).
+**Status:** Accepted for v1.1 (issues #111, #116, and #119).
 
 ## v2 live state (decided, deferred implementation)
 
