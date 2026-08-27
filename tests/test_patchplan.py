@@ -541,6 +541,23 @@ os.close(fd)
     assert acquired.read_text() == "entered"
 
 
+def test_state_transaction_fails_closed_for_unpinnable_home_legacy_tree(tmp_path):
+    """A HOME symlink cannot make the transaction skip the old lock namespace."""
+    home = tmp_path / "home"
+    home.mkdir()
+    target = tmp_path / "legacy-target"
+    target.mkdir(mode=0o700)
+    (home / ".zai-python-helper").symlink_to(target, target_is_directory=True)
+    paths = Paths.from_home(home, state_home=tmp_path / "new-state")
+    entered = False
+
+    with pytest.raises(OSError):
+        with state_transaction(paths):
+            entered = True
+
+    assert entered is False
+
+
 # ---------------------------------------------------------------------------
 # ProcessLock: serialization
 # ---------------------------------------------------------------------------
@@ -616,27 +633,35 @@ class TestProcessLock:
         with ExitStack() as patches:
             if attacker_kind == "foreign-owner":
                 real_fstat = patchplan.os.fstat
-                attacker_fd: list[int] = []
+                attacker_fds: set[int] = set()
                 real_open = patchplan.os.open
+                real_close = patchplan.os.close
 
                 def track_open(path, flags, *args, dir_fd=None, **kwargs):
                     fd = real_open(path, flags, *args, dir_fd=dir_fd, **kwargs)
                     if Path(path).name == attacker_root.name:
-                        attacker_fd.append(fd)
+                        attacker_fds.add(fd)
                     return fd
 
                 def foreign_fstat(fd):
                     result = real_fstat(fd)
-                    if fd in attacker_fd:
+                    if fd in attacker_fds:
                         return SimpleNamespace(
                             st_uid=result.st_uid + 1,
                             st_mode=result.st_mode,
                         )
                     return result
 
+                def track_close(fd):
+                    attacker_fds.discard(fd)
+                    real_close(fd)
+
                 patches.enter_context(mock.patch.object(patchplan.os, "open", track_open))
                 patches.enter_context(
                     mock.patch.object(patchplan.os, "fstat", foreign_fstat)
+                )
+                patches.enter_context(
+                    mock.patch.object(patchplan.os, "close", track_close)
                 )
             assert migrate_legacy_state(paths) == []
         with ProcessLock(paths) as lock:

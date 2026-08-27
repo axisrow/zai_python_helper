@@ -162,6 +162,9 @@ input only. Fresh state uses the private XDG default. A legacy runtime tree is
 read only through its own validated descriptor; foreign-owned, symlinked, or
 non-directory reservations are ignored rather than denying service, while a
 safe current-user tree is migrated atomically into the active pinned root.
+That availability exception applies only to the predictable runtime namespace;
+an unpinnable HOME legacy tree fails closed because pre-0.1 locks followed HOME
+symlinks and must still be serialized during cross-version handoff.
 Both supported legacy trees (the pre-0.1 HOME tree and the former runtime tree)
 are safely reserved when absent, and their flocks are retained through
 migration, recovery, planning, and commit. Thus an already-started old-version

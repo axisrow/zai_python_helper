@@ -298,10 +298,15 @@ def state_transaction(paths: Paths):
                         legacy_dir, create=create, harden=True
                     )
                 except OSError:
-                    # A foreign-owned predictable /var/tmp root is an attacker
-                    # reservation, not an authority and not a reason to deny
-                    # the victim access to the new private state root.
-                    continue
+                    if label == "runtime":
+                        # A foreign-owned predictable /var/tmp root is an
+                        # attacker reservation, not an authority and not a
+                        # reason to deny the victim access to private state.
+                        continue
+                    # Pre-0.1 ProcessLock followed HOME symlinks. Continuing
+                    # without pinning that exact lock namespace would let an
+                    # already-started old process race the active transaction.
+                    raise
                 if source is None:
                     continue
                 stack.enter_context(source)
