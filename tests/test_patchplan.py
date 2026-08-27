@@ -14,9 +14,11 @@ and a NOOP plan writes nothing.
 from __future__ import annotations
 
 import base64
+import errno
 import fcntl
 import json
 import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -893,6 +895,35 @@ with ProcessLock(paths):
         process.wait(timeout=2)
         assert process.returncode == 0
         assert entered.read_text() == "entered"
+
+    def test_home_coordinator_flock_uses_a_writable_regular_file(
+        self, tmp_path, monkeypatch
+    ):
+        """NFS-style flock must not receive a read-only directory fd."""
+        home = tmp_path / "home"
+        home.mkdir()
+        paths = Paths.from_home(home, state_home=tmp_path / "state")
+        real_flock = fcntl.flock
+        exclusive_fds: list[int] = []
+
+        def nfs_flock(fd, operation):
+            if operation == fcntl.LOCK_EX:
+                flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+                if flags & os.O_ACCMODE != os.O_RDWR:
+                    raise OSError(errno.EBADF, "NFS exclusive flock requires O_RDWR")
+                assert stat.S_ISREG(os.fstat(fd).st_mode)
+                exclusive_fds.append(fd)
+            real_flock(fd, operation)
+
+        monkeypatch.setattr(fcntl, "flock", nfs_flock)
+
+        with ProcessLock(paths):
+            pass
+
+        assert len(exclusive_fds) == 2
+        coordinator = home / ".zai-python-helper.lock"
+        assert coordinator.is_file()
+        assert coordinator.stat().st_mode & 0o777 == 0o600
 
     def test_paths_and_raw_lock_callers_share_state_inode_lock(
         self, tmp_path, monkeypatch

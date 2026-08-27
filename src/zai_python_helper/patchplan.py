@@ -50,6 +50,7 @@ from zai_python_helper.paths import Paths
 _SECURE_FILE_MODE = 0o600
 _LEGACY_STATE_NAMES = ("ownership.json", "recovery.json")
 _LEGACY_HANDOFF_NAME = "legacy-handoff.json"
+_TRANSACTION_COORDINATOR_NAME = ".zai-python-helper.lock"
 _LegacyIdentity = tuple[int, int, int, int]
 
 
@@ -321,21 +322,35 @@ def _open_private_parent(path: Path, *, create: bool, harden: bool = False) -> i
     )
 
 
-def _open_transaction_coordinator(paths: Paths | None, state_fd: int) -> int:
-    """Pin the stable namespace whose managed configuration is mutated."""
+def _open_transaction_coordinator(
+    paths: Paths | None, state_fd: int
+) -> tuple[int, int | None]:
+    """Pin the stable namespace and open its writable flock file."""
     if paths is None:
-        return os.dup(state_fd)
+        # Raw-path callers already use their writable state lock file for
+        # cross-process coordination. The pinned directory is still needed as
+        # the stable in-process inode key shared with Paths callers.
+        return os.dup(state_fd), None
     lexical_home = paths.claude_settings.parent.parent
     if ".." in lexical_home.parts:
         raise ValueError(f"state path must not contain '..': {lexical_home}")
     home = Path(os.path.abspath(lexical_home))
-    return _open_directory_tree(
+    home_fd = _open_directory_tree(
         home,
         create=True,
         harden=False,
         private_paths=set(),
         controlled_paths={home},
     )
+    coordinator_path = home / _TRANSACTION_COORDINATOR_NAME
+    try:
+        coordinator_fd = os_open_at(
+            home_fd, _TRANSACTION_COORDINATOR_NAME, coordinator_path
+        )
+    except BaseException:
+        os.close(home_fd)
+        raise
+    return home_fd, coordinator_fd
 
 
 def _ensure_private_parent(path: Path) -> int:
@@ -934,13 +949,15 @@ class ProcessLock:
 
     Three-layer, for correctness on every platform:
 
-    1. A pinned managed-HOME directory is the stable transaction coordinator;
+    1. A pinned managed-HOME directory is the stable transaction namespace;
        it does not change when a configured XDG symlink is retargeted.
     2. An in-process ``threading.Lock`` keyed by that directory inode
        serializes threads, including state-path aliases. Needed because BSD
        ``flock`` does not block a second fd opened by the same process.
-    3. Blocking ``flock`` leases on the coordinator directory and current
-       state lock serialize separate processes and retain old lock compatibility.
+    3. Blocking ``flock`` leases on a writable regular file opened relative to
+       that directory and on the current state lock serialize separate
+       processes and retain old lock compatibility. The regular coordinator
+       also works where NFS implements ``flock`` as a write lock.
 
     A context manager: :meth:`__enter__` takes both layers, :meth:`__exit__`
     releases both. Nesting is rejected before the second lock is acquired.
@@ -952,6 +969,7 @@ class ProcessLock:
         self.paths = target if isinstance(target, Paths) else None
         self.path = self.paths.lock_file if self.paths is not None else Path(target)
         self._fd: int | None = None
+        self._coordinator_dir_fd: int | None = None
         self._coordinator_fd: int | None = None
         self._intra: list[_threading.Lock] = []
         self._held_intra = False
@@ -971,13 +989,17 @@ class ProcessLock:
         try:
             parent_fd = _ensure_private_parent(self.path)
             self.state = PinnedStateDirectory(self.path.parent, parent_fd)
-            coordinator_fd = _open_transaction_coordinator(self.paths, parent_fd)
+            coordinator_dir_fd, coordinator_fd = _open_transaction_coordinator(
+                self.paths, parent_fd
+            )
+            self._coordinator_dir_fd = coordinator_dir_fd
             self._coordinator_fd = coordinator_fd
-            for intra in _intra_locks(coordinator_fd, parent_fd):
+            for intra in _intra_locks(coordinator_dir_fd, parent_fd):
                 intra.acquire()
                 self._intra.append(intra)
             self._held_intra = True
-            fcntl.flock(coordinator_fd, fcntl.LOCK_EX)
+            if coordinator_fd is not None:
+                fcntl.flock(coordinator_fd, fcntl.LOCK_EX)
             # Retain the state-file lease for compatibility with the previous
             # implementation and legacy migration processes.
             self._fd = os_open_at(parent_fd, self.path.name, self.path)
@@ -998,6 +1020,10 @@ class ProcessLock:
                 with contextlib.suppress(OSError):
                     close_fd(self._coordinator_fd)
                 self._coordinator_fd = None
+            if self._coordinator_dir_fd is not None:
+                with contextlib.suppress(OSError):
+                    close_fd(self._coordinator_dir_fd)
+                self._coordinator_dir_fd = None
             if self.state is not None:
                 with contextlib.suppress(OSError):
                     self.state.close()
@@ -1028,6 +1054,10 @@ class ProcessLock:
             with contextlib.suppress(OSError):
                 close_fd(self._coordinator_fd)
             self._coordinator_fd = None
+        if self._coordinator_dir_fd is not None:
+            with contextlib.suppress(OSError):
+                close_fd(self._coordinator_dir_fd)
+            self._coordinator_dir_fd = None
         if self.state is not None:
             with contextlib.suppress(OSError):
                 self.state.close()
