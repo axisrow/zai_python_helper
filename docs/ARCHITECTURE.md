@@ -139,10 +139,41 @@ HOME artifact set without weakening revert.
 
 State bookkeeping is addressed through one explicit `PinnedStateDirectory`
 capability retained by `ProcessLock`. Its helper-directory descriptor is
-opened once with `O_NOFOLLOW`, ownership/mode checked, and held until the lock
-is released. Lock, manifest, and ownership-journal reads, writes, replacement,
-and removal use basename-only `dir_fd` operations on that capability. There is
-no optional descriptor or path-based fallback after lock acquisition.
+opened through a descriptor-relative component walk, ownership/mode checked,
+and held until the lock is released. `Paths` retains the configured XDG spelling
+without probing or resolving it. Existing symlinks are followed only from a
+validated parent that another uid cannot replace, and their targets are walked
+through the same validation one component at a time. Application-owned
+components never follow symlinks, and missing components are created and
+reopened relative to the already-pinned parent. Thus there is no resolve/check
+followed by a separate pathname open. Lock, manifest, and ownership-journal
+reads, writes, replacement, and removal use basename-only `dir_fd` operations
+on the pinned capability, with no path-based fallback after acquisition.
+
+The pinned managed-HOME directory is the stable transaction namespace. Its
+`(device, inode)` keys the in-process lock, while a private writable regular
+lock file opened relative to that descriptor carries the cross-process
+`flock`; the current state lock remains held as a compatibility lease. Using a
+regular file also supports NFS implementations that translate `flock` into a
+write lock and therefore reject an exclusive lock on a read-only directory
+descriptor. Consequently aliases and even an accepted retarget of the
+configured XDG symlink remain in one lock domain for commands mutating the same
+HOME. This extra in-process layer is required on BSD, where a second `flock` in
+one process does not itself serialize threads. Replacing the configured path
+after acquisition cannot redirect the held state capability, and a later
+acquisition validates the replacement independently.
+
+The managed-HOME walk is stricter than the configurable state-root walk:
+symlink components are accepted only when their directory entry is below a
+root-owned, non-writable parent. When the state root is the HOME-derived
+default, the HOME entry itself must also live below such a stable parent, so a
+regular directory cannot be renamed and replaced into a fresh state and lock
+domain. A user-retargetable HOME alias or replaceable default HOME fails
+closed. Otherwise the same entry change could redirect both default state and
+path-based tool configuration between acquisitions, splitting the journals and
+coordinator that are supposed to serialize those writes. Root-controlled
+system aliases remain supported because the invoking user cannot retarget
+their entries.
 
 `ProcessLock` nesting in one thread is not a supported use case and is rejected
 before a second lock is acquired. The pinned capability is passed explicitly

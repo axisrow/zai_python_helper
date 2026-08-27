@@ -13,9 +13,12 @@ and a NOOP plan writes nothing.
 
 from __future__ import annotations
 
+import base64
+import errno
 import fcntl
 import json
 import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -558,12 +561,179 @@ def test_state_transaction_fails_closed_for_unpinnable_home_legacy_tree(tmp_path
     assert entered is False
 
 
+def test_legacy_runtime_alias_of_active_root_is_not_relocked_or_migrated(tmp_path):
+    """One pinned directory cannot be both active destination and legacy source."""
+    home = tmp_path / "home"
+    home.mkdir()
+    runtime_root = tmp_path / "runtime-root"
+    runtime_root.mkdir(mode=0o700)
+    state_home = tmp_path / "state-link"
+    state_home.symlink_to(runtime_root, target_is_directory=True)
+    paths = Paths.from_home(home, state_home=state_home)
+    physical_helper = runtime_root / paths.lock_file.parent.relative_to(state_home)
+    paths = replace(paths, legacy_runtime_dir=physical_helper)
+    content = b'{"source": "active"}\n'
+    with ProcessLock(paths) as lock:
+        assert lock.state is not None
+        lock.state.atomic_write("ownership.json", content, 0o600)
+
+    assert migrate_legacy_state(paths) == []
+    assert paths.ownership_json.read_bytes() == content
+
+
+def test_pending_active_handoff_accepts_prior_canonical_journal_spelling(tmp_path):
+    """A pre-upgrade handoff resumes after Paths stops canonicalizing XDG."""
+    home = tmp_path / "home"
+    home.mkdir()
+    target = tmp_path / "state-target"
+    target.mkdir()
+    state_home = tmp_path / "state-link"
+    state_home.symlink_to(target, target_is_directory=True)
+    paths = Paths.from_home(home, state_home=state_home)
+    paths.lock_file.parent.mkdir(parents=True)
+    canonical_journal = target / paths.ownership_json.relative_to(state_home)
+    content = b'{"source": "active"}\n'
+    handoff = {
+        "version": 1,
+        "initialized": True,
+        "in_progress": {
+            "source": "active",
+            "journal_path": str(canonical_journal),
+            "files": {
+                "ownership.json": base64.b64encode(content).decode(),
+                "recovery.json": None,
+            },
+            "cleanup_baseline": {
+                "ownership.json": None,
+                "recovery.json": None,
+            },
+            "cleanup_identities": {
+                "ownership.json": None,
+                "recovery.json": None,
+            },
+        },
+    }
+    (paths.lock_file.parent / "legacy-handoff.json").write_text(
+        json.dumps(handoff)
+    )
+
+    assert migrate_legacy_state(paths) == []
+    assert paths.ownership_json.read_bytes() == content
+    completed = json.loads(
+        (paths.lock_file.parent / "legacy-handoff.json").read_text()
+    )
+    assert completed["in_progress"] is None
+
+
 # ---------------------------------------------------------------------------
 # ProcessLock: serialization
 # ---------------------------------------------------------------------------
 
 
 class TestProcessLock:
+    def test_precreated_configured_root_symlink_to_attacker_target_fails_closed(
+        self, tmp_path
+    ):
+        """A hostile root present before Paths construction is never trusted."""
+        attacker = tmp_path / "attacker-state"
+        attacker.mkdir()
+        attacker.chmod(0o777)
+        state_home = tmp_path / "state-link"
+        state_home.symlink_to(attacker, target_is_directory=True)
+
+        paths = Paths.from_home(tmp_path / "home", state_home=state_home)
+
+        with pytest.raises(PermissionError, match="insecure state directory"):
+            with ProcessLock(paths):
+                pass
+        assert not (attacker / "zai-python-helper").exists()
+
+    def test_configured_root_symlink_planted_after_paths_fails_closed(
+        self, tmp_path
+    ):
+        """Pure path construction leaves no later check/use gap to exploit."""
+        state_home = tmp_path / "state-link"
+        paths = Paths.from_home(tmp_path / "home", state_home=state_home)
+        attacker = tmp_path / "attacker-state"
+        attacker.mkdir()
+        attacker.chmod(0o777)
+        state_home.symlink_to(attacker, target_is_directory=True)
+
+        with pytest.raises(PermissionError, match="insecure state directory"):
+            with ProcessLock(paths):
+                pass
+        assert not (attacker / "zai-python-helper").exists()
+
+    def test_configured_root_symlink_rejects_attacker_writable_target_ancestor(
+        self, tmp_path
+    ):
+        """A safe link entry cannot hide an unchecked writable target path."""
+        victim = tmp_path / "victim-state"
+        victim.mkdir(mode=0o700)
+        attacker = tmp_path / "attacker"
+        attacker.mkdir()
+        attacker.chmod(0o777)
+        (attacker / "redirect").symlink_to(victim, target_is_directory=True)
+        state_home = tmp_path / "state-link"
+        state_home.symlink_to(attacker / "redirect", target_is_directory=True)
+        paths = Paths.from_home(tmp_path / "home", state_home=state_home)
+
+        with pytest.raises(PermissionError, match="insecure state directory"):
+            with ProcessLock(paths):
+                pass
+        assert not (victim / "zai-python-helper").exists()
+
+    def test_configured_root_symlink_rejects_foreign_readonly_target_ancestor(
+        self, tmp_path, monkeypatch
+    ):
+        """A foreign owner can chmod and replace entries despite mode 0555."""
+        import zai_python_helper.patchplan as patchplan
+
+        victim = tmp_path / "victim-state"
+        victim.mkdir(mode=0o700)
+        foreign = tmp_path / "foreign"
+        foreign.mkdir()
+        (foreign / "redirect").symlink_to(victim, target_is_directory=True)
+        foreign.chmod(0o555)
+        state_home = tmp_path / "state-link"
+        state_home.symlink_to(foreign / "redirect", target_is_directory=True)
+        paths = Paths.from_home(tmp_path / "home", state_home=state_home)
+        foreign_fds: set[int] = set()
+        real_open = patchplan.os.open
+        real_fstat = patchplan.os.fstat
+        real_close = patchplan.os.close
+
+        def track_open(path, flags, *args, dir_fd=None, **kwargs):
+            fd = real_open(path, flags, *args, dir_fd=dir_fd, **kwargs)
+            if Path(path).name == foreign.name:
+                foreign_fds.add(fd)
+            return fd
+
+        def foreign_fstat(fd):
+            result = real_fstat(fd)
+            if fd in foreign_fds:
+                return SimpleNamespace(
+                    st_uid=result.st_uid + 1,
+                    st_mode=result.st_mode,
+                )
+            return result
+
+        def track_close(fd):
+            foreign_fds.discard(fd)
+            real_close(fd)
+
+        monkeypatch.setattr(patchplan.os, "open", track_open)
+        monkeypatch.setattr(patchplan.os, "fstat", foreign_fstat)
+        monkeypatch.setattr(patchplan.os, "close", track_close)
+
+        try:
+            with pytest.raises(PermissionError, match="insecure state directory"):
+                with ProcessLock(paths):
+                    pass
+        finally:
+            foreign.chmod(0o755)
+        assert not (victim / "zai-python-helper").exists()
+
     def test_precreated_lock_symlink_is_rejected(self, tmp_path):
         """The lock itself must also be opened without following symlinks."""
         lock_path = tmp_path / "lock"
@@ -595,8 +765,262 @@ class TestProcessLock:
 
         with ProcessLock(paths.lock_file):
             pass
-        assert target in paths.lock_file.parents
+        assert state_home in paths.lock_file.parents
         assert (target / "zai-python-helper").is_dir()
+
+    def test_symlinked_xdg_state_root_may_resolve_to_its_parent(self, tmp_path):
+        """A `state -> .` alias validates and pins the containing directory."""
+        safe = tmp_path / "safe"
+        safe.mkdir(mode=0o700)
+        state_home = safe / "state"
+        state_home.symlink_to(".", target_is_directory=True)
+        paths = Paths.from_home(tmp_path / "home", state_home=state_home)
+
+        with ProcessLock(paths):
+            pass
+
+        assert (safe / "zai-python-helper").is_dir()
+
+    @pytest.mark.parametrize("entry_kind", ["directory", "symlink"])
+    def test_replaceable_default_home_entry_fails_closed(
+        self, tmp_path, monkeypatch, entry_kind
+    ):
+        """A replaceable HOME entry cannot split state and lock domains."""
+        monkeypatch.delenv("ZAI_PYTHON_HELPER_STATE_HOME")
+        monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+        home = tmp_path / "home"
+        if entry_kind == "symlink":
+            target = tmp_path / "target"
+            target.mkdir()
+            home.symlink_to(target, target_is_directory=True)
+        else:
+            home.mkdir()
+        paths = Paths.from_home(home)
+
+        with pytest.raises(PermissionError, match="replaceable managed HOME"):
+            with ProcessLock(paths):
+                pass
+
+    def test_state_root_replacement_cannot_redirect_held_capability(self, tmp_path):
+        """A root replacement after flock cannot redirect descriptor I/O."""
+        state_home = tmp_path / "state"
+        paths = Paths.from_home(tmp_path / "home", state_home=state_home)
+        attacker = tmp_path / "attacker"
+        attacker.mkdir()
+        attacker.chmod(0o777)
+        original = tmp_path / "state-original"
+
+        with ProcessLock(paths) as lock:
+            assert lock.state is not None
+            state_home.rename(original)
+            state_home.symlink_to(attacker, target_is_directory=True)
+            lock.state.atomic_write("ownership.json", b'{"pinned": true}\n', 0o600)
+
+        persisted = (
+            original
+            / "zai-python-helper"
+            / paths.lock_file.parent.name
+            / "ownership.json"
+        )
+        assert persisted.read_text() == '{"pinned": true}\n'
+        assert not (attacker / "zai-python-helper").exists()
+        with pytest.raises(PermissionError, match="insecure state directory"):
+            with ProcessLock(paths):
+                pass
+
+    def test_safe_state_root_retarget_keeps_one_transaction_lock_domain(
+        self, tmp_path, monkeypatch
+    ):
+        """Two accepted targets for one HOME cannot run transactions together."""
+        home = tmp_path / "home"
+        home.mkdir()
+        first_target = tmp_path / "state-a"
+        second_target = tmp_path / "state-b"
+        first_target.mkdir()
+        second_target.mkdir()
+        state_home = tmp_path / "state-link"
+        state_home.symlink_to(first_target, target_is_directory=True)
+        paths = Paths.from_home(home, state_home=state_home)
+        first_holds = threading.Event()
+        release_first = threading.Event()
+        second_started = threading.Event()
+        second_entered = threading.Event()
+
+        # Isolate the in-process coordinator; BSD flock does not block a
+        # second fd in the same process, and Linux must exercise that case too.
+        monkeypatch.setattr(fcntl, "flock", lambda *_args: None)
+
+        def hold_first_target():
+            with ProcessLock(paths):
+                first_holds.set()
+                assert release_first.wait(timeout=2)
+
+        def enter_second_target():
+            second_started.set()
+            with ProcessLock(paths):
+                second_entered.set()
+
+        first = threading.Thread(target=hold_first_target)
+        second = threading.Thread(target=enter_second_target)
+        first.start()
+        assert first_holds.wait(timeout=2)
+        state_home.unlink()
+        state_home.symlink_to(second_target, target_is_directory=True)
+        second.start()
+        try:
+            assert second_started.wait(timeout=2)
+            time.sleep(0.05)
+            assert not second_entered.is_set()
+        finally:
+            release_first.set()
+            first.join(timeout=2)
+            second.join(timeout=2)
+
+        assert second_entered.is_set()
+
+    def test_safe_state_root_retarget_keeps_cross_process_lock_domain(
+        self, tmp_path
+    ):
+        """The stable coordinator also serializes different target processes."""
+        home = tmp_path / "home"
+        home.mkdir()
+        first_target = tmp_path / "state-a"
+        second_target = tmp_path / "state-b"
+        first_target.mkdir()
+        second_target.mkdir()
+        state_home = tmp_path / "state-link"
+        state_home.symlink_to(first_target, target_is_directory=True)
+        paths = Paths.from_home(home, state_home=state_home)
+        entered = tmp_path / "child-entered"
+        script = """
+import sys
+from pathlib import Path
+from zai_python_helper.patchplan import ProcessLock
+from zai_python_helper.paths import Paths
+
+paths = Paths.from_home(Path(sys.argv[1]), state_home=Path(sys.argv[2]))
+with ProcessLock(paths):
+    Path(sys.argv[3]).write_text("entered")
+"""
+
+        with ProcessLock(paths):
+            state_home.unlink()
+            state_home.symlink_to(second_target, target_is_directory=True)
+            process = subprocess.Popen(
+                [sys.executable, "-c", script, str(home), str(state_home), str(entered)]
+            )
+            time.sleep(0.2)
+            assert not entered.exists()
+
+        process.wait(timeout=2)
+        assert process.returncode == 0
+        assert entered.read_text() == "entered"
+
+    def test_home_coordinator_flock_uses_a_writable_regular_file(
+        self, tmp_path, monkeypatch
+    ):
+        """NFS-style flock must not receive a read-only directory fd."""
+        home = tmp_path / "home"
+        home.mkdir()
+        paths = Paths.from_home(home, state_home=tmp_path / "state")
+        real_flock = fcntl.flock
+        exclusive_fds: list[int] = []
+
+        def nfs_flock(fd, operation):
+            if operation == fcntl.LOCK_EX:
+                flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+                if flags & os.O_ACCMODE != os.O_RDWR:
+                    raise OSError(errno.EBADF, "NFS exclusive flock requires O_RDWR")
+                assert stat.S_ISREG(os.fstat(fd).st_mode)
+                exclusive_fds.append(fd)
+            real_flock(fd, operation)
+
+        monkeypatch.setattr(fcntl, "flock", nfs_flock)
+
+        with ProcessLock(paths):
+            pass
+
+        assert len(exclusive_fds) == 2
+        coordinator = home / ".zai-python-helper.lock"
+        assert coordinator.is_file()
+        assert coordinator.stat().st_mode & 0o777 == 0o600
+
+    def test_paths_and_raw_lock_callers_share_state_inode_lock(
+        self, tmp_path, monkeypatch
+    ):
+        """The compatibility constructor cannot bypass same-process locking."""
+        home = tmp_path / "home"
+        home.mkdir()
+        paths = Paths.from_home(home, state_home=tmp_path / "state")
+        first_holds = threading.Event()
+        release_first = threading.Event()
+        second_started = threading.Event()
+        second_entered = threading.Event()
+        monkeypatch.setattr(fcntl, "flock", lambda *_args: None)
+
+        def use_paths():
+            with ProcessLock(paths):
+                first_holds.set()
+                assert release_first.wait(timeout=2)
+
+        def use_raw_path():
+            second_started.set()
+            with ProcessLock(paths.lock_file):
+                second_entered.set()
+
+        first = threading.Thread(target=use_paths)
+        second = threading.Thread(target=use_raw_path)
+        first.start()
+        assert first_holds.wait(timeout=2)
+        second.start()
+        try:
+            assert second_started.wait(timeout=2)
+            time.sleep(0.05)
+            assert not second_entered.is_set()
+        finally:
+            release_first.set()
+            first.join(timeout=2)
+            second.join(timeout=2)
+
+        assert second_entered.is_set()
+
+    def test_thread_lock_uses_pinned_inode_across_lexical_aliases(
+        self, tmp_path, monkeypatch
+    ):
+        """BSD-style flock semantics cannot bypass the in-process lock by alias."""
+        target = tmp_path / "actual-state"
+        target.mkdir()
+        alias = tmp_path / "state-link"
+        alias.symlink_to(target, target_is_directory=True)
+        direct = Paths.from_home(tmp_path / "home", state_home=target)
+        through_alias = replace(
+            direct,
+            lock_file=alias / direct.lock_file.relative_to(target),
+        )
+        order: list[str] = []
+        first_holds = threading.Event()
+
+        # BSD flock is process-associated and does not serialize two fresh fds
+        # in one process. A no-op accurately isolates our threading layer.
+        monkeypatch.setattr(fcntl, "flock", lambda *_args: None)
+
+        def worker(paths, name, signal=False):
+            with ProcessLock(paths):
+                if signal:
+                    first_holds.set()
+                order.append(f"{name}-enter")
+                time.sleep(0.05 if signal else 0)
+                order.append(f"{name}-exit")
+
+        first = threading.Thread(target=worker, args=(direct, "A", True))
+        second = threading.Thread(target=worker, args=(through_alias, "B"))
+        first.start()
+        assert first_holds.wait(timeout=2)
+        second.start()
+        first.join(timeout=2)
+        second.join(timeout=2)
+
+        assert order == ["A-enter", "A-exit", "B-enter", "B-exit"]
 
     @settings(
         max_examples=12,
@@ -890,15 +1314,15 @@ class TestProcessLock:
 
 
 class TestRecover:
-    def test_recover_accepts_legacy_lexical_journal_path(self, tmp_path):
-        """Canonical state roots must preserve pending pre-upgrade journals."""
+    def test_recover_accepts_legacy_canonical_journal_path(self, tmp_path):
+        """Lexical state roots preserve pending pre-upgrade canonical journals."""
         target = tmp_path / "state-target"
         target.mkdir()
         state_link = tmp_path / "state-link"
         state_link.symlink_to(target, target_is_directory=True)
         paths = Paths.from_home(tmp_path, state_home=state_link)
         paths.recovery_json.parent.mkdir(parents=True)
-        old_journal = state_link / paths.ownership_json.relative_to(target)
+        old_journal = target / paths.ownership_json.relative_to(state_link)
         paths.recovery_json.write_text(
             json.dumps(
                 {

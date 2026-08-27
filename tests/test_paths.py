@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from zai_python_helper.patchplan import ProcessLock
 from zai_python_helper.paths import Paths
 
 
@@ -79,16 +80,20 @@ def test_paths_rejects_invalid_xdg_state_home(monkeypatch, tmp_path, value):
 
 
 def test_paths_rejects_dangling_configured_state_symlink(tmp_path):
-    """A missing configured volume must fail closed rather than redirecting state."""
+    """Paths stays pure; the write boundary rejects a dangling state root."""
     state_link = tmp_path / "state-link"
     state_link.symlink_to(tmp_path / "unmounted-state", target_is_directory=True)
-    with pytest.raises(ValueError, match="dangling symlink"):
-        Paths.from_home(tmp_path, state_home=state_link)
+    paths = Paths.from_home(tmp_path, state_home=state_link)
+
+    with pytest.raises(OSError):
+        ProcessLock(paths).acquire()
 
 
 def test_paths_rejects_dangling_symlink_in_state_ancestor(tmp_path):
-    """A missing volume symlink in an existing prefix must fail closed."""
+    """A dangling symlink in an existing prefix fails at the write boundary."""
     state_link = tmp_path / "state-link"
     state_link.symlink_to(tmp_path / "unmounted-state", target_is_directory=True)
-    with pytest.raises(ValueError, match="dangling symlink"):
-        Paths.from_home(tmp_path, state_home=state_link / "app")
+    paths = Paths.from_home(tmp_path, state_home=state_link / "app")
+
+    with pytest.raises(OSError):
+        ProcessLock(paths).acquire()

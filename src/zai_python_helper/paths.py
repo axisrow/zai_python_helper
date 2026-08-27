@@ -50,24 +50,6 @@ def _state_home_from_env(home: Path) -> tuple[Path, Path | None]:
     )
 
 
-def _canonical_configured_state_root(path: Path) -> Path:
-    """Resolve the existing prefix strictly and allow a nonexistent suffix."""
-    missing: list[str] = []
-    probe = path
-    while not os.path.lexists(probe):
-        if probe == probe.parent:
-            break
-        missing.append(probe.name)
-        probe = probe.parent
-    try:
-        resolved = probe.resolve(strict=True)
-    except (FileNotFoundError, OSError) as exc:
-        raise ValueError(f"configured state root has a dangling symlink: {path}") from exc
-    for part in reversed(missing):
-        resolved /= part
-    return resolved
-
-
 @dataclass(frozen=True)
 class Paths:
     """Frozen bundle of every resolved filesystem path the tool touches.
@@ -93,6 +75,9 @@ class Paths:
     # Pre-#116 production fallback, retained only as a descriptor-validated
     # migration source. It is never selected for new state I/O.
     legacy_runtime_dir: Path | None
+    # Whether the default state root is derived from HOME and therefore moves
+    # with it. ProcessLock uses this to reject a replaceable HOME namespace.
+    state_home_follows_home: bool
     # Project-scoped Claude settings (relative to CWD, if any).
     # Added for issue #23: credential egress gap fix.
     project_claude_settings: Path
@@ -138,18 +123,20 @@ class Paths:
         """
         h = Path(home)
         legacy_runtime_root: Path | None = None
+        state_home_follows_home = False
         # ``state_home`` is an injection seam. When omitted, use the explicit
         # XDG root or its private per-user default and retain the old shared
         # /var/tmp root only as a migration source.
         if state_home is None:
             state_home, legacy_runtime_root = _state_home_from_env(h)
+            state_home_follows_home = legacy_runtime_root is not None
         configured_state_home = Path(state_home)
         home_id = hashlib.sha256(str(h).encode()).hexdigest()[:16]
-        # Pin the state root's current symlink target.  All transaction files
-        # then use the same canonical tree as the lock, even if the user-level
-        # XDG symlink is retargeted while a transaction is running.
-        state_root = _canonical_configured_state_root(configured_state_home)
-        helper_dir = state_root / "zai-python-helper" / home_id
+        # Keep the configured spelling intact.  Resolving it here would make
+        # this pure value object perform a check that the write boundary later
+        # uses by path, creating a check/use race.  ProcessLock opens and pins
+        # this tree descriptor-relatively before any state I/O instead.
+        helper_dir = configured_state_home / "zai-python-helper" / home_id
         state_dir = helper_dir / "state"
         cwd_path = Path(cwd) if cwd is not None else Path.cwd()
         return cls(
@@ -168,6 +155,7 @@ class Paths:
                 if legacy_runtime_root is not None
                 else None
             ),
+            state_home_follows_home=state_home_follows_home,
             project_claude_settings=cwd_path / ".claude" / "settings.json",
             local_claude_settings=cwd_path / ".claude" / "settings.local.json",
             cwd=cwd_path,
