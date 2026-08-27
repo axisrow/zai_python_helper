@@ -28,11 +28,11 @@ content), so they are written mode ``0600``.
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import fcntl
 import json
 import os
-import shutil
 import stat
 import tempfile
 import threading as _threading
@@ -47,10 +47,24 @@ from zai_python_helper.paths import Paths
 # same posture as the secrets file. Reuse ownership's secret-grade atomic
 # writer so both stay consistent.
 _SECURE_FILE_MODE = 0o600
+_LEGACY_STATE_NAMES = ("ownership.json", "recovery.json")
+_LEGACY_HANDOFF_NAME = "legacy-handoff.json"
+_LegacyIdentity = tuple[int, int, int, int]
 
 
-def _ensure_private_parent(path: Path) -> int:
-    """Create the state parent without following attacker-controlled entries."""
+@dataclass(frozen=True)
+class _LegacyGeneration:
+    """Persisted generation; ``journal_path`` is comparison metadata only."""
+
+    source: str
+    journal_path: Path
+    files: dict[str, bytes | None]
+    cleanup_baseline: dict[str, bytes | None] | None = None
+    cleanup_identities: dict[str, _LegacyIdentity | None] | None = None
+
+
+def _open_private_parent(path: Path, *, create: bool, harden: bool = False) -> int:
+    """Open the state parent without following attacker-controlled entries."""
     if ".." in Path(path.parent).parts:
         raise ValueError(f"state path must not contain '..': {path.parent}")
     parent = Path(os.path.abspath(path.parent))
@@ -75,10 +89,11 @@ def _ensure_private_parent(path: Path) -> int:
     try:
         for part in parts[1:]:
             current /= part
-            try:
-                os.mkdir(part, mode=0o700, dir_fd=fd)
-            except FileExistsError:
-                pass
+            if create:
+                try:
+                    os.mkdir(part, mode=0o700, dir_fd=fd)
+                except FileExistsError:
+                    pass
             # macOS exposes /var as a system symlink.  Permit such trusted
             # ancestors, but never follow symlinks once entering our state
             # directory (the predictable attacker-controlled component).
@@ -95,12 +110,19 @@ def _ensure_private_parent(path: Path) -> int:
                 if private and st.st_uid != os.getuid():
                     raise PermissionError(f"insecure state directory: {current}")
                 if private and st.st_mode & 0o077:
-                    os.fchmod(next_fd, 0o700)
+                    if create or harden:
+                        os.fchmod(next_fd, 0o700)
+                    else:
+                        raise PermissionError(f"insecure state directory: {current}")
             except BaseException:
                 os.close(next_fd)
                 raise
-            os.close(fd)
+            previous_fd = fd
+            # Transfer ownership before close: if close itself fails, the
+            # outer finally owns only next_fd and cannot double-close a reused
+            # previous descriptor number.
             fd = next_fd
+            os.close(previous_fd)
         result = fd
         fd = -1
         return result
@@ -109,75 +131,546 @@ def _ensure_private_parent(path: Path) -> int:
             os.close(fd)
 
 
-def migrate_legacy_state(paths: Paths) -> list[str]:
-    """Move pre-0.1 bookkeeping out of HOME, once and atomically.
+def _ensure_private_parent(path: Path) -> int:
+    """Create and pin the state parent directory."""
+    return _open_private_parent(path, create=True)
 
-    Older releases kept these files in ``~/.zai-python-helper``.  Losing that
-    journal on upgrade would make ``use default`` clear values it could no
-    longer prove ownership of, so migrate each file only when its new
-    destination is absent.  The operation is serialized by the new lock and
-    is intentionally a no-op for fresh installations (the parity path).
+
+class PinnedStateDirectory:
+    """Capability for descriptor-relative state-directory I/O.
+
+    The descriptor is opened and validated once.  Every journal, lock, and
+    recovery-manifest operation below it is then addressed by basename via
+    ``dir_fd``.  Holding this object is the authority to touch state; there is
+    deliberately no path-based fallback.
     """
-    legacy_dir = paths.claude_settings.parent.parent / ".zai-python-helper"
-    moved: list[str] = []
-    with ProcessLock(paths.lock_file):
-        paths.ownership_json.parent.mkdir(parents=True, exist_ok=True)
-        for name, destination in (
-            ("ownership.json", paths.ownership_json),
-            ("recovery.json", paths.recovery_json),
+
+    def __init__(self, path: Path, fd: int) -> None:
+        self.path = Path(path)
+        self._fd: int | None = fd
+
+    @classmethod
+    def open(
+        cls, path: str | Path, *, create: bool = False, harden: bool = False
+    ) -> PinnedStateDirectory | None:
+        directory = Path(path)
+        try:
+            fd = _open_private_parent(
+                directory / ".state-probe", create=create, harden=harden
+            )
+        except FileNotFoundError:
+            return None
+        return cls(directory, fd)
+
+    @property
+    def fd(self) -> int:
+        if self._fd is None:
+            raise RuntimeError("pinned state directory is closed")
+        return self._fd
+
+    @staticmethod
+    def _name(name: str) -> str:
+        if not name or name in {".", ".."} or Path(name).name != name:
+            raise ValueError(f"state entry must be a basename: {name!r}")
+        return name
+
+    def open_file(self, name: str, flags: int, mode: int = _SECURE_FILE_MODE) -> int:
+        return os.open(self._name(name), flags | os.O_NOFOLLOW, mode, dir_fd=self.fd)
+
+    def read_text(self, name: str) -> str:
+        return _read_at(self.fd, self._name(name))
+
+    def read_bytes(self, name: str) -> bytes:
+        fd = self.open_file(name, os.O_RDONLY)
+        try:
+            stream = os.fdopen(fd, "rb")
+        except OSError:
+            os.close(fd)
+            raise
+        with stream:
+            return stream.read()
+
+    def identity(self, name: str) -> _LegacyIdentity:
+        fd = self.open_file(name, os.O_RDONLY)
+        try:
+            st = os.fstat(fd)
+            return (st.st_dev, st.st_ino, st.st_mtime_ns, st.st_size)
+        finally:
+            os.close(fd)
+
+    def exists(self, name: str) -> bool:
+        try:
+            fd = self.open_file(name, os.O_RDONLY)
+        except FileNotFoundError:
+            return False
+        else:
+            os.close(fd)
+            return True
+
+    def atomic_write(self, name: str, data: bytes, mode: int) -> None:
+        _atomic_write_at(self.fd, self._name(name), data, mode)
+
+    def unlink(self, name: str, *, missing_ok: bool = True) -> None:
+        try:
+            os.unlink(self._name(name), dir_fd=self.fd)
+        except FileNotFoundError:
+            if not missing_ok:
+                raise
+
+    def close(self) -> None:
+        if self._fd is not None:
+            fd = self._fd
+            self._fd = None
+            os.close(fd)
+
+    def __enter__(self) -> PinnedStateDirectory:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+
+def migrate_legacy_state(paths: Paths) -> list[str]:
+    """Reconcile older bookkeeping generations into the active state root.
+
+    Older releases used first ``~/.zai-python-helper`` and then a predictable
+    runtime tree. Losing or mixing their journal/recovery generation could make
+    ``use default`` restore the wrong values. Both old locks are retained for
+    the complete transaction, and state that reappears after a lock handoff is
+    imported by the next transaction. Fresh installations remain a no-op.
+    """
+    with state_transaction(paths) as (_lock, moved):
+        return moved
+
+
+@contextlib.contextmanager
+def state_transaction(paths: Paths):
+    """Hold new and legacy locks for one complete mutating operation.
+
+    The legacy lock lease intentionally outlives migration. An old-version
+    process may have started before us but not reached its lock yet; retaining
+    the lease through recovery and commit prevents that process from entering
+    its legacy critical section midway through the new-root transaction.
+    """
+    with ProcessLock(paths) as lock:
+        if lock.state is None:
+            raise RuntimeError("ProcessLock acquired without pinned state")
+        with contextlib.ExitStack() as stack:
+            sources: dict[str, tuple[Path, PinnedStateDirectory]] = {}
+            _initialized, pending = _read_legacy_handoff(lock.state)
+            # Reserve every old lock namespace even when its tree does not yet
+            # exist. An already-started old process may be paused before mkdir
+            # and must still serialize with this complete transaction.
+            legacy_candidates: list[tuple[str, Path, bool]] = []
+            runtime_dir = paths.legacy_runtime_dir
+            if pending is not None and pending.source == "runtime":
+                runtime_dir = runtime_dir or _expected_legacy_runtime_dir(paths)
+                if pending.journal_path != runtime_dir / "ownership.json":
+                    raise RuntimeError("invalid legacy state handoff record")
+            if runtime_dir is not None:
+                legacy_candidates.append(
+                    ("runtime", runtime_dir, True)
+                )
+            # The runtime tree superseded the pre-0.1 HOME tree. Acquire it
+            # first and migrate its newer state before considering HOME.
+            legacy_candidates.append(
+                (
+                    "home",
+                    paths.claude_settings.parent.parent / ".zai-python-helper",
+                    True,
+                )
+            )
+            if pending is not None and pending.source == "home":
+                expected = legacy_candidates[-1][1] / "ownership.json"
+                if pending.journal_path != expected:
+                    raise RuntimeError("invalid legacy state handoff record")
+            if (
+                pending is not None
+                and pending.source == "active"
+                and pending.journal_path != paths.ownership_json
+            ):
+                raise RuntimeError("invalid legacy state handoff record")
+            for label, legacy_dir, create in legacy_candidates:
+                if legacy_dir == lock.state.path:
+                    continue
+                try:
+                    source = PinnedStateDirectory.open(
+                        legacy_dir, create=create, harden=True
+                    )
+                except OSError:
+                    if label == "runtime":
+                        # A foreign-owned predictable /var/tmp root is an
+                        # attacker reservation, not an authority and not a
+                        # reason to deny the victim access to private state.
+                        continue
+                    # Pre-0.1 ProcessLock followed HOME symlinks. Continuing
+                    # without pinning that exact lock namespace would let an
+                    # already-started old process race the active transaction.
+                    raise
+                if source is None:
+                    continue
+                stack.enter_context(source)
+                stack.enter_context(_locked_legacy_state(source))
+                sources[label] = (legacy_dir, source)
+            moved = _migrate_legacy_state_locked(paths, lock.state, sources)
+            yield lock, moved
+
+
+def _expected_legacy_runtime_dir(paths: Paths) -> Path:
+    """Reconstruct the fixed pre-#116 runtime namespace independent of env."""
+    return (
+        Path("/var/tmp")
+        / f"zai-python-helper-{os.getuid()}"
+        / "zai-python-helper"
+        / paths.lock_file.parent.name
+    )
+
+
+def _migrate_legacy_state_locked(
+    paths: Paths,
+    destination: PinnedStateDirectory,
+    sources: dict[str, tuple[Path, PinnedStateDirectory]],
+) -> list[str]:
+    """Mirror one authoritative legacy state generation into the active root.
+
+    ``ownership.json`` and ``recovery.json`` are one generation, never two
+    independent migration candidates. The former runtime generation outranks
+    pre-0.1 HOME state. A secure active-root handoff record makes mirroring and
+    source cleanup resumable if the process exits between filesystem steps.
+    """
+    initialized, pending = _read_legacy_handoff(destination)
+    snapshots = {
+        label: _snapshot_legacy_state(source)
+        for label, (_legacy_dir, source) in sources.items()
+    }
+    active_snapshot = _snapshot_legacy_state(destination)
+
+    selected: _LegacyGeneration | None = None
+    runtime_snapshot = snapshots.get("runtime")
+    if runtime_snapshot is not None and _has_legacy_state(runtime_snapshot):
+        if not (
+            pending is not None
+            and pending.source == "runtime"
+            and _is_cleanup_residue(runtime_snapshot, pending.files)
         ):
-            source = legacy_dir / name
-            if source.exists() and not destination.exists():
-                _copy_then_remove(source, destination)
-                moved.append(name)
-        # A recovery manifest stores the journal's absolute path.  Rewrite
-        # that reference while migrating, otherwise recovery would replay
-        # config but silently discard the journal retirement/update.
-        if paths.recovery_json.exists():
-            _rewrite_legacy_journal_path(
-                paths.recovery_json,
-                legacy_dir / "ownership.json",
+            selected = _live_legacy_generation(sources, "runtime", runtime_snapshot)
+
+    home_snapshot = snapshots.get("home")
+    home_identities = (
+        _snapshot_legacy_identities(sources["home"][1])
+        if "home" in sources
+        else None
+    )
+    if selected is None and pending is not None:
+        live = snapshots.get(pending.source)
+        if (
+            pending.source == "home"
+            and live is not None
+            and _has_legacy_state(live)
+            and not _is_cleanup_residue(live, pending.files)
+        ):
+            selected = _live_legacy_generation(sources, "home", live)
+        elif (
+            pending.source == "active"
+            and pending.cleanup_baseline is not None
+            and home_snapshot is not None
+            and _has_legacy_state(home_snapshot)
+            and not (
+                _is_cleanup_residue(home_snapshot, pending.cleanup_baseline)
+                and pending.cleanup_identities is not None
+                and home_identities is not None
+                and _is_identity_residue(
+                    home_identities, pending.cleanup_identities
+                )
+            )
+        ):
+            selected = _live_legacy_generation(sources, "home", home_snapshot)
+        else:
+            selected = pending
+
+    if (
+        selected is None
+        and home_snapshot is not None
+        and _has_legacy_state(home_snapshot)
+    ):
+        if initialized or not _has_legacy_state(active_snapshot):
+            selected = _live_legacy_generation(sources, "home", home_snapshot)
+        else:
+            # Before the first reconciliation, existing active XDG state is a
+            # newer generation than a HOME file left behind by old migration.
+            # Persist this cleanup as a resumable active generation so a crash
+            # cannot make the remaining HOME subset look newly reappeared.
+            selected = _LegacyGeneration(
+                "active",
+                paths.ownership_json,
+                active_snapshot,
+                cleanup_baseline=home_snapshot,
+                cleanup_identities=home_identities,
+            )
+
+    if selected is None:
+        if not initialized:
+            _write_legacy_handoff(destination, None)
+        return []
+
+    _write_legacy_handoff(destination, selected)
+
+    for name, data in selected.files.items():
+        if data is None:
+            destination.unlink(name)
+            continue
+        if name == "recovery.json":
+            data = _rewrite_migrated_manifest(
+                data,
+                selected.journal_path,
                 paths.ownership_json,
             )
-    return moved
+        destination.atomic_write(name, data, _SECURE_FILE_MODE)
+
+    if selected.source in sources:
+        _unlink_legacy_state(sources[selected.source][1])
+    if selected.source in {"runtime", "active"} and "home" in sources:
+        _unlink_legacy_state(sources["home"][1])
+    _write_legacy_handoff(destination, None)
+    if selected.source == "active":
+        return []
+    return [name for name, data in selected.files.items() if data is not None]
 
 
-def _copy_then_remove(source: Path, destination: Path) -> None:
-    """Migrate a file safely even when source and destination cross devices."""
-    destination.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(
-        prefix=f".{destination.name}.", dir=destination.parent
+def _live_legacy_generation(
+    sources: dict[str, tuple[Path, PinnedStateDirectory]],
+    label: str,
+    files: dict[str, bytes | None],
+) -> _LegacyGeneration:
+    legacy_dir = sources[label][0]
+    return _LegacyGeneration(label, legacy_dir / "ownership.json", files)
+
+
+def _snapshot_legacy_state(
+    source: PinnedStateDirectory,
+) -> dict[str, bytes | None]:
+    snapshot: dict[str, bytes | None] = {}
+    for name in _LEGACY_STATE_NAMES:
+        try:
+            snapshot[name] = source.read_bytes(name)
+        except FileNotFoundError:
+            snapshot[name] = None
+    return snapshot
+
+
+def _snapshot_legacy_identities(
+    source: PinnedStateDirectory,
+) -> dict[str, _LegacyIdentity | None]:
+    identities: dict[str, _LegacyIdentity | None] = {}
+    for name in _LEGACY_STATE_NAMES:
+        try:
+            identities[name] = source.identity(name)
+        except FileNotFoundError:
+            identities[name] = None
+    return identities
+
+
+def _has_legacy_state(files: dict[str, bytes | None]) -> bool:
+    return any(data is not None for data in files.values())
+
+
+def _is_cleanup_residue(
+    current: dict[str, bytes | None], pending: dict[str, bytes | None]
+) -> bool:
+    """Return whether live files are an unchanged subset of a pending copy."""
+    return all(
+        data is None or data == pending[name]
+        for name, data in current.items()
     )
+
+
+def _is_identity_residue(
+    current: dict[str, _LegacyIdentity | None],
+    baseline: dict[str, _LegacyIdentity | None],
+) -> bool:
+    return all(
+        identity is None or identity == baseline[name]
+        for name, identity in current.items()
+    )
+
+
+def _unlink_legacy_state(source: PinnedStateDirectory) -> None:
+    for name in _LEGACY_STATE_NAMES:
+        source.unlink(name)
+
+
+def _read_legacy_handoff(
+    destination: PinnedStateDirectory,
+) -> tuple[bool, _LegacyGeneration | None]:
     try:
-        with os.fdopen(fd, "wb") as output, source.open("rb") as input_file:
-            shutil.copyfileobj(input_file, output)
-            output.flush()
-            os.fsync(output.fileno())
-        os.chmod(temporary, 0o600)
-        os.replace(temporary, destination)
-        source.unlink()
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(temporary)
-        raise
+        raw = destination.read_text(_LEGACY_HANDOFF_NAME)
+    except FileNotFoundError:
+        return False, None
+    try:
+        document = json.loads(raw)
+        if not isinstance(document, dict) or document.get("version") != 1:
+            raise ValueError
+        if document.get("initialized") is not True:
+            raise ValueError
+        progress = document.get("in_progress")
+        if progress is None:
+            return True, None
+        if not isinstance(progress, dict):
+            raise ValueError
+        label = progress.get("source")
+        journal_path = progress.get("journal_path")
+        encoded = progress.get("files")
+        encoded_baseline = progress.get("cleanup_baseline")
+        encoded_identities = progress.get("cleanup_identities")
+        if (
+            label not in {"runtime", "home", "active"}
+            or not isinstance(journal_path, str)
+            or Path(journal_path).name != "ownership.json"
+            or not isinstance(encoded, dict)
+        ):
+            raise ValueError
+        if set(encoded) != set(_LEGACY_STATE_NAMES):
+            raise ValueError
+        files: dict[str, bytes | None] = {}
+        for name in _LEGACY_STATE_NAMES:
+            value = encoded[name]
+            if value is None:
+                files[name] = None
+            elif isinstance(value, str):
+                files[name] = base64.b64decode(value, validate=True)
+            else:
+                raise ValueError
+        cleanup_baseline = None
+        cleanup_identities = None
+        if encoded_baseline is not None:
+            if (
+                label != "active"
+                or not isinstance(encoded_baseline, dict)
+                or not isinstance(encoded_identities, dict)
+            ):
+                raise ValueError
+            if (
+                set(encoded_baseline) != set(_LEGACY_STATE_NAMES)
+                or set(encoded_identities) != set(_LEGACY_STATE_NAMES)
+            ):
+                raise ValueError
+            cleanup_baseline = {}
+            cleanup_identities = {}
+            for name in _LEGACY_STATE_NAMES:
+                value = encoded_baseline[name]
+                if value is None:
+                    cleanup_baseline[name] = None
+                elif isinstance(value, str):
+                    cleanup_baseline[name] = base64.b64decode(value, validate=True)
+                else:
+                    raise ValueError
+                identity = encoded_identities[name]
+                if identity is None:
+                    cleanup_identities[name] = None
+                elif (
+                    isinstance(identity, list)
+                    and len(identity) == 4
+                    and all(type(part) is int for part in identity)
+                ):
+                    cleanup_identities[name] = tuple(identity)
+                else:
+                    raise ValueError
+        elif label == "active":
+            raise ValueError
+        elif encoded_identities is not None:
+            raise ValueError
+        return True, _LegacyGeneration(
+            label,
+            Path(journal_path),
+            files,
+            cleanup_baseline,
+            cleanup_identities,
+        )
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("invalid legacy state handoff record") from exc
 
 
-def _rewrite_legacy_journal_path(
-    manifest_path: Path, legacy_journal: Path, current_journal: Path
+def _write_legacy_handoff(
+    destination: PinnedStateDirectory,
+    progress: _LegacyGeneration | None,
 ) -> None:
+    encoded_progress = None
+    if progress is not None:
+        encoded_progress = {
+            "source": progress.source,
+            "journal_path": str(progress.journal_path),
+            "files": {
+                name: (
+                    None
+                    if progress.files[name] is None
+                    else base64.b64encode(progress.files[name]).decode()
+                )
+                for name in _LEGACY_STATE_NAMES
+            },
+            "cleanup_baseline": (
+                None
+                if progress.cleanup_baseline is None
+                else {
+                    name: (
+                        None
+                        if progress.cleanup_baseline[name] is None
+                        else base64.b64encode(
+                            progress.cleanup_baseline[name]
+                        ).decode()
+                    )
+                    for name in _LEGACY_STATE_NAMES
+                }
+            ),
+            "cleanup_identities": (
+                None
+                if progress.cleanup_identities is None
+                else {
+                    name: (
+                        None
+                        if progress.cleanup_identities[name] is None
+                        else list(progress.cleanup_identities[name])
+                    )
+                    for name in _LEGACY_STATE_NAMES
+                }
+            ),
+        }
+    document = {
+        "version": 1,
+        "initialized": True,
+        "in_progress": encoded_progress,
+    }
+    data = (json.dumps(document, indent=2, ensure_ascii=False) + "\n").encode()
+    destination.atomic_write(_LEGACY_HANDOFF_NAME, data, _SECURE_FILE_MODE)
+
+
+@contextlib.contextmanager
+def _locked_legacy_state(state: PinnedStateDirectory):
+    """Serialize migration with processes still using the legacy state tree."""
+    lock_path = state.path / "lock"
+    fd = os_open_at(state.fd, lock_path.name, lock_path)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        with contextlib.suppress(OSError):
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        with contextlib.suppress(OSError):
+            close_fd(fd)
+
+
+def _rewrite_migrated_manifest(
+    data: bytes, legacy_journal: Path, current_journal: Path
+) -> bytes:
     """Update a migrated manifest's stale absolute journal reference."""
     try:
-        document = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return
+        document = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return data
     journal = document.get("journal") if isinstance(document, dict) else None
     if not isinstance(journal, dict) or journal.get("path") != str(legacy_journal):
-        return
+        return data
     journal["path"] = str(current_journal)
-    text = json.dumps(document, indent=2, ensure_ascii=False) + "\n"
-    from zai_python_helper.ownership import _atomic_write_secret
-
-    _atomic_write_secret(manifest_path, text.encode("utf-8"))
+    return (json.dumps(document, indent=2, ensure_ascii=False) + "\n").encode()
 
 
 # ---------------------------------------------------------------------------
@@ -225,23 +718,26 @@ class ProcessLock:
        released when the holding fd closes / the process exits).
 
     A context manager: :meth:`__enter__` takes both layers, :meth:`__exit__`
-    releases both. Not reentrant: a nested ``with ProcessLock(p)`` in the same
-    thread WILL deadlock (the threading.Lock is non-reentrant) — callers
-    acquire once per activation.
+    releases both. Nesting is rejected before the second lock is acquired.
+    No production caller needs nesting, and failing loudly is safer than
+    replacing or clearing the outer lock's pinned state capability.
     """
 
-    def __init__(self, path: str | Path) -> None:
-        self.path = Path(path)
+    def __init__(self, target: Paths | str | Path) -> None:
+        self.paths = target if isinstance(target, Paths) else None
+        self.path = self.paths.lock_file if self.paths is not None else Path(target)
         self._fd: int | None = None
         self._intra: _threading.Lock | None = None
         self._held_intra = False
         # The validated helper directory is pinned for the whole lock scope.
         # State files must be addressed through this descriptor, never by
         # resolving ``self.path`` again (issue #111).
-        self.root_fd: int | None = None
+        self.state: PinnedStateDirectory | None = None
 
     def acquire(self) -> None:
         """Take the in-process lock, then open the file and take flock."""
+        if getattr(_LOCK_CONTEXT, "active_lock", None) is not None:
+            raise RuntimeError("nested ProcessLock acquisition is forbidden")
         # 1) In-process serialization (threads).
         intra = _intra_lock(self.path)
         intra.acquire()
@@ -250,10 +746,10 @@ class ProcessLock:
         # 2) Cross-process serialization (flock). Create the file + parent dir.
         try:
             parent_fd = _ensure_private_parent(self.path)
-            self.root_fd = parent_fd
+            self.state = PinnedStateDirectory(self.path.parent, parent_fd)
             self._fd = os_open_at(parent_fd, self.path.name, self.path)
-            _LOCK_CONTEXT.root_fd = self.root_fd
             fcntl.flock(self._fd, fcntl.LOCK_EX)
+            _LOCK_CONTEXT.active_lock = self
         except BaseException:
             # Close the fd we opened (if flock failed) and release the intra
             # lock — never hold one layer without the other, never leak the fd.
@@ -263,12 +759,12 @@ class ProcessLock:
                 with contextlib.suppress(OSError):
                     close_fd(self._fd)
                 self._fd = None
-            if self.root_fd is not None:
+            if self.state is not None:
                 with contextlib.suppress(OSError):
-                    os.close(self.root_fd)
-                self.root_fd = None
-            if getattr(_LOCK_CONTEXT, "root_fd", None) is not None:
-                _LOCK_CONTEXT.root_fd = None
+                    self.state.close()
+                self.state = None
+            if getattr(_LOCK_CONTEXT, "active_lock", None) is self:
+                _LOCK_CONTEXT.active_lock = None
             self._release_intra()
             raise
 
@@ -285,12 +781,12 @@ class ProcessLock:
             with contextlib.suppress(OSError):
                 close_fd(self._fd)
             self._fd = None
-        if self.root_fd is not None:
+        if self.state is not None:
             with contextlib.suppress(OSError):
-                os.close(self.root_fd)
-            self.root_fd = None
-        if getattr(_LOCK_CONTEXT, "root_fd", None) is not None:
-            _LOCK_CONTEXT.root_fd = None
+                self.state.close()
+            self.state = None
+        if getattr(_LOCK_CONTEXT, "active_lock", None) is self:
+            _LOCK_CONTEXT.active_lock = None
         self._release_intra()
 
     def __enter__(self) -> ProcessLock:
@@ -299,16 +795,6 @@ class ProcessLock:
 
     def __exit__(self, *exc: object) -> None:
         self.release()
-
-
-def os_open(path: Path) -> int:
-    """Open ``path`` for flock (creating it). Isolated for test monkeypatching."""
-    import os
-
-    fd = os.open(
-        str(path), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, _SECURE_FILE_MODE
-    )
-    return _validate_lock_fd(fd, path)
 
 
 def os_open_at(parent_fd: int, name: str, path: Path) -> int:
@@ -364,7 +850,14 @@ def _atomic_write_at(root_fd: int, name: str, data: bytes, mode: int) -> None:
     temporary = f".{name}.{next(tempfile._get_candidate_names())}.tmp"
     fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode, dir_fd=root_fd)
     try:
-        with os.fdopen(fd, "wb") as stream:
+        stream = os.fdopen(fd, "wb")
+    except OSError:
+        os.close(fd)
+        with contextlib.suppress(OSError):
+            os.unlink(temporary, dir_fd=root_fd)
+        raise
+    try:
+        with stream:
             stream.write(data)
             stream.flush()
             os.fsync(stream.fileno())
@@ -455,11 +948,9 @@ def _tag_path(paths: Paths, tag: FileTag) -> Path:
 
 
 def _write_manifest(
-    path: Path,
+    state: PinnedStateDirectory,
     entries: list[_RecoveryEntry],
     journal: _RecoveryEntry | None = None,
-    *,
-    root_fd: int | None = None,
 ) -> None:
     """Persist the recovery manifest atomically at 0600 (may carry secrets).
 
@@ -473,16 +964,11 @@ def _write_manifest(
     if journal is not None:
         payload["journal"] = journal.to_dict()
     text = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
-    from zai_python_helper.ownership import _atomic_write_secret
-
-    if root_fd is None:
-        _atomic_write_secret(path, text.encode("utf-8"))
-    else:
-        _atomic_write_at(root_fd, path.name, text.encode("utf-8"), _SECURE_FILE_MODE)
+    state.atomic_write("recovery.json", text.encode("utf-8"), _SECURE_FILE_MODE)
 
 
 def _read_manifest(
-    path: Path, paths: Paths, *, root_fd: int | None = None
+    state: PinnedStateDirectory, paths: Paths
 ) -> tuple[list[_RecoveryEntry], _RecoveryEntry | None]:
     """Parse a recovery manifest → ``(entries, journal)``.
 
@@ -496,12 +982,7 @@ def _read_manifest(
     interrupted run carried one (issue #60), else ``None``.
     """
     try:
-        if root_fd is None:
-            if not path.exists():
-                return [], None
-            raw = path.read_text(encoding="utf-8")
-        else:
-            raw = _read_at(root_fd, path.name)
+        raw = state.read_text("recovery.json")
         doc = json.loads(raw)
     except (OSError, json.JSONDecodeError):
         return [], None
@@ -548,28 +1029,24 @@ def _read_manifest(
     return entries, journal
 
 
-def _remove_manifest(path: Path, *, root_fd: int | None = None) -> None:
+def _remove_manifest(state: PinnedStateDirectory) -> None:
     """Delete the recovery manifest (commit complete). Best-effort + silent."""
     with contextlib.suppress(FileNotFoundError, OSError):
-        if root_fd is None:
-            path.unlink()
-        else:
-            os.unlink(path.name, dir_fd=root_fd)
+        state.unlink("recovery.json")
 
 
-def _apply_entry(entry: _RecoveryEntry, *, root_fd: int | None = None) -> None:
+def _apply_entry(
+    entry: _RecoveryEntry, *, state: PinnedStateDirectory | None = None
+) -> None:
     """Write one recovery entry to disk atomically (idempotent replay)."""
     data = entry.content.encode("utf-8")
     if entry.tag == "ownership":
         # The journal is credential-bearing state, not a user config file.
         # Keep its 0600 protection when replaying the transaction after a
         # crash; config entries use the upstream-parity 0644 writer.
-        from zai_python_helper.ownership import _atomic_write_secret
-
-        if root_fd is None:
-            _atomic_write_secret(Path(entry.path), data)
-        else:
-            _atomic_write_at(root_fd, "ownership.json", data, _SECURE_FILE_MODE)
+        if state is None:
+            raise RuntimeError("ownership replay requires a pinned state directory")
+        state.atomic_write("ownership.json", data, _SECURE_FILE_MODE)
         return
     from zai_python_helper.backends import atomic_write_bytes
 
@@ -588,7 +1065,11 @@ def has_pending_recovery(paths: Paths) -> bool:
     the previous ``use`` did not finish cleanly and its manifest must be
     replayed before a new run proceeds.
     """
-    return paths.recovery_json.exists()
+    state = PinnedStateDirectory.open(paths.recovery_json.parent, create=False)
+    if state is None:
+        return False
+    with state:
+        return state.exists("recovery.json")
 
 
 def recover(paths: Paths) -> list[str]:
@@ -611,33 +1092,38 @@ def recover(paths: Paths) -> list[str]:
         The list of tags (e.g. ``["settings", "zshrc"]``) that recovery
         wrote, in manifest order. Empty if no manifest existed.
     """
-    with ProcessLock(paths.lock_file) as lock:
-        # The context is intentionally explicit so future state I/O cannot
-        # accidentally regress to path-based access.
-        entries, journal = _read_manifest(paths.recovery_json, paths, root_fd=lock.root_fd)
-        if not entries and journal is None:
-            # An absent/empty manifest means nothing to recover. Ensure no
-            # stale (e.g. zero-byte) manifest lingers.
-            _remove_manifest(paths.recovery_json, root_fd=lock.root_fd)
-            return []
-        applied = []
-        for entry in entries:
-            _apply_entry(entry, root_fd=lock.root_fd)
-            applied.append(entry.tag)
-        # Replay the ownership journal LAST, mirroring commit order: the
-        # journal's ``active=False`` retirement only becomes durable once the
-        # RESTORE it describes is durable (issue #60). It is not reported as a
-        # recovered tag — it is bookkeeping, not a managed config file.
-        if journal is not None:
-            _apply_entry(journal, root_fd=lock.root_fd)
-        _remove_manifest(paths.recovery_json, root_fd=lock.root_fd)
-        return applied
+    with state_transaction(paths) as (lock, _moved):
+        if lock.state is None:
+            raise RuntimeError("ProcessLock acquired without pinned state")
+        return recover_locked(paths, lock.state)
+
+
+def recover_locked(paths: Paths, state: PinnedStateDirectory) -> list[str]:
+    """Replay recovery while the caller retains new and legacy lock leases."""
+    entries, journal = _read_manifest(state, paths)
+    if not entries and journal is None:
+        # An absent/empty manifest means nothing to recover. Ensure no stale
+        # (e.g. zero-byte) manifest lingers.
+        _remove_manifest(state)
+        return []
+    applied = []
+    for entry in entries:
+        _apply_entry(entry)
+        applied.append(entry.tag)
+    # Replay the ownership journal LAST, mirroring commit order: the journal's
+    # ``active=False`` retirement only becomes durable once the RESTORE it
+    # describes is durable (issue #60). It is not reported as a recovered tag.
+    if journal is not None:
+        _apply_entry(journal, state=state)
+    _remove_manifest(state)
+    return applied
 
 
 def apply_plan_locked(
     paths: Paths,
     plan: PatchPlan,
     *,
+    state: PinnedStateDirectory,
     on_locked: Any = None,
     journal_content: Any = None,
 ) -> list[FileTag]:
@@ -671,6 +1157,10 @@ def apply_plan_locked(
     Returns the tags actually written, in plan order (the journal is not a
     managed config file and never appears in the result).
     """
+    if state.path != paths.lock_file.parent:
+        raise ValueError(
+            f"transaction state {state.path} does not match {paths.lock_file.parent}"
+        )
     entries: list[_RecoveryEntry] = []
     written: list[FileTag] = []
     for delta in plan.deltas:
@@ -700,11 +1190,7 @@ def apply_plan_locked(
     # Persist the manifest BEFORE any managed-file write so a crash at any
     # later point is recoverable. The manifest holds final content, so
     # recovery is a pure replay (no re-read of live state).
-    # apply_plan_locked is only public as a lock-scoped operation.  Use the
-    # held descriptor when available; path fallback is retained for callers
-    # that provide a compatible lock implementation in tests.
-    root_fd = getattr(_LOCK_CONTEXT, "root_fd", None)
-    _write_manifest(paths.recovery_json, entries, journal_entry, root_fd=root_fd)
+    _write_manifest(state, entries, journal_entry)
     # Commit every file. On FULL success, drop the manifest (commit complete).
     # On a PARTIAL failure, LEAVE the manifest so the next invocation rolls
     # forward — deleting it here would strand mixed state with no recovery
@@ -717,8 +1203,8 @@ def apply_plan_locked(
     # before the RESTORE it describes (issue #60). If we die here, the manifest
     # survives and recovery finishes both halves.
     if journal_entry is not None:
-        _apply_entry(journal_entry, root_fd=root_fd)
-    _remove_manifest(paths.recovery_json, root_fd=root_fd)
+        _apply_entry(journal_entry, state=state)
+    _remove_manifest(state)
     return written
 
 
@@ -743,7 +1229,13 @@ def apply_plan_under_lock(
     file write; if it raises, the lock is released and no manifest is written.
     ``journal_content`` is forwarded unchanged (see :func:`apply_plan_locked`).
     """
-    with ProcessLock(paths.lock_file):
+    with ProcessLock(paths) as lock:
+        if lock.state is None:
+            raise RuntimeError("ProcessLock acquired without pinned state")
         return apply_plan_locked(
-            paths, plan, on_locked=on_locked, journal_content=journal_content
+            paths,
+            plan,
+            state=lock.state,
+            on_locked=on_locked,
+            journal_content=journal_content,
         )

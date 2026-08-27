@@ -37,6 +37,7 @@ zai-python-helper = "zai_python_helper.__main__:main"
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
+    "hypothesis>=6.0",
     "pytest-httpserver>=1.1",
     "build",
     "hatchling>=1.21",

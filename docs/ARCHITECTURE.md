@@ -111,10 +111,11 @@ The v2 daemon **must already accept HTTP** from Claude/OpenCode (the data plane)
 2. if it **changed since** (user edited it, or another tool did) → **do not overwrite**; surface "key changed externally since activation, not reverting — inspect `<journal>`" and leave it.
 
 This is per-transition and self-invalidating rather than a frozen snapshot.
-It lives outside HOME at `$XDG_STATE_HOME/zai-python-helper/<home-id>/ownership.json`
-(using the OS temporary directory as a fallback), mode `0600`. The process
-lock and recovery manifest use the same state directory. This keeps
-bookkeeping out of the Phase-1 HOME artifact set without weakening revert.
+It lives at `$XDG_STATE_HOME/zai-python-helper/<home-id>/ownership.json`, or
+the XDG default `$HOME/.local/state/...` when that variable is unset, mode
+`0600`. The process lock and recovery manifest use the same state directory.
+Parity runs inject `XDG_STATE_HOME`, keeping bookkeeping out of their Phase-1
+HOME artifact set without weakening revert.
 
 **Status:** Accepted for v1. (Note: `CredentialRef` resolution in `io/resolve_key()` may read this journal on revert — IO, not core, consistent with ADR-001.)
 
@@ -136,13 +137,18 @@ bookkeeping out of the Phase-1 HOME artifact set without weakening revert.
 
 ## ADR-006: Pinned state-root descriptors and legacy manifest paths (HARD)
 
-State bookkeeping is addressed relative to the validated helper-directory
-descriptor retained by `ProcessLock`. The descriptor is opened with
-`O_NOFOLLOW`, ownership/mode checked, and held until the lock is released;
-manifest and ownership-journal reads, writes, replacement, and removal use
-`dir_fd` operations on it. No state operation re-resolves the configured
-state-root path after lock acquisition. This closes the validation/use TOCTOU
-window for configured symlink roots.
+State bookkeeping is addressed through one explicit `PinnedStateDirectory`
+capability retained by `ProcessLock`. Its helper-directory descriptor is
+opened once with `O_NOFOLLOW`, ownership/mode checked, and held until the lock
+is released. Lock, manifest, and ownership-journal reads, writes, replacement,
+and removal use basename-only `dir_fd` operations on that capability. There is
+no optional descriptor or path-based fallback after lock acquisition.
+
+`ProcessLock` nesting in one thread is not a supported use case and is rejected
+before a second lock is acquired. The pinned capability is passed explicitly
+to lock-scoped operations; it is never stored in a replaceable thread-local FD
+slot. This makes a nested callback fail closed instead of silently redirecting
+the outer transaction after a directory swap.
 
 For compatibility, a recovery manifest's historical absolute ownership-journal
 path is treated as legacy metadata, not as an authority for I/O. During the
@@ -151,7 +157,35 @@ manifest names `ownership.json`; recovery always writes the journal relative
 to the pinned root. Thus manifests written before state-root canonicalization
 continue to recover without silently migrating or losing their journal update.
 
-**Status:** Accepted for v1.1 (issue #111).
+The former predictable `/var/tmp/zai-python-helper-<uid>` fallback is migration
+input only. Fresh state uses the private XDG default. A legacy runtime tree is
+read only through its own validated descriptor; foreign-owned, symlinked, or
+non-directory reservations are ignored rather than denying service, while a
+safe current-user tree is migrated atomically into the active pinned root.
+That availability exception applies only to the predictable runtime namespace;
+an unpinnable HOME legacy tree fails closed because pre-0.1 locks followed HOME
+symlinks and must still be serialized during cross-version handoff.
+Both supported legacy trees (the pre-0.1 HOME tree and the former runtime tree)
+are safely reserved when absent, and their flocks are retained through
+migration, recovery, planning, and commit. Thus an already-started old-version
+process cannot create its tree and enter its former critical section midway
+through the new-root transaction. When both trees contain state, the newer
+runtime tree is authoritative for the complete ownership/recovery generation;
+files from different generations are never combined. Reappearing runtime state
+written after a lock handoff replaces the active generation on the next
+transaction. A secret-grade, descriptor-relative handoff record in the active
+root makes generation mirroring and legacy cleanup resumable after interruption.
+It retains comparison-only journal metadata, while any resumed runtime lock path
+is reconstructed and validated from the fixed legacy namespace rather than
+trusted from the record or current environment overrides. Its completed state
+also distinguishes stale HOME debris during the first XDG reconciliation from
+a HOME generation that genuinely reappears after lock handoff. Interrupted
+active-state preservation records the exact HOME cleanup baseline, so changed
+HOME files from a queued old process supersede stale cleanup state on resume.
+Descriptor-derived file identities distinguish a newly recreated generation
+even when its bytes happen to match the stale baseline exactly.
+
+**Status:** Superseded and strengthened for v1.1 (issues #111 and #116).
 
 ## v2 live state (decided, deferred implementation)
 

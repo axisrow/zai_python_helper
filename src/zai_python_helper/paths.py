@@ -2,7 +2,8 @@
 
 Every user configuration path is resolved from a single injected ``home``
 through ``Paths.from_home``. Runtime bookkeeping (journal, lock, recovery)
-is resolved in an external state root so it does not mutate HOME.
+is resolved in the configured XDG state root (or its ``~/.local/state``
+default), separate from managed tool configuration.
 
 This module lives in the core layer (pure domain services, no side effects).
 ``from_home`` is PURE path arithmetic — it performs no IO at all and no
@@ -26,15 +27,27 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-def _state_home_from_env() -> tuple[str, bool]:
-    """Return the configured absolute state root, or the secure fallback."""
+def _state_home_from_env(home: Path) -> tuple[Path, Path | None]:
+    """Return the configured state root and any legacy runtime root.
+
+    Older releases fell back to the predictable shared path
+    ``/var/tmp/zai-python-helper-<uid>``.  A different local user can reserve
+    that path before the real user starts the helper and cause a permanent
+    availability failure.  Fresh installations instead use the XDG default
+    below HOME, whose ancestors are not writable by other users.  The old
+    root is returned only as a migration source; it is never authoritative
+    for new I/O.
+    """
     override = os.environ.get("ZAI_PYTHON_HELPER_STATE_HOME", "")
     xdg = os.environ.get("XDG_STATE_HOME", "")
     if override and Path(override).is_absolute():
-        return override, False
+        return Path(override), None
     if xdg and Path(xdg).is_absolute():
-        return xdg, False
-    return f"/var/tmp/zai-python-helper-{os.getuid()}", True
+        return Path(xdg), None
+    return (
+        home / ".local" / "state",
+        Path("/var/tmp") / f"zai-python-helper-{os.getuid()}",
+    )
 
 
 def _canonical_configured_state_root(path: Path) -> Path:
@@ -77,6 +90,9 @@ class Paths:
     recovery_json: Path
     lock_file: Path
     state_dir: Path
+    # Pre-#116 production fallback, retained only as a descriptor-validated
+    # migration source. It is never selected for new state I/O.
+    legacy_runtime_dir: Path | None
     # Project-scoped Claude settings (relative to CWD, if any).
     # Added for issue #23: credential egress gap fix.
     project_claude_settings: Path
@@ -121,28 +137,18 @@ class Paths:
                 a specific path to simulate running from a project directory.
         """
         h = Path(home)
-        is_fallback = False
-        # Runtime bookkeeping is deliberately not part of HOME for the
-        # production entry point. ``state_home`` is an injection seam;
-        # omitted here it preserves the hermetic legacy layout for tests and
-        # library callers that explicitly inject a HOME.
+        legacy_runtime_root: Path | None = None
+        # ``state_home`` is an injection seam. When omitted, use the explicit
+        # XDG root or its private per-user default and retain the old shared
+        # /var/tmp root only as a migration source.
         if state_home is None:
-            # /var/tmp is durable across reboots, unlike /tmp.  The directory
-            # is created and ownership-checked by ProcessLock before use.
-            state_home, is_fallback = _state_home_from_env()
+            state_home, legacy_runtime_root = _state_home_from_env(h)
         configured_state_home = Path(state_home)
         home_id = hashlib.sha256(str(h).encode()).hexdigest()[:16]
         # Pin the state root's current symlink target.  All transaction files
         # then use the same canonical tree as the lock, even if the user-level
         # XDG symlink is retargeted while a transaction is running.
-        # Preserve the fallback leaf for descriptor validation: resolving it
-        # first would follow a pre-created attacker symlink. User-configured
-        # roots are canonicalized so all bookkeeping remains pinned together.
-        state_root = (
-            configured_state_home
-            if is_fallback
-            else _canonical_configured_state_root(configured_state_home)
-        )
+        state_root = _canonical_configured_state_root(configured_state_home)
         helper_dir = state_root / "zai-python-helper" / home_id
         state_dir = helper_dir / "state"
         cwd_path = Path(cwd) if cwd is not None else Path.cwd()
@@ -157,6 +163,11 @@ class Paths:
             recovery_json=helper_dir / "recovery.json",
             lock_file=helper_dir / "lock",
             state_dir=state_dir,
+            legacy_runtime_dir=(
+                legacy_runtime_root / "zai-python-helper" / home_id
+                if legacy_runtime_root is not None
+                else None
+            ),
             project_claude_settings=cwd_path / ".claude" / "settings.json",
             local_claude_settings=cwd_path / ".claude" / "settings.local.json",
             cwd=cwd_path,

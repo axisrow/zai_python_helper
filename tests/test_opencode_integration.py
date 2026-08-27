@@ -53,10 +53,10 @@ class TestApplyAndRevert:
         self, tool, tmp_path, region, provider_name
     ):
         paths = Paths.from_home(tmp_path, state_home=tmp_path)
-        with ProcessLock(paths.lock_file):
+        with ProcessLock(paths) as lock:
             state = tool.read_state(paths)
             plan = tool.plan_zai(_spec(), region, state=state, auth_token=TOKEN)
-            apply_plan_locked(paths, plan)
+            apply_plan_locked(paths, plan, state=lock.state)
 
         doc = _read_doc(paths)
         assert doc["$schema"] == oc.OPENCODE_SCHEMA
@@ -70,10 +70,10 @@ class TestApplyAndRevert:
     def test_use_zai_is_idempotent(self, tool, tmp_path):
         paths = Paths.from_home(tmp_path, state_home=tmp_path)
         spec = _spec()
-        with ProcessLock(paths.lock_file):
+        with ProcessLock(paths) as lock:
             state = tool.read_state(paths)
             plan1 = tool.plan_zai(spec, Region.GLOBAL, state=state, auth_token=TOKEN)
-            apply_plan_locked(paths, plan1)
+            apply_plan_locked(paths, plan1, state=lock.state)
             state2 = tool.read_state(paths)
             plan2 = tool.plan_zai(spec, Region.GLOBAL, state=state2, auth_token=TOKEN)
         assert plan2.is_empty  # second activation: nothing to do
@@ -93,20 +93,20 @@ class TestApplyAndRevert:
         journal = OwnershipJournal(paths.ownership_json)
 
         # 1) use zai
-        with ProcessLock(paths.lock_file):
+        with ProcessLock(paths) as lock:
             state = tool.read_state(paths)
             plan = tool.plan_zai(spec, Region.GLOBAL, state=state, auth_token=TOKEN)
             records = tool.extract_takeover(plan, prior_state=state, spec=spec)
             current = journal.read()
             journal.write(_merge(tool, current, records))
-            apply_plan_locked(paths, plan)
+            apply_plan_locked(paths, plan, state=lock.state)
 
         # 2) use default (journal-aware)
-        with ProcessLock(paths.lock_file):
+        with ProcessLock(paths) as lock:
             state = tool.read_state(paths)
             decisions, _retired = tool.revert_decisions(journal.read(), state)
             plan = tool.plan_revert(state=state, decisions=decisions)
-            apply_plan_locked(paths, plan)
+            apply_plan_locked(paths, plan, state=lock.state)
 
         doc = _read_doc(paths)
         # Coding-plan provider gone; foreign provider + schema + theme restored.
@@ -127,23 +127,23 @@ class TestApplyAndRevert:
         spec = _spec()
         journal = OwnershipJournal(paths.ownership_json)
 
-        with ProcessLock(paths.lock_file):
+        with ProcessLock(paths) as lock:
             state = tool.read_state(paths)
             plan = tool.plan_zai(spec, Region.GLOBAL, state=state, auth_token=TOKEN)
             records = tool.extract_takeover(plan, prior_state=state, spec=spec)
             journal.write(_merge(tool, journal.read(), records))
-            apply_plan_locked(paths, plan)
+            apply_plan_locked(paths, plan, state=lock.state)
 
         # External edit: rotate the apiKey out from under us.
         doc = _read_doc(paths)
         doc["provider"][GLOBAL_NAME]["options"]["apiKey"] = "user-rotated"
         JsonBackend.write(paths.opencode, doc)
 
-        with ProcessLock(paths.lock_file):
+        with ProcessLock(paths) as lock:
             state = tool.read_state(paths)
             decisions, _retired = tool.revert_decisions(journal.read(), state)
             plan = tool.plan_revert(state=state, decisions=decisions)
-            apply_plan_locked(paths, plan)
+            apply_plan_locked(paths, plan, state=lock.state)
 
         doc = _read_doc(paths)
         # The externally-set key is NOT clobbered.
@@ -156,10 +156,10 @@ class TestApplyAndRevert:
         JsonBackend.write(paths.claude_settings, {"env": {"ANTHROPIC_AUTH_TOKEN": "cc-tok"}})
 
         spec = _spec()
-        with ProcessLock(paths.lock_file):
+        with ProcessLock(paths) as lock:
             state = tool.read_state(paths)
             plan = tool.plan_zai(spec, Region.GLOBAL, state=state, auth_token=TOKEN)
-            apply_plan_locked(paths, plan)
+            apply_plan_locked(paths, plan, state=lock.state)
 
         # Claude Code settings round-trip unchanged.
         cc = JsonBackend.read(paths.claude_settings)
@@ -198,9 +198,11 @@ class TestApplyAndRevert:
 
         # Activating EITHER region is refused from a dual-provider seed.
         for region in (Region.GLOBAL, Region.CHINA):
-            with ProcessLock(paths.lock_file):
+            with ProcessLock(paths) as lock:
                 state = tool.read_state(paths)
-                journal_records = OwnershipJournal(paths.ownership_json).read()
+                journal_records = OwnershipJournal(paths.ownership_json).read(
+                    state=lock.state
+                )
                 with pytest.raises(ValidationError):
                     tool.plan_zai(
                         spec,
@@ -215,14 +217,16 @@ class TestApplyAndRevert:
 
     def _use_default(self, tool, paths):
         """Run the CLI's ``use default`` path (journal-aware plan_revert)."""
-        with ProcessLock(paths.lock_file):
+        with ProcessLock(paths) as lock:
             state = tool.read_state(paths)
-            journal_records = OwnershipJournal(paths.ownership_json).read()
+            journal_records = OwnershipJournal(paths.ownership_json).read(
+                state=lock.state
+            )
             decisions, _ = tool.revert_decisions(journal_records, state)
             plan = tool.plan_revert(
                 state=state, decisions=decisions, journal_records=journal_records
             )
-            apply_plan_locked(paths, plan)
+            apply_plan_locked(paths, plan, state=lock.state)
             return decisions
 
     def test_use_default_clears_duplicate_when_our_value_intact(
@@ -239,11 +243,11 @@ class TestApplyAndRevert:
         paths = Paths.from_home(tmp_path, state_home=tmp_path)
         spec = _spec()
 
-        with ProcessLock(paths.lock_file):
+        with ProcessLock(paths) as lock:
             state = tool.read_state(paths)
             plan = tool.plan_zai(spec, Region.GLOBAL, state=state, auth_token=TOKEN)
             records = tool.extract_takeover(plan, prior_state=state, spec=spec)
-            apply_plan_locked(paths, plan)
+            apply_plan_locked(paths, plan, state=lock.state)
         journal = OwnershipJournal(paths.ownership_json)
         journal.write(_merge(tool, journal.read(), records))
 
@@ -262,7 +266,7 @@ class TestApplyAndRevert:
         assert after["provider"][CHINA_NAME] == {"options": {"apiKey": "user-china-key"}}
 
         # ...and `use zai` now succeeds — recovery is complete.
-        with ProcessLock(paths.lock_file):
+        with ProcessLock(paths) as lock:
             state = tool.read_state(paths)
             tool.plan_zai(spec, Region.GLOBAL, state=state, auth_token=TOKEN)
 
@@ -272,11 +276,11 @@ class TestApplyAndRevert:
         """Two matching regional entries are ambiguous and must both survive."""
         paths = Paths.from_home(tmp_path, state_home=tmp_path)
         spec = _spec()
-        with ProcessLock(paths.lock_file):
+        with ProcessLock(paths) as lock:
             state = tool.read_state(paths)
             plan = tool.plan_zai(spec, Region.GLOBAL, state=state, auth_token=TOKEN)
             records = tool.extract_takeover(plan, prior_state=state, spec=spec)
-            apply_plan_locked(paths, plan)
+            apply_plan_locked(paths, plan, state=lock.state)
         journal = OwnershipJournal(paths.ownership_json)
         journal.write(_merge(tool, journal.read(), records))
 
@@ -316,9 +320,11 @@ class TestApplyAndRevert:
         assert _read_doc(paths) == seed
 
         # ...and `use zai` is therefore still refused.
-        with ProcessLock(paths.lock_file):
+        with ProcessLock(paths) as lock:
             state = tool.read_state(paths)
-            journal_records = OwnershipJournal(paths.ownership_json).read()
+            journal_records = OwnershipJournal(paths.ownership_json).read(
+                state=lock.state
+            )
             with pytest.raises(ValidationError):
                 tool.plan_zai(
                     spec,
@@ -345,11 +351,11 @@ class TestApplyAndRevert:
         journal = OwnershipJournal(paths.ownership_json)
 
         # 1) Clean activation — the journal now attributes our entry by value.
-        with ProcessLock(paths.lock_file):
+        with ProcessLock(paths) as lock:
             state = tool.read_state(paths)
             plan = tool.plan_zai(spec, Region.GLOBAL, state=state, auth_token=TOKEN)
             records = tool.extract_takeover(plan, prior_state=state, spec=spec)
-            apply_plan_locked(paths, plan)
+            apply_plan_locked(paths, plan, state=lock.state)
         journal.write(_merge(tool, journal.read(), records))
 
         # 2) User hand-adds a china provider with their OWN credential.
@@ -359,7 +365,7 @@ class TestApplyAndRevert:
         assert oc.has_duplicate_regional_providers(_read_doc(paths))
 
         # 3) `use zai` again — no refusal, and the duplicate is healed.
-        with ProcessLock(paths.lock_file):
+        with ProcessLock(paths) as lock:
             state = tool.read_state(paths)
             journal_records = journal.read()
             plan = tool.plan_zai(
@@ -372,7 +378,7 @@ class TestApplyAndRevert:
             records = tool.extract_takeover(
                 plan, prior_state=state, spec=spec, journal_records=journal_records
             )
-            apply_plan_locked(paths, plan)
+            apply_plan_locked(paths, plan, state=lock.state)
         journal.write(_merge(tool, journal.read(), records))
 
         after = _read_doc(paths)
@@ -402,11 +408,11 @@ class TestApplyAndRevert:
         spec = _spec()
         journal = OwnershipJournal(paths.ownership_json)
 
-        with ProcessLock(paths.lock_file):
+        with ProcessLock(paths) as lock:
             state = tool.read_state(paths)
             plan = tool.plan_zai(spec, Region.GLOBAL, state=state, auth_token=TOKEN)
             records = tool.extract_takeover(plan, prior_state=state, spec=spec)
-            apply_plan_locked(paths, plan)
+            apply_plan_locked(paths, plan, state=lock.state)
         journal.write(_merge(tool, journal.read(), records))
 
         # The user's china entry is inserted FIRST in dict order, so a
@@ -424,7 +430,7 @@ class TestApplyAndRevert:
             },
         )
 
-        with ProcessLock(paths.lock_file):
+        with ProcessLock(paths) as lock:
             state = tool.read_state(paths)
             journal_records = journal.read()
             plan = tool.plan_zai(
@@ -456,11 +462,11 @@ class TestApplyAndRevert:
         journal = OwnershipJournal(paths.ownership_json)
 
         # Activate CHINA so our entry is the china name...
-        with ProcessLock(paths.lock_file):
+        with ProcessLock(paths) as lock:
             state = tool.read_state(paths)
             plan = tool.plan_zai(spec, Region.CHINA, state=state, auth_token=TOKEN)
             records = tool.extract_takeover(plan, prior_state=state, spec=spec)
-            apply_plan_locked(paths, plan)
+            apply_plan_locked(paths, plan, state=lock.state)
         journal.write(_merge(tool, journal.read(), records))
 
         # ...then hand-add a GLOBAL entry FIRST in dict order, so first-match
@@ -620,11 +626,11 @@ class TestSelfHealDestructionWarning:
 
         # Clean activation, then hand-add a china provider (mirrors the
         # self-heal fixture above).
-        with ProcessLock(paths.lock_file):
+        with ProcessLock(paths) as lock:
             state = tool.read_state(paths)
             plan = tool.plan_zai(spec, Region.GLOBAL, state=state, auth_token=TOKEN)
             records = tool.extract_takeover(plan, prior_state=state, spec=spec)
-            apply_plan_locked(paths, plan)
+            apply_plan_locked(paths, plan, state=lock.state)
         journal.write(_merge(tool, journal.read(), records))
 
         doc = _read_doc(paths)
@@ -660,10 +666,10 @@ class TestSelfHealDestructionWarning:
 
         paths = Paths.from_home(tmp_path, state_home=tmp_path)
         spec = _spec()
-        with ProcessLock(paths.lock_file):
+        with ProcessLock(paths) as lock:
             state = tool.read_state(paths)
             plan = tool.plan_zai(spec, Region.GLOBAL, state=state, auth_token=TOKEN)
-            apply_plan_locked(paths, plan)
+            apply_plan_locked(paths, plan, state=lock.state)
 
         state = tool.read_state(paths)
         plan = tool.plan_zai(spec, Region.GLOBAL, state=state, auth_token=TOKEN)

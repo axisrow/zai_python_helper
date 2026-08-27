@@ -247,20 +247,19 @@ def _write_opencode_duplicate(
         )
     )
     if journal_hash is not None:
-        paths.ownership_json.parent.mkdir(parents=True, exist_ok=True)
-        paths.ownership_json.write_text(
-            json.dumps(
-                {
-                    "opencode": {
-                        "provider.apiKey": {
-                            "prior_value": None,
-                            "prior_present": False,
-                            "set_hash": journal_hash,
-                            "active": active,
-                        }
+        from zai_python_helper.ownership import OwnershipJournal
+
+        OwnershipJournal(paths.ownership_json).write(
+            {
+                "opencode": {
+                    "provider.apiKey": {
+                        "prior_value": None,
+                        "prior_present": False,
+                        "set_hash": journal_hash,
+                        "active": active,
                     }
                 }
-            )
+            }
         )
 
 
