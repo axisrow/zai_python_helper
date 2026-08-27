@@ -120,6 +120,7 @@ def _open_state_component(
     controlled: bool,
     harden: bool,
     symlinks_left: int,
+    allow_user_symlinks: bool,
 ) -> int:
     """Open one component, resolving stable symlinks by descriptor walk."""
     if create:
@@ -143,6 +144,8 @@ def _open_state_component(
         parent_st = os.fstat(parent_fd)
         if private or not _directory_replace_safe(parent_st):
             raise PermissionError(f"insecure state symlink: {path}") from exc
+        if not allow_user_symlinks and parent_st.st_uid != 0:
+            raise PermissionError(f"insecure state symlink: {path}") from exc
         if symlinks_left <= 0:
             raise OSError(
                 errno.ELOOP, "too many state-directory symlinks", path
@@ -156,6 +159,7 @@ def _open_state_component(
             controlled=controlled,
             harden=harden,
             symlinks_left=symlinks_left - 1,
+            allow_user_symlinks=allow_user_symlinks,
         )
     try:
         _validate_state_directory(
@@ -181,6 +185,7 @@ def _open_state_symlink_target(
     controlled: bool,
     harden: bool,
     symlinks_left: int,
+    allow_user_symlinks: bool,
 ) -> int:
     """Resolve a symlink target without one unchecked multi-component open."""
     target_path = Path(target)
@@ -225,6 +230,7 @@ def _open_state_symlink_target(
                 controlled=controlled if final else False,
                 harden=harden if final else False,
                 symlinks_left=symlinks_left,
+                allow_user_symlinks=allow_user_symlinks,
             )
             previous_fd = fd
             fd = next_fd
@@ -245,6 +251,7 @@ def _open_directory_tree(
     harden: bool,
     private_paths: set[Path],
     controlled_paths: set[Path],
+    allow_user_symlinks: bool,
 ) -> int:
     """Walk, validate, and pin ``directory`` from the filesystem root."""
     if ".." in directory.parts:
@@ -265,6 +272,7 @@ def _open_directory_tree(
                 controlled=current in controlled_paths,
                 harden=harden,
                 symlinks_left=_MAX_STATE_SYMLINKS,
+                allow_user_symlinks=allow_user_symlinks,
             )
             previous_fd = fd
             # Transfer ownership before close: if close itself fails, the
@@ -319,38 +327,32 @@ def _open_private_parent(path: Path, *, create: bool, harden: bool = False) -> i
         harden=harden,
         private_paths=private_paths,
         controlled_paths=controlled_paths,
+        allow_user_symlinks=True,
     )
 
 
-def _open_transaction_coordinator(
-    paths: Paths | None, state_fd: int
-) -> tuple[int, int | None]:
-    """Pin the stable namespace and open its writable flock file."""
+def _open_transaction_coordinator(paths: Paths | None, state_fd: int) -> int:
+    """Pin the stable namespace used by the in-process lock."""
     if paths is None:
         # Raw-path callers already use their writable state lock file for
         # cross-process coordination. The pinned directory is still needed as
         # the stable in-process inode key shared with Paths callers.
-        return os.dup(state_fd), None
+        return os.dup(state_fd)
     lexical_home = paths.claude_settings.parent.parent
     if ".." in lexical_home.parts:
         raise ValueError(f"state path must not contain '..': {lexical_home}")
     home = Path(os.path.abspath(lexical_home))
-    home_fd = _open_directory_tree(
+    return _open_directory_tree(
         home,
         create=True,
         harden=False,
         private_paths=set(),
         controlled_paths={home},
+        # A user-retargetable HOME alias would redirect both the default state
+        # root and path-based config writes between transactions. Root-owned
+        # aliases remain usable because the invoking user cannot replace them.
+        allow_user_symlinks=False,
     )
-    coordinator_path = home / _TRANSACTION_COORDINATOR_NAME
-    try:
-        coordinator_fd = os_open_at(
-            home_fd, _TRANSACTION_COORDINATOR_NAME, coordinator_path
-        )
-    except BaseException:
-        os.close(home_fd)
-        raise
-    return home_fd, coordinator_fd
 
 
 def _ensure_private_parent(path: Path) -> int:
@@ -989,15 +991,24 @@ class ProcessLock:
         try:
             parent_fd = _ensure_private_parent(self.path)
             self.state = PinnedStateDirectory(self.path.parent, parent_fd)
-            coordinator_dir_fd, coordinator_fd = _open_transaction_coordinator(
-                self.paths, parent_fd
-            )
+            coordinator_dir_fd = _open_transaction_coordinator(self.paths, parent_fd)
             self._coordinator_dir_fd = coordinator_dir_fd
-            self._coordinator_fd = coordinator_fd
             for intra in _intra_locks(coordinator_dir_fd, parent_fd):
                 intra.acquire()
                 self._intra.append(intra)
             self._held_intra = True
+            coordinator_fd: int | None = None
+            if self.paths is not None:
+                coordinator_path = (
+                    self.paths.claude_settings.parent.parent
+                    / _TRANSACTION_COORDINATOR_NAME
+                )
+                coordinator_fd = os_open_at(
+                    coordinator_dir_fd,
+                    _TRANSACTION_COORDINATOR_NAME,
+                    coordinator_path,
+                )
+                self._coordinator_fd = coordinator_fd
             if coordinator_fd is not None:
                 fcntl.flock(coordinator_fd, fcntl.LOCK_EX)
             # Retain the state-file lease for compatibility with the previous

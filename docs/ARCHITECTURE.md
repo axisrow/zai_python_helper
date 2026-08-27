@@ -163,6 +163,15 @@ one process does not itself serialize threads. Replacing the configured path
 after acquisition cannot redirect the held state capability, and a later
 acquisition validates the replacement independently.
 
+The managed-HOME walk is stricter than the configurable state-root walk:
+symlink components are accepted only when their directory entry is below a
+root-owned, non-writable parent. A user-retargetable HOME alias fails closed.
+Otherwise the same alias change could redirect both default state and
+path-based tool configuration between acquisitions, splitting the journals and
+coordinator that are supposed to serialize those writes. Root-controlled
+system aliases remain supported because the invoking user cannot retarget
+their entries.
+
 `ProcessLock` nesting in one thread is not a supported use case and is rejected
 before a second lock is acquired. The pinned capability is passed explicitly
 to lock-scoped operations; it is never stored in a replaceable thread-local FD

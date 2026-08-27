@@ -781,6 +781,30 @@ class TestProcessLock:
 
         assert (safe / "zai-python-helper").is_dir()
 
+    def test_user_retargetable_home_symlink_fails_closed(
+        self, tmp_path, monkeypatch
+    ):
+        """A mutable HOME alias cannot split config and state lock domains."""
+        monkeypatch.delenv("ZAI_PYTHON_HELPER_STATE_HOME")
+        monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+        first = tmp_path / "home-a"
+        second = tmp_path / "home-b"
+        first.mkdir()
+        second.mkdir()
+        home = tmp_path / "home"
+        home.symlink_to(first, target_is_directory=True)
+        paths = Paths.from_home(home)
+
+        with pytest.raises(PermissionError, match="insecure state symlink"):
+            with ProcessLock(paths):
+                pass
+
+        home.unlink()
+        home.symlink_to(second, target_is_directory=True)
+        with pytest.raises(PermissionError, match="insecure state symlink"):
+            with ProcessLock(paths):
+                pass
+
     def test_state_root_replacement_cannot_redirect_held_capability(self, tmp_path):
         """A root replacement after flock cannot redirect descriptor I/O."""
         state_home = tmp_path / "state"
