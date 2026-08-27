@@ -28,6 +28,7 @@ content), so they are written mode ``0600``.
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import fcntl
 import json
@@ -46,6 +47,8 @@ from zai_python_helper.paths import Paths
 # same posture as the secrets file. Reuse ownership's secret-grade atomic
 # writer so both stay consistent.
 _SECURE_FILE_MODE = 0o600
+_LEGACY_STATE_NAMES = ("ownership.json", "recovery.json")
+_LEGACY_HANDOFF_NAME = "legacy-handoff.json"
 
 
 def _open_private_parent(path: Path, *, create: bool, harden: bool = False) -> int:
@@ -208,13 +211,13 @@ class PinnedStateDirectory:
 
 
 def migrate_legacy_state(paths: Paths) -> list[str]:
-    """Move pre-0.1 bookkeeping out of HOME, once and atomically.
+    """Reconcile older bookkeeping generations into the active state root.
 
-    Older releases kept these files in ``~/.zai-python-helper``.  Losing that
-    journal on upgrade would make ``use default`` clear values it could no
-    longer prove ownership of, so migrate each file only when its new
-    destination is absent. The operation is serialized by both new and legacy
-    locks and is intentionally a no-op for fresh installations.
+    Older releases used first ``~/.zai-python-helper`` and then a predictable
+    runtime tree. Losing or mixing their journal/recovery generation could make
+    ``use default`` restore the wrong values. Both old locks are retained for
+    the complete transaction, and state that reappears after a lock handoff is
+    imported by the next transaction. Fresh installations remain a no-op.
     """
     with state_transaction(paths) as (_lock, moved):
         return moved
@@ -233,22 +236,25 @@ def state_transaction(paths: Paths):
         if lock.state is None:
             raise RuntimeError("ProcessLock acquired without pinned state")
         with contextlib.ExitStack() as stack:
-            sources: list[tuple[Path, PinnedStateDirectory]] = []
+            sources: dict[str, tuple[Path, PinnedStateDirectory]] = {}
             # Reserve every old lock namespace even when its tree does not yet
             # exist. An already-started old process may be paused before mkdir
             # and must still serialize with this complete transaction.
-            legacy_candidates: list[tuple[Path, bool]] = []
+            legacy_candidates: list[tuple[str, Path, bool]] = []
             if paths.legacy_runtime_dir is not None:
-                legacy_candidates.append((paths.legacy_runtime_dir, True))
+                legacy_candidates.append(
+                    ("runtime", paths.legacy_runtime_dir, True)
+                )
             # The runtime tree superseded the pre-0.1 HOME tree. Acquire it
             # first and migrate its newer state before considering HOME.
             legacy_candidates.append(
                 (
+                    "home",
                     paths.claude_settings.parent.parent / ".zai-python-helper",
                     True,
                 )
             )
-            for legacy_dir, create in legacy_candidates:
+            for label, legacy_dir, create in legacy_candidates:
                 if legacy_dir == lock.state.path:
                     continue
                 try:
@@ -264,7 +270,7 @@ def state_transaction(paths: Paths):
                     continue
                 stack.enter_context(source)
                 stack.enter_context(_locked_legacy_state(source))
-                sources.append((legacy_dir, source))
+                sources[label] = (legacy_dir, source)
             moved = _migrate_legacy_state_locked(paths, lock.state, sources)
             yield lock, moved
 
@@ -272,24 +278,177 @@ def state_transaction(paths: Paths):
 def _migrate_legacy_state_locked(
     paths: Paths,
     destination: PinnedStateDirectory,
-    sources: list[tuple[Path, PinnedStateDirectory]],
+    sources: dict[str, tuple[Path, PinnedStateDirectory]],
 ) -> list[str]:
-    moved: list[str] = []
-    for legacy_dir, source in sources:
-        for name in ("ownership.json", "recovery.json"):
-            if destination.exists(name) or not source.exists(name):
-                continue
-            data = source.read_bytes(name)
-            if name == "recovery.json":
-                data = _rewrite_migrated_manifest(
-                    data,
-                    legacy_dir / "ownership.json",
-                    paths.ownership_json,
-                )
-            destination.atomic_write(name, data, _SECURE_FILE_MODE)
-            source.unlink(name)
-            moved.append(name)
-    return moved
+    """Mirror one authoritative legacy state generation into the active root.
+
+    ``ownership.json`` and ``recovery.json`` are one generation, never two
+    independent migration candidates. The former runtime generation outranks
+    pre-0.1 HOME state. A secure active-root handoff record makes mirroring and
+    source cleanup resumable if the process exits between filesystem steps.
+    """
+    pending = _read_legacy_handoff(destination)
+    snapshots = {
+        label: _snapshot_legacy_state(source)
+        for label, (_legacy_dir, source) in sources.items()
+    }
+
+    selected: tuple[str, dict[str, bytes | None]] | None = None
+    runtime_snapshot = snapshots.get("runtime")
+    if runtime_snapshot is not None and _has_legacy_state(runtime_snapshot):
+        if not (
+            pending is not None
+            and pending[0] == "runtime"
+            and _is_cleanup_residue(runtime_snapshot, pending[1])
+        ):
+            selected = ("runtime", runtime_snapshot)
+
+    if selected is None and pending is not None:
+        pending_label, pending_files = pending
+        live = snapshots.get(pending_label)
+        if (
+            pending_label == "home"
+            and live is not None
+            and _has_legacy_state(live)
+            and not _is_cleanup_residue(live, pending_files)
+        ):
+            selected = ("home", live)
+        else:
+            selected = pending
+
+    home_snapshot = snapshots.get("home")
+    if (
+        selected is None
+        and home_snapshot is not None
+        and _has_legacy_state(home_snapshot)
+    ):
+        selected = ("home", home_snapshot)
+
+    if selected is None:
+        return []
+
+    label, files = selected
+    _write_legacy_handoff(destination, selected)
+
+    legacy_dir = _legacy_source_path(paths, label)
+    for name, data in files.items():
+        if data is None:
+            destination.unlink(name)
+            continue
+        if name == "recovery.json":
+            data = _rewrite_migrated_manifest(
+                data,
+                legacy_dir / "ownership.json",
+                paths.ownership_json,
+            )
+        destination.atomic_write(name, data, _SECURE_FILE_MODE)
+
+    if label in sources:
+        _unlink_legacy_state(sources[label][1])
+    if label == "runtime" and "home" in sources:
+        _unlink_legacy_state(sources["home"][1])
+    _write_legacy_handoff(destination, None)
+    return [name for name, data in files.items() if data is not None]
+
+
+def _legacy_source_path(paths: Paths, label: str) -> Path:
+    if label == "runtime" and paths.legacy_runtime_dir is not None:
+        return paths.legacy_runtime_dir
+    if label == "home":
+        return paths.claude_settings.parent.parent / ".zai-python-helper"
+    raise RuntimeError(f"unknown legacy state generation: {label!r}")
+
+
+def _snapshot_legacy_state(
+    source: PinnedStateDirectory,
+) -> dict[str, bytes | None]:
+    snapshot: dict[str, bytes | None] = {}
+    for name in _LEGACY_STATE_NAMES:
+        try:
+            snapshot[name] = source.read_bytes(name)
+        except FileNotFoundError:
+            snapshot[name] = None
+    return snapshot
+
+
+def _has_legacy_state(files: dict[str, bytes | None]) -> bool:
+    return any(data is not None for data in files.values())
+
+
+def _is_cleanup_residue(
+    current: dict[str, bytes | None], pending: dict[str, bytes | None]
+) -> bool:
+    """Return whether live files are an unchanged subset of a pending copy."""
+    return all(
+        data is None or data == pending[name]
+        for name, data in current.items()
+    )
+
+
+def _unlink_legacy_state(source: PinnedStateDirectory) -> None:
+    for name in _LEGACY_STATE_NAMES:
+        source.unlink(name)
+
+
+def _read_legacy_handoff(
+    destination: PinnedStateDirectory,
+) -> tuple[str, dict[str, bytes | None]] | None:
+    try:
+        raw = destination.read_text(_LEGACY_HANDOFF_NAME)
+    except FileNotFoundError:
+        return None
+    try:
+        document = json.loads(raw)
+        if not isinstance(document, dict) or document.get("version") != 1:
+            raise ValueError
+        progress = document.get("in_progress")
+        if progress is None:
+            return None
+        if not isinstance(progress, dict):
+            raise ValueError
+        label = progress.get("source")
+        encoded = progress.get("files")
+        if label not in {"runtime", "home"} or not isinstance(encoded, dict):
+            raise ValueError
+        if set(encoded) != set(_LEGACY_STATE_NAMES):
+            raise ValueError
+        files: dict[str, bytes | None] = {}
+        for name in _LEGACY_STATE_NAMES:
+            value = encoded[name]
+            if value is None:
+                files[name] = None
+            elif isinstance(value, str):
+                files[name] = base64.b64decode(value, validate=True)
+            else:
+                raise ValueError
+        return label, files
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("invalid legacy state handoff record") from exc
+
+
+def _write_legacy_handoff(
+    destination: PinnedStateDirectory,
+    progress: tuple[str, dict[str, bytes | None]] | None,
+) -> None:
+    if progress is None:
+        destination.unlink(_LEGACY_HANDOFF_NAME)
+        return
+    label, files = progress
+    encoded_progress = {
+        "source": label,
+        "files": {
+            name: (
+                None if files[name] is None else base64.b64encode(files[name]).decode()
+            )
+            for name in _LEGACY_STATE_NAMES
+        },
+    }
+    document = {
+        "version": 1,
+        "in_progress": encoded_progress,
+    }
+    data = (json.dumps(document, indent=2, ensure_ascii=False) + "\n").encode()
+    destination.atomic_write(_LEGACY_HANDOFF_NAME, data, _SECURE_FILE_MODE)
 
 
 @contextlib.contextmanager

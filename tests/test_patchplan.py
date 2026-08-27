@@ -33,6 +33,7 @@ from hypothesis import strategies as st
 
 from zai_python_helper.core.planner import DeltaKind, FileDelta, FileTag, PatchPlan
 from zai_python_helper.patchplan import (
+    PinnedStateDirectory,
     ProcessLock,
     _read_at,
     apply_plan_locked,
@@ -161,7 +162,123 @@ def test_migrate_legacy_state_prefers_newer_runtime_tree(tmp_path, name):
     destination = paths.lock_file.parent / name
     assert json.loads(destination.read_text()) == {"source": "runtime"}
     assert not (runtime_legacy / name).exists()
-    assert (home_legacy / name).exists()
+    assert not (home_legacy / name).exists()
+
+
+def test_migrate_legacy_state_reimports_runtime_generation_after_handoff(tmp_path):
+    """State written by a late old-runtime process supersedes active state."""
+    home = tmp_path / "home"
+    home.mkdir()
+    runtime = tmp_path / "legacy-runtime"
+    runtime.mkdir(mode=0o700)
+    paths = replace(
+        Paths.from_home(home, state_home=tmp_path / "new-state"),
+        legacy_runtime_dir=runtime,
+    )
+    (runtime / "ownership.json").write_text('{"generation": "first"}\n')
+    assert migrate_legacy_state(paths) == ["ownership.json"]
+
+    # An already-started old process can commit only after the retained lock
+    # is released. Its reappearing generation must win on the next transaction.
+    (runtime / "ownership.json").write_text('{"generation": "late"}\n')
+    paths.recovery_json.write_text('{"stale": true}\n')
+
+    assert migrate_legacy_state(paths) == ["ownership.json"]
+    assert json.loads(paths.ownership_json.read_text()) == {"generation": "late"}
+    assert not paths.recovery_json.exists()
+
+
+def test_migrate_legacy_state_reimports_home_generation_after_handoff(tmp_path):
+    """A late pre-0.1 process is reconciled after its retained lock releases."""
+    home = tmp_path / "home"
+    home.mkdir()
+    legacy = home / ".zai-python-helper"
+    legacy.mkdir(mode=0o700)
+    paths = Paths.from_home(home, state_home=tmp_path / "new-state")
+    (legacy / "ownership.json").write_text('{"generation": "first"}\n')
+    assert migrate_legacy_state(paths) == ["ownership.json"]
+
+    (legacy / "ownership.json").write_text('{"generation": "late"}\n')
+    assert migrate_legacy_state(paths) == ["ownership.json"]
+    assert json.loads(paths.ownership_json.read_text()) == {"generation": "late"}
+
+
+def test_migrate_legacy_state_uses_one_authoritative_generation(tmp_path):
+    """Runtime state cannot be combined with a stale HOME recovery manifest."""
+    home = tmp_path / "home"
+    home.mkdir()
+    home_legacy = home / ".zai-python-helper"
+    home_legacy.mkdir(mode=0o700)
+    runtime = tmp_path / "legacy-runtime"
+    runtime.mkdir(mode=0o700)
+    (runtime / "ownership.json").write_text('{"source": "runtime"}\n')
+    (home_legacy / "recovery.json").write_text('{"source": "home"}\n')
+    paths = replace(
+        Paths.from_home(home, state_home=tmp_path / "new-state"),
+        legacy_runtime_dir=runtime,
+    )
+
+    assert migrate_legacy_state(paths) == ["ownership.json"]
+    assert json.loads(paths.ownership_json.read_text()) == {"source": "runtime"}
+    assert not paths.recovery_json.exists()
+    assert not (home_legacy / "recovery.json").exists()
+
+
+@pytest.mark.parametrize("failure_stage", ["mirror", "cleanup"])
+def test_migrate_legacy_generation_resumes_after_interruption(
+    tmp_path, failure_stage
+):
+    """The pinned handoff record repairs interrupted mirror and cleanup phases."""
+    home = tmp_path / "home"
+    home.mkdir()
+    runtime = tmp_path / "legacy-runtime"
+    runtime.mkdir(mode=0o700)
+    ownership = b'{"generation": "runtime"}\n'
+    recovery = b'{"entries": []}\n'
+    (runtime / "ownership.json").write_bytes(ownership)
+    (runtime / "recovery.json").write_bytes(recovery)
+    paths = replace(
+        Paths.from_home(home, state_home=tmp_path / "new-state"),
+        legacy_runtime_dir=runtime,
+    )
+    failed = False
+
+    if failure_stage == "mirror":
+        original = PinnedStateDirectory.atomic_write
+
+        def interrupt(state, name, data, mode):
+            nonlocal failed
+            if state.path == paths.lock_file.parent and name == "recovery.json":
+                failed = True
+                raise OSError("interrupted active mirror")
+            original(state, name, data, mode)
+
+        patch = mock.patch.object(PinnedStateDirectory, "atomic_write", interrupt)
+    else:
+        original = PinnedStateDirectory.unlink
+
+        def interrupt(state, name, *, missing_ok=True):
+            nonlocal failed
+            if state.path == runtime and name == "recovery.json":
+                failed = True
+                raise OSError("interrupted source cleanup")
+            original(state, name, missing_ok=missing_ok)
+
+        patch = mock.patch.object(PinnedStateDirectory, "unlink", interrupt)
+
+    with patch, pytest.raises(OSError, match="interrupted"):
+        migrate_legacy_state(paths)
+    assert failed
+    handoff = paths.lock_file.parent / "legacy-handoff.json"
+    assert handoff.stat().st_mode & 0o777 == 0o600
+    assert json.loads(handoff.read_text())["in_progress"] is not None
+
+    assert migrate_legacy_state(paths) == ["ownership.json", "recovery.json"]
+    assert paths.ownership_json.read_bytes() == ownership
+    assert paths.recovery_json.read_bytes() == recovery
+    assert not (runtime / "ownership.json").exists()
+    assert not (runtime / "recovery.json").exists()
+    assert not handoff.exists()
 
 
 def test_migrate_legacy_state_waits_for_legacy_process_lock(tmp_path):

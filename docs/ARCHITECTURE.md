@@ -167,7 +167,11 @@ are safely reserved when absent, and their flocks are retained through
 migration, recovery, planning, and commit. Thus an already-started old-version
 process cannot create its tree and enter its former critical section midway
 through the new-root transaction. When both trees contain state, the newer
-runtime tree is authoritative and is migrated before the pre-0.1 HOME tree.
+runtime tree is authoritative for the complete ownership/recovery generation;
+files from different generations are never combined. Reappearing runtime state
+written after a lock handoff replaces the active generation on the next
+transaction. A secret-grade, descriptor-relative handoff record in the active
+root makes generation mirroring and legacy cleanup resumable after interruption.
 
 **Status:** Superseded and strengthened for v1.1 (issues #111 and #116).
 
