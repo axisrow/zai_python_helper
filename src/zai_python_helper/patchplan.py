@@ -194,7 +194,20 @@ def _open_state_symlink_target(
     try:
         meaningful = [part for part in parts if part not in {"", "."}]
         if not meaningful:
-            raise PermissionError(f"invalid state symlink: {link_path}")
+            # ``.`` (or an absolute root target) already denotes the pinned
+            # descriptor. Apply the symlink entry's final requirements to that
+            # directory rather than rejecting a legitimate alias.
+            _validate_state_directory(
+                fd,
+                link_path,
+                private=private,
+                controlled=controlled,
+                create=False,
+                harden=harden,
+            )
+            result = fd
+            fd = -1
+            return result
         for index, part in enumerate(meaningful):
             if part == "..":
                 next_path = current.parent

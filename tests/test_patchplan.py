@@ -766,6 +766,19 @@ class TestProcessLock:
         assert state_home in paths.lock_file.parents
         assert (target / "zai-python-helper").is_dir()
 
+    def test_symlinked_xdg_state_root_may_resolve_to_its_parent(self, tmp_path):
+        """A `state -> .` alias validates and pins the containing directory."""
+        safe = tmp_path / "safe"
+        safe.mkdir(mode=0o700)
+        state_home = safe / "state"
+        state_home.symlink_to(".", target_is_directory=True)
+        paths = Paths.from_home(tmp_path / "home", state_home=state_home)
+
+        with ProcessLock(paths):
+            pass
+
+        assert (safe / "zai-python-helper").is_dir()
+
     def test_state_root_replacement_cannot_redirect_held_capability(self, tmp_path):
         """A root replacement after flock cannot redirect descriptor I/O."""
         state_home = tmp_path / "state"
