@@ -176,7 +176,11 @@ It retains comparison-only journal metadata, while any resumed runtime lock path
 is reconstructed and validated from the fixed legacy namespace rather than
 trusted from the record or current environment overrides. Its completed state
 also distinguishes stale HOME debris during the first XDG reconciliation from
-a HOME generation that genuinely reappears after lock handoff.
+a HOME generation that genuinely reappears after lock handoff. Interrupted
+active-state preservation records the exact HOME cleanup baseline, so changed
+HOME files from a queued old process supersede stale cleanup state on resume.
+Descriptor-derived file identities distinguish a newly recreated generation
+even when its bytes happen to match the stale baseline exactly.
 
 **Status:** Superseded and strengthened for v1.1 (issues #111 and #116).
 

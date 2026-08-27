@@ -397,6 +397,45 @@ def test_initial_xdg_cleanup_resumes_without_importing_home_subset(tmp_path):
     assert not (legacy / "recovery.json").exists()
 
 
+def test_changed_home_generation_supersedes_pending_active_cleanup(tmp_path):
+    """A queued pre-0.1 commit is not mistaken for stale cleanup residue."""
+    home = tmp_path / "home"
+    home.mkdir()
+    legacy = home / ".zai-python-helper"
+    legacy.mkdir(mode=0o700)
+    (legacy / "ownership.json").write_text('{"source": "stale-home"}\n')
+    (legacy / "recovery.json").write_text('{"source": "stale-home"}\n')
+    paths = Paths.from_home(home, state_home=tmp_path / "xdg-state")
+    with ProcessLock(paths) as lock:
+        assert lock.state is not None
+        lock.state.atomic_write(
+            "ownership.json", b'{"source": "active-xdg"}\n', 0o600
+        )
+    original = PinnedStateDirectory.unlink
+
+    def interrupt_cleanup(state, name, *, missing_ok=True):
+        if state.path == legacy and name == "recovery.json":
+            raise OSError("interrupted stale HOME cleanup")
+        original(state, name, missing_ok=missing_ok)
+
+    with mock.patch.object(PinnedStateDirectory, "unlink", interrupt_cleanup):
+        with pytest.raises(OSError, match="interrupted stale HOME cleanup"):
+            migrate_legacy_state(paths)
+
+    # The retained HOME lock is released by the crash path. A queued old
+    # process commits a distinct generation before the next invocation.
+    # Recreating byte-identical files still constitutes a new commit: inode
+    # identity, not content alone, distinguishes it from cleanup residue.
+    (legacy / "ownership.json").write_text('{"source": "stale-home"}\n')
+    (legacy / "recovery.json").write_text('{"source": "stale-home"}\n')
+
+    assert migrate_legacy_state(paths) == ["ownership.json", "recovery.json"]
+    assert json.loads(paths.ownership_json.read_text()) == {"source": "stale-home"}
+    assert json.loads(paths.recovery_json.read_text()) == {"source": "stale-home"}
+    assert not (legacy / "ownership.json").exists()
+    assert not (legacy / "recovery.json").exists()
+
+
 def test_migrate_legacy_state_waits_for_legacy_process_lock(tmp_path):
     """Migration cannot copy/unlink state while an old process is committing."""
     legacy = tmp_path / "legacy-state"

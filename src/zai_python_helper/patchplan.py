@@ -49,6 +49,7 @@ from zai_python_helper.paths import Paths
 _SECURE_FILE_MODE = 0o600
 _LEGACY_STATE_NAMES = ("ownership.json", "recovery.json")
 _LEGACY_HANDOFF_NAME = "legacy-handoff.json"
+_LegacyIdentity = tuple[int, int, int, int]
 
 
 @dataclass(frozen=True)
@@ -58,6 +59,8 @@ class _LegacyGeneration:
     source: str
     journal_path: Path
     files: dict[str, bytes | None]
+    cleanup_baseline: dict[str, bytes | None] | None = None
+    cleanup_identities: dict[str, _LegacyIdentity | None] | None = None
 
 
 def _open_private_parent(path: Path, *, create: bool, harden: bool = False) -> int:
@@ -186,6 +189,14 @@ class PinnedStateDirectory:
             raise
         with stream:
             return stream.read()
+
+    def identity(self, name: str) -> _LegacyIdentity:
+        fd = self.open_file(name, os.O_RDONLY)
+        try:
+            st = os.fstat(fd)
+            return (st.st_dev, st.st_ino, st.st_mtime_ns, st.st_size)
+        finally:
+            os.close(fd)
 
     def exists(self, name: str) -> bool:
         try:
@@ -339,6 +350,12 @@ def _migrate_legacy_state_locked(
         ):
             selected = _live_legacy_generation(sources, "runtime", runtime_snapshot)
 
+    home_snapshot = snapshots.get("home")
+    home_identities = (
+        _snapshot_legacy_identities(sources["home"][1])
+        if "home" in sources
+        else None
+    )
     if selected is None and pending is not None:
         live = snapshots.get(pending.source)
         if (
@@ -348,10 +365,24 @@ def _migrate_legacy_state_locked(
             and not _is_cleanup_residue(live, pending.files)
         ):
             selected = _live_legacy_generation(sources, "home", live)
+        elif (
+            pending.source == "active"
+            and pending.cleanup_baseline is not None
+            and home_snapshot is not None
+            and _has_legacy_state(home_snapshot)
+            and not (
+                _is_cleanup_residue(home_snapshot, pending.cleanup_baseline)
+                and pending.cleanup_identities is not None
+                and home_identities is not None
+                and _is_identity_residue(
+                    home_identities, pending.cleanup_identities
+                )
+            )
+        ):
+            selected = _live_legacy_generation(sources, "home", home_snapshot)
         else:
             selected = pending
 
-    home_snapshot = snapshots.get("home")
     if (
         selected is None
         and home_snapshot is not None
@@ -365,7 +396,11 @@ def _migrate_legacy_state_locked(
             # Persist this cleanup as a resumable active generation so a crash
             # cannot make the remaining HOME subset look newly reappeared.
             selected = _LegacyGeneration(
-                "active", paths.ownership_json, active_snapshot
+                "active",
+                paths.ownership_json,
+                active_snapshot,
+                cleanup_baseline=home_snapshot,
+                cleanup_identities=home_identities,
             )
 
     if selected is None:
@@ -418,6 +453,18 @@ def _snapshot_legacy_state(
     return snapshot
 
 
+def _snapshot_legacy_identities(
+    source: PinnedStateDirectory,
+) -> dict[str, _LegacyIdentity | None]:
+    identities: dict[str, _LegacyIdentity | None] = {}
+    for name in _LEGACY_STATE_NAMES:
+        try:
+            identities[name] = source.identity(name)
+        except FileNotFoundError:
+            identities[name] = None
+    return identities
+
+
 def _has_legacy_state(files: dict[str, bytes | None]) -> bool:
     return any(data is not None for data in files.values())
 
@@ -429,6 +476,16 @@ def _is_cleanup_residue(
     return all(
         data is None or data == pending[name]
         for name, data in current.items()
+    )
+
+
+def _is_identity_residue(
+    current: dict[str, _LegacyIdentity | None],
+    baseline: dict[str, _LegacyIdentity | None],
+) -> bool:
+    return all(
+        identity is None or identity == baseline[name]
+        for name, identity in current.items()
     )
 
 
@@ -458,6 +515,8 @@ def _read_legacy_handoff(
         label = progress.get("source")
         journal_path = progress.get("journal_path")
         encoded = progress.get("files")
+        encoded_baseline = progress.get("cleanup_baseline")
+        encoded_identities = progress.get("cleanup_identities")
         if (
             label not in {"runtime", "home", "active"}
             or not isinstance(journal_path, str)
@@ -476,7 +535,52 @@ def _read_legacy_handoff(
                 files[name] = base64.b64decode(value, validate=True)
             else:
                 raise ValueError
-        return True, _LegacyGeneration(label, Path(journal_path), files)
+        cleanup_baseline = None
+        cleanup_identities = None
+        if encoded_baseline is not None:
+            if (
+                label != "active"
+                or not isinstance(encoded_baseline, dict)
+                or not isinstance(encoded_identities, dict)
+            ):
+                raise ValueError
+            if (
+                set(encoded_baseline) != set(_LEGACY_STATE_NAMES)
+                or set(encoded_identities) != set(_LEGACY_STATE_NAMES)
+            ):
+                raise ValueError
+            cleanup_baseline = {}
+            cleanup_identities = {}
+            for name in _LEGACY_STATE_NAMES:
+                value = encoded_baseline[name]
+                if value is None:
+                    cleanup_baseline[name] = None
+                elif isinstance(value, str):
+                    cleanup_baseline[name] = base64.b64decode(value, validate=True)
+                else:
+                    raise ValueError
+                identity = encoded_identities[name]
+                if identity is None:
+                    cleanup_identities[name] = None
+                elif (
+                    isinstance(identity, list)
+                    and len(identity) == 4
+                    and all(type(part) is int for part in identity)
+                ):
+                    cleanup_identities[name] = tuple(identity)
+                else:
+                    raise ValueError
+        elif label == "active":
+            raise ValueError
+        elif encoded_identities is not None:
+            raise ValueError
+        return True, _LegacyGeneration(
+            label,
+            Path(journal_path),
+            files,
+            cleanup_baseline,
+            cleanup_identities,
+        )
     except (ValueError, TypeError, json.JSONDecodeError) as exc:
         raise RuntimeError("invalid legacy state handoff record") from exc
 
@@ -498,6 +602,32 @@ def _write_legacy_handoff(
                 )
                 for name in _LEGACY_STATE_NAMES
             },
+            "cleanup_baseline": (
+                None
+                if progress.cleanup_baseline is None
+                else {
+                    name: (
+                        None
+                        if progress.cleanup_baseline[name] is None
+                        else base64.b64encode(
+                            progress.cleanup_baseline[name]
+                        ).decode()
+                    )
+                    for name in _LEGACY_STATE_NAMES
+                }
+            ),
+            "cleanup_identities": (
+                None
+                if progress.cleanup_identities is None
+                else {
+                    name: (
+                        None
+                        if progress.cleanup_identities[name] is None
+                        else list(progress.cleanup_identities[name])
+                    )
+                    for name in _LEGACY_STATE_NAMES
+                }
+            ),
         }
     document = {
         "version": 1,
