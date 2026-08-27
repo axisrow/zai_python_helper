@@ -69,9 +69,10 @@ _MAX_STATE_SYMLINKS = 40
 
 def _directory_replace_safe(st: os.stat_result) -> bool:
     """Whether another uid cannot replace entries below this directory."""
-    if st.st_mode & 0o022:
-        return False
-    return st.st_uid in {0, os.getuid()} or not st.st_mode & stat.S_IWUSR
+    # A foreign owner can chmod an apparently read-only directory, replace an
+    # entry, and restore its mode between transactions. Only the invoking uid
+    # and the system root are stable authorities for a traversed ancestor.
+    return not st.st_mode & 0o022 and st.st_uid in {0, os.getuid()}
 
 
 def _validate_state_directory(

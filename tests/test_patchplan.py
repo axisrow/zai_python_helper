@@ -616,6 +616,57 @@ class TestProcessLock:
                 pass
         assert not (victim / "zai-python-helper").exists()
 
+    def test_configured_root_symlink_rejects_foreign_readonly_target_ancestor(
+        self, tmp_path, monkeypatch
+    ):
+        """A foreign owner can chmod and replace entries despite mode 0555."""
+        import zai_python_helper.patchplan as patchplan
+
+        victim = tmp_path / "victim-state"
+        victim.mkdir(mode=0o700)
+        foreign = tmp_path / "foreign"
+        foreign.mkdir()
+        (foreign / "redirect").symlink_to(victim, target_is_directory=True)
+        foreign.chmod(0o555)
+        state_home = tmp_path / "state-link"
+        state_home.symlink_to(foreign / "redirect", target_is_directory=True)
+        paths = Paths.from_home(tmp_path / "home", state_home=state_home)
+        foreign_fds: set[int] = set()
+        real_open = patchplan.os.open
+        real_fstat = patchplan.os.fstat
+        real_close = patchplan.os.close
+
+        def track_open(path, flags, *args, dir_fd=None, **kwargs):
+            fd = real_open(path, flags, *args, dir_fd=dir_fd, **kwargs)
+            if Path(path).name == foreign.name:
+                foreign_fds.add(fd)
+            return fd
+
+        def foreign_fstat(fd):
+            result = real_fstat(fd)
+            if fd in foreign_fds:
+                return SimpleNamespace(
+                    st_uid=result.st_uid + 1,
+                    st_mode=result.st_mode,
+                )
+            return result
+
+        def track_close(fd):
+            foreign_fds.discard(fd)
+            real_close(fd)
+
+        monkeypatch.setattr(patchplan.os, "open", track_open)
+        monkeypatch.setattr(patchplan.os, "fstat", foreign_fstat)
+        monkeypatch.setattr(patchplan.os, "close", track_close)
+
+        try:
+            with pytest.raises(PermissionError, match="insecure state directory"):
+                with ProcessLock(paths):
+                    pass
+        finally:
+            foreign.chmod(0o755)
+        assert not (victim / "zai-python-helper").exists()
+
     def test_precreated_lock_symlink_is_rejected(self, tmp_path):
         """The lock itself must also be opened without following symlinks."""
         lock_path = tmp_path / "lock"
