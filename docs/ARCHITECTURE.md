@@ -147,11 +147,15 @@ written automatically.
 
 The pre-0.1 `~/.zai-python-helper` tree and the former predictable
 `/var/tmp/zai-python-helper-<uid>` tree are intentionally no longer
-automatically migrated. This is a breaking change: upgrades from those
-versions start with an empty canonical root, and users who need ownership
-tracking must run `zai-python-helper use zai` again. Any future migration must
-be an explicit, one-shot user-invoked command rather than hidden behavior in
-normal commands.
+automatically migrated. This is a breaking change. Before upgrading from a
+pre-0.1 installation, users must run `zai-python-helper use default` with the
+old version so it restores the prior provider and retires its old ownership
+journal. After upgrading, `zai-python-helper use zai` creates fresh ownership
+tracking. If deactivation was skipped, an already-Z.ai configuration can make
+`use zai` a no-op and cannot reconstruct the lost prior values; users must
+manually restore the default provider before activating again. Any future
+migration must be an explicit, one-shot user-invoked command rather than hidden
+behavior in normal commands.
 
 The configured state path is kept lexically in `Paths` and is opened only at
 the write boundary. `ProcessLock` walks every component descriptor-relatively
