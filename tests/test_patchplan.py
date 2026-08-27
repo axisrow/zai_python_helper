@@ -597,6 +597,25 @@ class TestProcessLock:
                 pass
         assert not (attacker / "zai-python-helper").exists()
 
+    def test_configured_root_symlink_rejects_attacker_writable_target_ancestor(
+        self, tmp_path
+    ):
+        """A safe link entry cannot hide an unchecked writable target path."""
+        victim = tmp_path / "victim-state"
+        victim.mkdir(mode=0o700)
+        attacker = tmp_path / "attacker"
+        attacker.mkdir()
+        attacker.chmod(0o777)
+        (attacker / "redirect").symlink_to(victim, target_is_directory=True)
+        state_home = tmp_path / "state-link"
+        state_home.symlink_to(attacker / "redirect", target_is_directory=True)
+        paths = Paths.from_home(tmp_path / "home", state_home=state_home)
+
+        with pytest.raises(PermissionError, match="insecure state directory"):
+            with ProcessLock(paths):
+                pass
+        assert not (victim / "zai-python-helper").exists()
+
     def test_precreated_lock_symlink_is_rejected(self, tmp_path):
         """The lock itself must also be opened without following symlinks."""
         lock_path = tmp_path / "lock"

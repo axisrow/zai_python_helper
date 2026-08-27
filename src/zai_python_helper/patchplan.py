@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import errno
 import fcntl
 import json
 import os
@@ -61,6 +62,165 @@ class _LegacyGeneration:
     files: dict[str, bytes | None]
     cleanup_baseline: dict[str, bytes | None] | None = None
     cleanup_identities: dict[str, _LegacyIdentity | None] | None = None
+
+
+_MAX_STATE_SYMLINKS = 40
+
+
+def _directory_replace_safe(st: os.stat_result) -> bool:
+    """Whether another uid cannot replace entries below this directory."""
+    if st.st_mode & 0o022:
+        return False
+    return st.st_uid in {0, os.getuid()} or not st.st_mode & stat.S_IWUSR
+
+
+def _validate_state_directory(
+    fd: int,
+    path: Path,
+    *,
+    private: bool,
+    controlled: bool,
+    create: bool,
+    harden: bool,
+) -> None:
+    """Validate an opened component using only its pinned descriptor."""
+    st = os.fstat(fd)
+    if not stat.S_ISDIR(st.st_mode):
+        raise PermissionError(f"insecure state directory: {path}")
+    writable_by_others = bool(st.st_mode & 0o022)
+    trusted_sticky = bool(
+        st.st_uid == 0 and st.st_mode & stat.S_ISVTX and writable_by_others
+    )
+    if writable_by_others and not trusted_sticky and not private:
+        raise PermissionError(f"insecure state directory: {path}")
+    if not trusted_sticky and not _directory_replace_safe(st) and not private:
+        raise PermissionError(f"insecure state directory: {path}")
+    if controlled and st.st_uid != os.getuid():
+        raise PermissionError(f"insecure state directory: {path}")
+    # Only application state directories are tightened; arbitrary existing
+    # ancestors such as a user's XDG root are never chmodded.
+    if private and st.st_uid != os.getuid():
+        raise PermissionError(f"insecure state directory: {path}")
+    if private and st.st_mode & 0o077:
+        if create or harden:
+            os.fchmod(fd, 0o700)
+        else:
+            raise PermissionError(f"insecure state directory: {path}")
+
+
+def _open_state_component(
+    parent_fd: int,
+    name: str,
+    path: Path,
+    *,
+    create: bool,
+    private: bool,
+    controlled: bool,
+    harden: bool,
+    symlinks_left: int,
+) -> int:
+    """Open one component, resolving stable symlinks by descriptor walk."""
+    if create:
+        try:
+            os.mkdir(name, mode=0o700, dir_fd=parent_fd)
+        except FileExistsError:
+            pass
+    try:
+        fd = os.open(
+            name,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            dir_fd=parent_fd,
+        )
+    except OSError as exc:
+        try:
+            entry = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except OSError:
+            raise exc from None
+        if not stat.S_ISLNK(entry.st_mode):
+            raise exc from None
+        parent_st = os.fstat(parent_fd)
+        if private or not _directory_replace_safe(parent_st):
+            raise PermissionError(f"insecure state symlink: {path}") from exc
+        if symlinks_left <= 0:
+            raise OSError(
+                errno.ELOOP, "too many state-directory symlinks", path
+            ) from exc
+        target = os.readlink(name, dir_fd=parent_fd)
+        return _open_state_symlink_target(
+            parent_fd,
+            target,
+            path,
+            private=private,
+            controlled=controlled,
+            harden=harden,
+            symlinks_left=symlinks_left - 1,
+        )
+    try:
+        _validate_state_directory(
+            fd,
+            path,
+            private=private,
+            controlled=controlled,
+            create=create,
+            harden=harden,
+        )
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _open_state_symlink_target(
+    parent_fd: int,
+    target: str,
+    link_path: Path,
+    *,
+    private: bool,
+    controlled: bool,
+    harden: bool,
+    symlinks_left: int,
+) -> int:
+    """Resolve a symlink target without one unchecked multi-component open."""
+    target_path = Path(target)
+    if target_path.is_absolute():
+        fd = os.open(os.sep, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        current = Path(os.sep)
+        parts = target_path.parts[1:]
+    else:
+        fd = os.dup(parent_fd)
+        current = link_path.parent
+        parts = target_path.parts
+    try:
+        meaningful = [part for part in parts if part not in {"", "."}]
+        if not meaningful:
+            raise PermissionError(f"invalid state symlink: {link_path}")
+        for index, part in enumerate(meaningful):
+            if part == "..":
+                next_path = current.parent
+                part = ".."
+            else:
+                next_path = current / part
+            final = index == len(meaningful) - 1
+            next_fd = _open_state_component(
+                fd,
+                part,
+                next_path,
+                create=False,
+                private=private if final else False,
+                controlled=controlled if final else False,
+                harden=harden if final else False,
+                symlinks_left=symlinks_left,
+            )
+            previous_fd = fd
+            fd = next_fd
+            current = next_path
+            os.close(previous_fd)
+        result = fd
+        fd = -1
+        return result
+    finally:
+        if fd >= 0:
+            os.close(fd)
 
 
 def _open_private_parent(path: Path, *, create: bool, harden: bool = False) -> int:
@@ -101,60 +261,18 @@ def _open_private_parent(path: Path, *, create: bool, harden: bool = False) -> i
     try:
         for part in parts[1:]:
             current /= part
-            if create:
-                try:
-                    os.mkdir(part, mode=0o700, dir_fd=fd)
-                except FileExistsError:
-                    pass
             private = current in private_paths
             controlled = current in controlled_paths
-            flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-            try:
-                next_fd = os.open(part, flags, dir_fd=fd)
-            except OSError as exc:
-                # ``O_NOFOLLOW|O_DIRECTORY`` reports a platform-specific
-                # ELOOP/ENOTDIR for a symlink.  Inspecting and then following
-                # it is safe only below a parent that another uid cannot
-                # mutate. Same-uid and root processes are outside this local
-                # cross-user threat boundary.
-                try:
-                    entry = os.stat(part, dir_fd=fd, follow_symlinks=False)
-                except OSError:
-                    raise exc from None
-                if not stat.S_ISLNK(entry.st_mode):
-                    raise exc from None
-                parent_st = os.fstat(fd)
-                if private or parent_st.st_mode & 0o022:
-                    raise PermissionError(
-                        f"insecure state symlink: {current}"
-                    ) from exc
-                next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY, dir_fd=fd)
-            try:
-                st = os.fstat(next_fd)
-                if not stat.S_ISDIR(st.st_mode):
-                    raise PermissionError(f"insecure state directory: {current}")
-                writable_by_others = bool(st.st_mode & 0o022)
-                trusted_sticky = bool(
-                    st.st_uid == 0
-                    and st.st_mode & stat.S_ISVTX
-                    and writable_by_others
-                )
-                if writable_by_others and not trusted_sticky and not private:
-                    raise PermissionError(f"insecure state directory: {current}")
-                if controlled and st.st_uid != os.getuid():
-                    raise PermissionError(f"insecure state directory: {current}")
-                # Only application state directories are tightened; arbitrary
-                # existing ancestors such as /tmp or a user's XDG root are untouched.
-                if private and st.st_uid != os.getuid():
-                    raise PermissionError(f"insecure state directory: {current}")
-                if private and st.st_mode & 0o077:
-                    if create or harden:
-                        os.fchmod(next_fd, 0o700)
-                    else:
-                        raise PermissionError(f"insecure state directory: {current}")
-            except BaseException:
-                os.close(next_fd)
-                raise
+            next_fd = _open_state_component(
+                fd,
+                part,
+                current,
+                create=create,
+                private=private,
+                controlled=controlled,
+                harden=harden,
+                symlinks_left=_MAX_STATE_SYMLINKS,
+            )
             previous_fd = fd
             # Transfer ownership before close: if close itself fails, the
             # outer finally owns only next_fd and cannot double-close a reused

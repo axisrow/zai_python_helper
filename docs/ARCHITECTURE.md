@@ -142,12 +142,13 @@ capability retained by `ProcessLock`. Its helper-directory descriptor is
 opened through a descriptor-relative component walk, ownership/mode checked,
 and held until the lock is released. `Paths` retains the configured XDG spelling
 without probing or resolving it. Existing symlinks are followed only from a
-validated parent that another uid cannot replace; application-owned components
-never follow symlinks, and missing components are created and reopened relative
-to the already-pinned parent. Thus there is no resolve/check followed by a
-separate pathname open. Lock, manifest, and ownership-journal reads, writes,
-replacement, and removal use basename-only `dir_fd` operations on the pinned
-capability, with no path-based fallback after acquisition.
+validated parent that another uid cannot replace, and their targets are walked
+through the same validation one component at a time. Application-owned
+components never follow symlinks, and missing components are created and
+reopened relative to the already-pinned parent. Thus there is no resolve/check
+followed by a separate pathname open. Lock, manifest, and ownership-journal
+reads, writes, replacement, and removal use basename-only `dir_fd` operations
+on the pinned capability, with no path-based fallback after acquisition.
 
 The in-process lock is keyed by the pinned helper-directory `(device, inode)`,
 not by its lexical path. This keeps aliases in one lock domain on BSD systems,
