@@ -478,12 +478,10 @@ def state_transaction(paths: Paths):
                 expected = legacy_candidates[-1][1] / "ownership.json"
                 if pending.journal_path != expected:
                     raise RuntimeError("invalid legacy state handoff record")
-            if (
-                pending is not None
-                and pending.source == "active"
-                and pending.journal_path != paths.ownership_json
-            ):
-                raise RuntimeError("invalid legacy state handoff record")
+            # Active journal paths are comparison metadata only. The parser
+            # already restricts them to the ownership basename, and all I/O is
+            # descriptor-relative. Accept the canonical spelling persisted by
+            # the previous release when Paths now retains an XDG symlink.
             for label, legacy_dir, create in legacy_candidates:
                 if legacy_dir == lock.state.path:
                     continue
@@ -502,6 +500,17 @@ def state_transaction(paths: Paths):
                     # already-started old process race the active transaction.
                     raise
                 if source is None:
+                    continue
+                source_st = os.fstat(source.fd)
+                active_st = os.fstat(lock.state.fd)
+                if (source_st.st_dev, source_st.st_ino) == (
+                    active_st.st_dev,
+                    active_st.st_ino,
+                ):
+                    # A lexical legacy path may alias the active XDG helper
+                    # directory. Never flock, migrate, or clean the active
+                    # generation as though it were an independent source.
+                    source.close()
                     continue
                 stack.enter_context(source)
                 stack.enter_context(_locked_legacy_state(source))

@@ -13,6 +13,7 @@ and a NOOP plan writes nothing.
 
 from __future__ import annotations
 
+import base64
 import fcntl
 import json
 import os
@@ -556,6 +557,70 @@ def test_state_transaction_fails_closed_for_unpinnable_home_legacy_tree(tmp_path
             entered = True
 
     assert entered is False
+
+
+def test_legacy_runtime_alias_of_active_root_is_not_relocked_or_migrated(tmp_path):
+    """One pinned directory cannot be both active destination and legacy source."""
+    home = tmp_path / "home"
+    home.mkdir()
+    runtime_root = tmp_path / "runtime-root"
+    runtime_root.mkdir(mode=0o700)
+    state_home = tmp_path / "state-link"
+    state_home.symlink_to(runtime_root, target_is_directory=True)
+    paths = Paths.from_home(home, state_home=state_home)
+    physical_helper = runtime_root / paths.lock_file.parent.relative_to(state_home)
+    paths = replace(paths, legacy_runtime_dir=physical_helper)
+    content = b'{"source": "active"}\n'
+    with ProcessLock(paths) as lock:
+        assert lock.state is not None
+        lock.state.atomic_write("ownership.json", content, 0o600)
+
+    assert migrate_legacy_state(paths) == []
+    assert paths.ownership_json.read_bytes() == content
+
+
+def test_pending_active_handoff_accepts_prior_canonical_journal_spelling(tmp_path):
+    """A pre-upgrade handoff resumes after Paths stops canonicalizing XDG."""
+    home = tmp_path / "home"
+    home.mkdir()
+    target = tmp_path / "state-target"
+    target.mkdir()
+    state_home = tmp_path / "state-link"
+    state_home.symlink_to(target, target_is_directory=True)
+    paths = Paths.from_home(home, state_home=state_home)
+    paths.lock_file.parent.mkdir(parents=True)
+    canonical_journal = target / paths.ownership_json.relative_to(state_home)
+    content = b'{"source": "active"}\n'
+    handoff = {
+        "version": 1,
+        "initialized": True,
+        "in_progress": {
+            "source": "active",
+            "journal_path": str(canonical_journal),
+            "files": {
+                "ownership.json": base64.b64encode(content).decode(),
+                "recovery.json": None,
+            },
+            "cleanup_baseline": {
+                "ownership.json": None,
+                "recovery.json": None,
+            },
+            "cleanup_identities": {
+                "ownership.json": None,
+                "recovery.json": None,
+            },
+        },
+    }
+    (paths.lock_file.parent / "legacy-handoff.json").write_text(
+        json.dumps(handoff)
+    )
+
+    assert migrate_legacy_state(paths) == []
+    assert paths.ownership_json.read_bytes() == content
+    completed = json.loads(
+        (paths.lock_file.parent / "legacy-handoff.json").read_text()
+    )
+    assert completed["in_progress"] is None
 
 
 # ---------------------------------------------------------------------------
