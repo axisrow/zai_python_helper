@@ -126,7 +126,10 @@ class TestProcessLock:
         old_runtime_state.mkdir()
         (old_runtime_state / "ownership.json").write_text('{"old": true}\n')
         state_home = tmp_path / "state"
-        paths = Paths.from_home(home, state_home=state_home)
+        paths = replace(
+            Paths.from_home(home, state_home=state_home),
+            legacy_runtime_dir=old_runtime_state,
+        )
 
         with ProcessLock(paths):
             pass

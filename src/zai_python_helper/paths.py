@@ -60,6 +60,9 @@ class Paths:
     recovery_json: Path
     lock_file: Path
     state_dir: Path
+    # Deprecated compatibility field. It is retained for callers that used
+    # the pre-0.1 constructor shape, but is never read or written.
+    legacy_runtime_dir: Path | None
     # Whether the default state root is derived from HOME and therefore moves
     # with it. ProcessLock uses this to reject a replaceable HOME namespace.
     state_home_follows_home: bool
@@ -132,6 +135,7 @@ class Paths:
             recovery_json=helper_dir / "recovery.json",
             lock_file=helper_dir / "lock",
             state_dir=state_dir,
+            legacy_runtime_dir=None,
             state_home_follows_home=state_home_follows_home,
             project_claude_settings=cwd_path / ".claude" / "settings.json",
             local_claude_settings=cwd_path / ".claude" / "settings.local.json",
