@@ -150,12 +150,15 @@ followed by a separate pathname open. Lock, manifest, and ownership-journal
 reads, writes, replacement, and removal use basename-only `dir_fd` operations
 on the pinned capability, with no path-based fallback after acquisition.
 
-The in-process lock is keyed by the pinned helper-directory `(device, inode)`,
-not by its lexical path. This keeps aliases in one lock domain on BSD systems,
-where a second `flock` in the same process does not itself serialize threads.
-Replacing the configured path after acquisition cannot redirect the held
-capability; a later acquisition validates the replacement independently and
-fails closed for a foreign-owned or writable state root.
+The pinned managed-HOME directory is the stable transaction coordinator. Its
+`(device, inode)` keys the in-process lock and the directory descriptor carries
+a cross-process `flock`; the current state lock remains held as a compatibility
+lease. Consequently aliases and even an accepted retarget of the configured
+XDG symlink remain in one lock domain for commands mutating the same HOME. This
+extra in-process layer is required on BSD, where a second `flock` in one process
+does not itself serialize threads. Replacing the configured path after
+acquisition cannot redirect the held state capability, and a later acquisition
+validates the replacement independently.
 
 `ProcessLock` nesting in one thread is not a supported use case and is rejected
 before a second lock is acquired. The pinned capability is passed explicitly

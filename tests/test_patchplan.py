@@ -728,6 +728,133 @@ class TestProcessLock:
             with ProcessLock(paths):
                 pass
 
+    def test_safe_state_root_retarget_keeps_one_transaction_lock_domain(
+        self, tmp_path, monkeypatch
+    ):
+        """Two accepted targets for one HOME cannot run transactions together."""
+        home = tmp_path / "home"
+        home.mkdir()
+        first_target = tmp_path / "state-a"
+        second_target = tmp_path / "state-b"
+        first_target.mkdir()
+        second_target.mkdir()
+        state_home = tmp_path / "state-link"
+        state_home.symlink_to(first_target, target_is_directory=True)
+        paths = Paths.from_home(home, state_home=state_home)
+        first_holds = threading.Event()
+        release_first = threading.Event()
+        second_started = threading.Event()
+        second_entered = threading.Event()
+
+        # Isolate the in-process coordinator; BSD flock does not block a
+        # second fd in the same process, and Linux must exercise that case too.
+        monkeypatch.setattr(fcntl, "flock", lambda *_args: None)
+
+        def hold_first_target():
+            with ProcessLock(paths):
+                first_holds.set()
+                assert release_first.wait(timeout=2)
+
+        def enter_second_target():
+            second_started.set()
+            with ProcessLock(paths):
+                second_entered.set()
+
+        first = threading.Thread(target=hold_first_target)
+        second = threading.Thread(target=enter_second_target)
+        first.start()
+        assert first_holds.wait(timeout=2)
+        state_home.unlink()
+        state_home.symlink_to(second_target, target_is_directory=True)
+        second.start()
+        try:
+            assert second_started.wait(timeout=2)
+            time.sleep(0.05)
+            assert not second_entered.is_set()
+        finally:
+            release_first.set()
+            first.join(timeout=2)
+            second.join(timeout=2)
+
+        assert second_entered.is_set()
+
+    def test_safe_state_root_retarget_keeps_cross_process_lock_domain(
+        self, tmp_path
+    ):
+        """The stable coordinator also serializes different target processes."""
+        home = tmp_path / "home"
+        home.mkdir()
+        first_target = tmp_path / "state-a"
+        second_target = tmp_path / "state-b"
+        first_target.mkdir()
+        second_target.mkdir()
+        state_home = tmp_path / "state-link"
+        state_home.symlink_to(first_target, target_is_directory=True)
+        paths = Paths.from_home(home, state_home=state_home)
+        entered = tmp_path / "child-entered"
+        script = """
+import sys
+from pathlib import Path
+from zai_python_helper.patchplan import ProcessLock
+from zai_python_helper.paths import Paths
+
+paths = Paths.from_home(Path(sys.argv[1]), state_home=Path(sys.argv[2]))
+with ProcessLock(paths):
+    Path(sys.argv[3]).write_text("entered")
+"""
+
+        with ProcessLock(paths):
+            state_home.unlink()
+            state_home.symlink_to(second_target, target_is_directory=True)
+            process = subprocess.Popen(
+                [sys.executable, "-c", script, str(home), str(state_home), str(entered)]
+            )
+            time.sleep(0.2)
+            assert not entered.exists()
+
+        process.wait(timeout=2)
+        assert process.returncode == 0
+        assert entered.read_text() == "entered"
+
+    def test_paths_and_raw_lock_callers_share_state_inode_lock(
+        self, tmp_path, monkeypatch
+    ):
+        """The compatibility constructor cannot bypass same-process locking."""
+        home = tmp_path / "home"
+        home.mkdir()
+        paths = Paths.from_home(home, state_home=tmp_path / "state")
+        first_holds = threading.Event()
+        release_first = threading.Event()
+        second_started = threading.Event()
+        second_entered = threading.Event()
+        monkeypatch.setattr(fcntl, "flock", lambda *_args: None)
+
+        def use_paths():
+            with ProcessLock(paths):
+                first_holds.set()
+                assert release_first.wait(timeout=2)
+
+        def use_raw_path():
+            second_started.set()
+            with ProcessLock(paths.lock_file):
+                second_entered.set()
+
+        first = threading.Thread(target=use_paths)
+        second = threading.Thread(target=use_raw_path)
+        first.start()
+        assert first_holds.wait(timeout=2)
+        second.start()
+        try:
+            assert second_started.wait(timeout=2)
+            time.sleep(0.05)
+            assert not second_entered.is_set()
+        finally:
+            release_first.set()
+            first.join(timeout=2)
+            second.join(timeout=2)
+
+        assert second_entered.is_set()
+
     def test_thread_lock_uses_pinned_inode_across_lexical_aliases(
         self, tmp_path, monkeypatch
     ):
