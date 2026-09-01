@@ -267,12 +267,10 @@ def test_docker_revert_semantic_parity_across_processes(
     def semantic(files: dict[str, tuple[bytes, int]]) -> dict[str, object]:
         result: dict[str, object] = {}
         for name, (content, _mode) in files.items():
-            # HOME lock artifacts are internal transaction state, not tool
-            # configuration. The root coordinator keeps XDG retargets in one
-            # lock domain.
+            # The state lock is outside HOME in parity runs and is not tool
+            # configuration. The managed-HOME inode is the lock domain.
             if name in {
                 ".zai-python-helper/lock",
-                ".zai-python-helper.lock",
             }:
                 continue
             result[name] = (

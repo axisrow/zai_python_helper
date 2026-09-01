@@ -6,8 +6,9 @@ crash *between* files — or two concurrent ``use`` invocations — leaves mixed
 state. This module makes the whole multi-file activation a transaction:
 
 1. **Process lock** (:class:`ProcessLock`): an exclusive ``fcntl.flock`` on
-   the canonical XDG state-root lock. Two concurrent ``use`` calls serialize
-   on it — one runs to completion before the other starts.
+   the managed-HOME directory inode (plus the state lock for compatibility).
+   Two concurrent ``use`` calls serialize on it — one runs to completion
+   before the other starts.
 2. **Staged commit** (:func:`apply_plan_under_lock`): before touching any
    managed file, write a ``recovery.json`` manifest of the *final* content
    of every file the plan will write. Then write each file via the existing
@@ -47,7 +48,6 @@ from zai_python_helper.paths import Paths
 # same posture as the secrets file. Reuse ownership's secret-grade atomic
 # writer so both stay consistent.
 _SECURE_FILE_MODE = 0o600
-_TRANSACTION_COORDINATOR_NAME = ".zai-python-helper.lock"
 
 
 _MAX_STATE_SYMLINKS = 40
@@ -314,7 +314,7 @@ def _open_private_parent(path: Path, *, create: bool, harden: bool = False) -> i
 
 
 def _open_transaction_coordinator(paths: Paths | None, state_fd: int) -> int:
-    """Pin the stable namespace used by the in-process lock."""
+    """Pin the stable namespace used by the transaction lock."""
     if paths is None:
         # Raw-path callers already use their writable state lock file for
         # cross-process coordination. The pinned directory is still needed as
@@ -466,10 +466,9 @@ class ProcessLock:
     2. An in-process ``threading.Lock`` keyed by that directory inode
        serializes threads, including state-path aliases. Needed because BSD
        ``flock`` does not block a second fd opened by the same process.
-    3. Blocking ``flock`` leases on a writable regular file opened relative to
-       that directory and on the current state lock serialize separate
-       processes. The regular coordinator also works where NFS implements
-       ``flock`` as a write lock.
+    3. A blocking ``flock`` lease on the pinned managed-HOME directory
+       descriptor serializes separate processes. The state lock remains a
+       compatibility lease for callers using the raw-path constructor.
 
     A context manager: :meth:`__enter__` takes both layers, :meth:`__exit__`
     releases both. Nesting is rejected before the second lock is acquired.
@@ -482,7 +481,6 @@ class ProcessLock:
         self.path = self.paths.lock_file if self.paths is not None else Path(target)
         self._fd: int | None = None
         self._coordinator_dir_fd: int | None = None
-        self._coordinator_fd: int | None = None
         self._intra: list[_threading.Lock] = []
         self._held_intra = False
         # The validated helper directory is pinned for the whole lock scope.
@@ -503,20 +501,9 @@ class ProcessLock:
                 intra.acquire()
                 self._intra.append(intra)
             self._held_intra = True
-            coordinator_fd: int | None = None
-            if self.paths is not None:
-                coordinator_path = (
-                    self.paths.claude_settings.parent.parent
-                    / _TRANSACTION_COORDINATOR_NAME
-                )
-                coordinator_fd = os_open_at(
-                    coordinator_dir_fd,
-                    _TRANSACTION_COORDINATOR_NAME,
-                    coordinator_path,
-                )
-                self._coordinator_fd = coordinator_fd
-            if coordinator_fd is not None:
-                fcntl.flock(coordinator_fd, fcntl.LOCK_EX)
+            # Lock the managed-HOME inode itself.  Unlike a coordinator file,
+            # this cannot be unlinked or replaced to reset the lock domain.
+            fcntl.flock(coordinator_dir_fd, fcntl.LOCK_EX)
             # Retain the state-file lease for compatibility with older lock
             # files in the current canonical state directory.
             self._fd = os_open_at(parent_fd, self.path.name, self.path)
@@ -531,13 +518,9 @@ class ProcessLock:
                 with contextlib.suppress(OSError):
                     close_fd(self._fd)
                 self._fd = None
-            if self._coordinator_fd is not None:
-                with contextlib.suppress(OSError):
-                    fcntl.flock(self._coordinator_fd, fcntl.LOCK_UN)
-                with contextlib.suppress(OSError):
-                    close_fd(self._coordinator_fd)
-                self._coordinator_fd = None
             if self._coordinator_dir_fd is not None:
+                with contextlib.suppress(OSError):
+                    fcntl.flock(self._coordinator_dir_fd, fcntl.LOCK_UN)
                 with contextlib.suppress(OSError):
                     close_fd(self._coordinator_dir_fd)
                 self._coordinator_dir_fd = None
@@ -565,13 +548,9 @@ class ProcessLock:
             with contextlib.suppress(OSError):
                 close_fd(self._fd)
             self._fd = None
-        if self._coordinator_fd is not None:
-            with contextlib.suppress(OSError):
-                fcntl.flock(self._coordinator_fd, fcntl.LOCK_UN)
-            with contextlib.suppress(OSError):
-                close_fd(self._coordinator_fd)
-            self._coordinator_fd = None
         if self._coordinator_dir_fd is not None:
+            with contextlib.suppress(OSError):
+                fcntl.flock(self._coordinator_dir_fd, fcntl.LOCK_UN)
             with contextlib.suppress(OSError):
                 close_fd(self._coordinator_dir_fd)
             self._coordinator_dir_fd = None
