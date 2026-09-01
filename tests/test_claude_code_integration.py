@@ -438,6 +438,38 @@ class TestOwnershipJournalE2E:
         assert env.get("ANTHROPIC_AUTH_TOKEN") == "sk-edited-by-user"
         assert capsys.readouterr().out == ""
 
+    def test_use_default_dry_run_previews_refuse_warning(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """``use default --dry-run`` keeps naming REFUSE keys on stdout.
+
+        With the real run silent (issue #125), the dry-run preview is the only
+        surface that tells the user WHICH externally-changed key will be left
+        untouched. This pins the contract the silencing change relies on (PR
+        #129 docstring / CHANGELOG / PR body): a later refactor (e.g. #128's
+        --verbose work) must not drop the preview's REFUSE warnings silently.
+        """
+        monkeypatch.setenv("HOME", str(tmp_path))
+        _seed(tmp_path)
+        _run(["use", "zai", "--api-key", TOKEN])
+        capsys.readouterr()
+
+        # The user manually edits the token to something we never set.
+        settings_path = Paths.from_home(tmp_path, state_home=tmp_path).claude_settings
+        doc = json.loads(settings_path.read_text())
+        doc["env"]["ANTHROPIC_AUTH_TOKEN"] = "sk-edited-by-user"
+        settings_path.write_text(json.dumps(doc))
+        before = settings_path.read_text()
+
+        _run(["use", "default", "--region", "global", "--dry-run"])
+
+        out = capsys.readouterr().out
+        # The preview warns and NAMES the key it refuses to touch...
+        assert "warning" in out.lower()
+        assert "ANTHROPIC_AUTH_TOKEN" in out
+        # ...and writes nothing (read-only preview).
+        assert settings_path.read_text() == before
+
     def test_use_default_idempotent_after_revert(self, tmp_path, monkeypatch, capsys):
         """A second ``use default`` after revert is a no-op (REFUSE/RESTORE settle)."""
         monkeypatch.setenv("HOME", str(tmp_path))

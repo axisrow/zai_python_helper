@@ -691,9 +691,14 @@ def _handle_use_zai(args: argparse.Namespace) -> int:
     plans via ``tool.plan_zai``, captures ownership via
     ``tool.extract_takeover``, and commits under one held :class:`ProcessLock`
     (ADR-005). ``--dry-run`` previews redacted unified_diffs and writes
-    nothing. On success prints exactly the two pinned ``chelper auth reload``
-    lines (byte-parity contract, issue #125). Idempotent: a second run with
-    no drift is a no-op.
+    nothing. On a clean success prints exactly the two pinned
+    ``chelper auth reload`` lines (byte-parity contract, issue #125); the
+    pre-existing OpenCode self-heal warning
+    (:func:`_warn_self_heal_destruction`) may additionally print to stdout
+    when a duplicate-regional doc is destructively rewritten — deliberate
+    visibility for an irreversible change (its channel is re-examined in
+    issue #128 alongside the other returning diagnostics). Idempotent: a
+    second run with no drift is a no-op.
     """
     from zai_python_helper.constants import get_preset_model
     from zai_python_helper.core.domain import ModelMode
