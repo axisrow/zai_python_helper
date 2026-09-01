@@ -127,7 +127,7 @@ HOME artifact set without weakening revert.
 
 **Context.** Activating Claude Code touches up to three files (`settings.json`, `.claude.json`, `.zshrc`). Per-file atomic write doesn't make the *operation* atomic: a crash after file two, or two concurrent invocations, leaves mixed state. Separately, claiming "seamless" switching for v1 is false — env can't mutate a running parent process, and Claude hooks affect launched Bash commands, not Claude's own API transport.
 
-**Decision (transactions).** `core/planner/` emits a `PatchPlan`: a fully-validated, ordered list of file deltas **before any write**. Execution then: acquire a **process lock** (flock on a state file), stage all writes, commit via atomic renames, keep a **recovery journal** so an interrupted run can roll forward on next invocation. Two concurrent `use` calls serialize on the lock.
+**Decision (transactions).** `core/planner/` emits a `PatchPlan`: a fully-validated, ordered list of file deltas **before any write**. Execution then: acquire a **process lock** (flock on the managed-HOME directory inode), stage all writes, commit via atomic renames, keep a **recovery journal** so an interrupted run can roll forward on next invocation. Two concurrent `use` calls serialize on the lock.
 
 **Decision (restart honesty).** v1 says "**new session / restart recommended for deterministic switching**" whenever it changes files. Seamless (between-request, pre-body-only failover) is explicitly a **v2** property of the proxy, never a v1 claim.
 
@@ -165,12 +165,17 @@ validated helper-directory descriptor for the complete transaction. Lock,
 manifest, and journal operations use basename-only `dir_fd` calls on that
 capability; no path-based fallback is permitted after acquisition.
 
-A pinned managed-HOME directory and writable coordinator file provide stable
-transaction locking across configured state-root aliases and retargets. An
-in-process inode-keyed lock supplements `flock` on BSD, where separate file
-descriptors in one process do not necessarily block each other. Replaceable
-default-HOME namespaces are rejected because they could split the state and
-configuration lock domains.
+A pinned managed-HOME directory descriptor provides stable transaction locking
+across configured state-root aliases and retargets: `ProcessLock` applies
+`flock(LOCK_EX)` directly to that directory's inode, rather than creating a
+coordinator file in HOME. An in-process inode-keyed lock supplements `flock`
+on BSD, where separate file descriptors in one process do not necessarily
+block each other. Replaceable default-HOME namespaces are rejected because
+they could split the state and configuration lock domains. This is advisory
+locking. On NFS configurations that emulate `flock` with POSIX write locks,
+the read-only directory descriptor can cause commands to fail outright (and
+POSIX record locks do not apply to directories); deployments requiring these
+guarantees should use a local filesystem.
 
 Recovery manifests may contain historical absolute or symlinked journal-path
 metadata. That string is never used as an authority for I/O: recovery always
