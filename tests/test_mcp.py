@@ -480,12 +480,17 @@ def _run_cli(argv: list[str]) -> tuple[int, str, str]:
 
 
 def test_cli_mcp_install_uninstall_list_roundtrip(_isolate_home):
-    """The headless CLI installs, lists (installed), then uninstalls."""
+    """The headless CLI installs, lists (installed), then uninstalls.
+
+    Real install/uninstall runs are silent on success (issue #125 byte-parity
+    contract; the status lines return as opt-in ``--verbose`` in #128) — the
+    on-disk config + exit code are the contract, asserted via ``mcp list``.
+    """
     rc, out, _ = _run_cli(
         ["mcp", "install", "zread", "--tool", "claude-code", "--api-key", _KEY]
     )
     assert rc == 0
-    assert "zread: installed" in out
+    assert out == ""
 
     rc, out, _ = _run_cli(["mcp", "list", "--tool", "claude-code"])
     assert rc == 0
@@ -493,7 +498,7 @@ def test_cli_mcp_install_uninstall_list_roundtrip(_isolate_home):
 
     rc, out, _ = _run_cli(["mcp", "uninstall", "zread", "--tool", "claude-code"])
     assert rc == 0
-    assert "zread: removed" in out
+    assert out == ""
 
 
 def test_cli_mcp_install_dry_run_redacts_api_key(_isolate_home):

@@ -9,7 +9,8 @@ Covers the issue #3 acceptance criteria:
 - ``use default`` fully reverts settings.json (4 managed keys gone).
 - ``.zshrc``: foreign lines untouched; only the owned block added/removed.
 - ``--dry-run`` writes nothing; token redacted in output.
-- "restart recommended" printed on change.
+- ``use default`` real runs print NOTHING to stdout (issue #125 parity
+  contract; informational output returns as opt-in ``--verbose`` in #128).
 """
 
 from __future__ import annotations
@@ -370,7 +371,8 @@ class TestOwnershipJournalE2E:
 
         S3 regression (Codex finding #2): ownership-by-removal must restore the
         prior ONLY while the key is still absent. A reappeared value is an
-        external change → REFUSE + warn.
+        external change → REFUSE. The real run is silent (issue #125); the
+        REFUSE warning returns as opt-in ``--verbose`` in #128.
         """
         monkeypatch.setenv("HOME", str(tmp_path))
         _seed(
@@ -391,7 +393,7 @@ class TestOwnershipJournalE2E:
         env = json.loads(settings_path.read_text()).get("env", {})
         # The user's NEW key is preserved (not replaced by the stale old one).
         assert env.get("ANTHROPIC_API_KEY") == "sk-user-new-after-zai"
-        assert "reappeared" in capsys.readouterr().out
+        assert capsys.readouterr().out == ""
 
     def test_use_default_restores_original_auth_token(self, tmp_path, monkeypatch):
         """The headline S3 guarantee: original AUTH_TOKEN restored after zai→default."""
@@ -411,10 +413,12 @@ class TestOwnershipJournalE2E:
         assert env.get("ANTHROPIC_AUTH_TOKEN") == original_token
 
     def test_use_default_refuses_on_external_change(self, tmp_path, monkeypatch, capsys):
-        """If the user edited AUTH_TOKEN after use zai, use default warns + leaves it.
+        """If the user edited AUTH_TOKEN after use zai, use default leaves it.
 
         ADR-004: the key changed externally → REFUSE (do not overwrite). The
-        CLI must surface a warning naming the key and leave the edited value.
+        edited value survives; the real run is silent (issue #125 — the
+        warning line returns as opt-in ``--verbose`` in #128; ``--dry-run``
+        still previews REFUSE decisions).
         """
         monkeypatch.setenv("HOME", str(tmp_path))
         _seed(tmp_path)
@@ -432,9 +436,39 @@ class TestOwnershipJournalE2E:
         env = json.loads(settings_path.read_text()).get("env", {})
         # The edited value is PRESERVED (not overwritten, not deleted).
         assert env.get("ANTHROPIC_AUTH_TOKEN") == "sk-edited-by-user"
+        assert capsys.readouterr().out == ""
+
+    def test_use_default_dry_run_previews_refuse_warning(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """``use default --dry-run`` keeps naming REFUSE keys on stdout.
+
+        With the real run silent (issue #125), the dry-run preview is the only
+        surface that tells the user WHICH externally-changed key will be left
+        untouched. This pins the contract the silencing change relies on (PR
+        #129 docstring / CHANGELOG / PR body): a later refactor (e.g. #128's
+        --verbose work) must not drop the preview's REFUSE warnings silently.
+        """
+        monkeypatch.setenv("HOME", str(tmp_path))
+        _seed(tmp_path)
+        _run(["use", "zai", "--api-key", TOKEN])
+        capsys.readouterr()
+
+        # The user manually edits the token to something we never set.
+        settings_path = Paths.from_home(tmp_path, state_home=tmp_path).claude_settings
+        doc = json.loads(settings_path.read_text())
+        doc["env"]["ANTHROPIC_AUTH_TOKEN"] = "sk-edited-by-user"
+        settings_path.write_text(json.dumps(doc))
+        before = settings_path.read_text()
+
+        _run(["use", "default", "--region", "global", "--dry-run"])
+
         out = capsys.readouterr().out
+        # The preview warns and NAMES the key it refuses to touch...
         assert "warning" in out.lower()
         assert "ANTHROPIC_AUTH_TOKEN" in out
+        # ...and writes nothing (read-only preview).
+        assert settings_path.read_text() == before
 
     def test_use_default_idempotent_after_revert(self, tmp_path, monkeypatch, capsys):
         """A second ``use default`` after revert is a no-op (REFUSE/RESTORE settle)."""
@@ -448,7 +482,8 @@ class TestOwnershipJournalE2E:
         _run(["use", "default", "--region", "global"])
         # State unchanged by the second revert.
         assert Paths.from_home(tmp_path, state_home=tmp_path).claude_settings.read_text() == snapshot
-        assert "no changes" in capsys.readouterr().out.lower()
+        # Silent no-op too (issue #125 parity contract).
+        assert capsys.readouterr().out == ""
 
     def test_completed_cycle_does_not_resurrect_deleted_removal_key(
         self, tmp_path, monkeypatch
@@ -500,8 +535,9 @@ class TestOwnershipJournalE2E:
 
         Non-destructive invariant (ADR-004 / Codex finding #3): without a
         prior ``use zai`` there is no provenance, so the tool must NOT delete
-        managed-name keys the user may have configured by hand. The CLI warns
-        and leaves everything; only the owned .zshrc block (if any) is removed.
+        managed-name keys the user may have configured by hand. The real run
+        is silent (issue #125) and leaves everything; only the owned .zshrc
+        block (if any) is removed.
         """
         monkeypatch.setenv("HOME", str(tmp_path))
         _seed(
@@ -523,8 +559,7 @@ class TestOwnershipJournalE2E:
         assert env.get("ANTHROPIC_AUTH_TOKEN") == "sk-stray"
         assert env.get("ANTHROPIC_BASE_URL") == "https://api.z.ai/api/anthropic"
         assert env.get("FOREIGN") == "keep"
-        out = capsys.readouterr().out
-        assert "cannot prove ownership" in out
+        assert capsys.readouterr().out == ""
 
     def test_use_zai_rolls_forward_after_interrupted_prior_run(
         self, tmp_path, monkeypatch, capsys
@@ -556,15 +591,52 @@ class TestOwnershipJournalE2E:
 
         _run(["use", "zai", "--api-key", TOKEN])
 
-        out = capsys.readouterr().out
-        # The CLI warned that it recovered from an interrupted prior run.
-        assert "recovered from an interrupted prior run" in out
+        captured = capsys.readouterr()
+        # The recovery warning goes to STDERR so stdout stays a strict
+        # process contract (the pinned two-line activate output, issue #125).
+        assert "recovered from an interrupted prior run" in captured.err
+        assert captured.out == (
+            "Reloading GLM configuration to Claude Code...\n"
+            "GLM configuration reloaded to Claude Code successfully\n"
+        )
         # The manifest is consumed; the new activation completed cleanly.
         assert not paths.recovery_json.exists()
         env = json.loads(paths.claude_settings.read_text()).get("env", {})
         # The NEW activation's token wins (the manifest's settings was the
         # pre-empted run's intent; the new run replaces it).
         assert env["ANTHROPIC_AUTH_TOKEN"] == TOKEN
+
+    def test_use_default_recovery_case_is_stdout_silent(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """A recovery replay during ``use default`` keeps stdout EMPTY.
+
+        Cycle-review round 2 (PR #129): the recovery diagnostic used to print
+        to stdout, breaking the silent real-run contract (issue #125) with a
+        rc=0 run. It must surface on stderr instead.
+        """
+        monkeypatch.setenv("HOME", str(tmp_path))
+        paths = Paths.from_home(tmp_path, state_home=tmp_path)
+        paths.recovery_json.parent.mkdir(parents=True, exist_ok=True)
+        manifest = {
+            "entries": [
+                {
+                    "tag": "settings",
+                    "path": str(paths.claude_settings),
+                    "kind": "json",
+                    "content": json.dumps({"env": {"ANTHROPIC_AUTH_TOKEN": "sk-recovered"}}) + "\n",
+                }
+            ]
+        }
+        paths.recovery_json.write_text(json.dumps(manifest))
+
+        _run(["use", "default", "--region", "global"])
+
+        captured = capsys.readouterr()
+        assert "recovered from an interrupted prior run" in captured.err
+        assert captured.out == ""
+        # The manifest was replayed (roll-forward), not left behind.
+        assert not paths.recovery_json.exists()
 
 
 # ---------------------------------------------------------------------------
