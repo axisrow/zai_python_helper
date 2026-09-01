@@ -130,6 +130,23 @@ class _CliRejectingOpener:
         )
 
 
+def test_cli_doctor_parity_exits_zero_with_failing_check(tmp_path, capsys):
+    """CLI doctor is upstream parity: failing checks print ✗ but exit 0.
+
+    Upstream ``doctorCommand()`` never sets a non-zero exit; the CLI surface
+    (:func:`run_cli_doctor`) mirrors that byte-parity deliberately. The rich
+    :func:`run_doctor` Python API keeps the fail → 1 contract and is pinned
+    separately — this test pins the CLI half.
+    """
+    paths = Paths.from_home(tmp_path)  # nothing configured → checks FAIL
+
+    assert run_cli_doctor(paths) == 0
+    out = capsys.readouterr().out
+    assert "✗" in out
+    assert "Suggestions:" in out
+    assert "All checks passed!" not in out
+
+
 def test_cli_doctor_reports_invalid_api_key(monkeypatch, tmp_path, capsys):
     """The CLI-compatible doctor must not treat a rejected key as healthy."""
     from zai_python_helper import doctor

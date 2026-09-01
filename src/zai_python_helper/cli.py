@@ -949,9 +949,19 @@ def _handle_doctor(args: argparse.Namespace) -> int:
     """Run the diagnostic pipeline — verify the configured chain works.
 
     Thin shell: resolve ``Paths.default()`` and delegate to
-    :func:`zai_python_helper.doctor.run_doctor`. doctor owns its exit code
-    (``0`` unless a check FAILs; WARNs alone → ``0``) and its own rendering,
-    so this handler neither prints nor catches — it just returns the int.
+    :func:`zai_python_helper.doctor.run_cli_doctor`. Two contracts live in
+    :mod:`zai_python_helper.doctor`:
+
+    - CLI surface (:func:`~zai_python_helper.doctor.run_cli_doctor`, this
+      handler): byte-parity with the pinned upstream ``chelper doctor`` —
+      like upstream ``doctorCommand()`` it prints ✗ lines and Suggestions
+      but returns ``0`` unconditionally on completion, even when a check
+      FAILs.
+    - Python API (:func:`~zai_python_helper.doctor.run_doctor`): owns its
+      exit code — ``0`` unless a check FAILs; WARNs alone → ``0``.
+
+    The delegated function does its own rendering, so this handler neither
+    prints nor catches — it just returns the int.
     """
     import sys
 
