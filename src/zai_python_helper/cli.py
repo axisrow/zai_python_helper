@@ -120,8 +120,6 @@ _SAFE_JSON_KEY_NAMES: frozenset[str] = frozenset(
     }
 )
 
-_RESTART_NOTICE = "restart recommended for deterministic switching"
-
 
 def _normalize_secret_key(key: str) -> str:
     """Normalize a key for credential-name matching: upper, separators removed.
@@ -688,8 +686,9 @@ def _handle_use_zai(args: argparse.Namespace) -> int:
     plans via ``tool.plan_zai``, captures ownership via
     ``tool.extract_takeover``, and commits under one held :class:`ProcessLock`
     (ADR-005). ``--dry-run`` previews redacted unified_diffs and writes
-    nothing. Prints ``restart recommended`` whenever it changes files.
-    Idempotent: a second run with no drift is a no-op.
+    nothing. On success prints exactly the two pinned ``chelper auth reload``
+    lines (byte-parity contract, issue #125). Idempotent: a second run with
+    no drift is a no-op.
     """
     from zai_python_helper.constants import get_preset_model
     from zai_python_helper.core.domain import ModelMode
@@ -837,12 +836,21 @@ def _handle_use_default(args: argparse.Namespace) -> int:
     Generic over the tool: non-destructive inverse of ``use zai`` (ADR-004).
     For each managed field, consult the ownership journal and restore the
     prior value (RESTORE), drop our managed value (CLEAR), or leave it
-    untouched with a warning (REFUSE — the field changed externally since
-    activation). Idempotent.
+    untouched (REFUSE — the field changed externally since activation).
+    Idempotent.
+
+    Silent on success: the real run prints NOTHING to stdout, matching the
+    byte-for-byte parity contract with the pinned upstream manager surface
+    (issue #125). The informational output this used to print (header,
+    REFUSE warnings, per-file ``updated:`` lines, restart notice) is planned
+    to return as an opt-in ``--verbose`` flag (issue #128); the default stays
+    silent. ``--dry-run`` keeps its full preview output.
     """
     tool = _resolve_tool(args)
     _resolve_mode_or_raise(args)  # validate custom-only flags for CLI symmetry
-    region = Region(getattr(args, "region", Region.GLOBAL.value))
+    # ``--region`` is accepted and validated for CLI symmetry only: revert
+    # restores recorded priors, which are region-independent.
+    Region(getattr(args, "region", Region.GLOBAL.value))
     paths = Paths.default()
     dry_run = getattr(args, "dry_run", False)
 
@@ -852,8 +860,6 @@ def _handle_use_default(args: argparse.Namespace) -> int:
         apply_plan_locked,
         recover_locked,
     )
-
-    print(f"Reverting to default provider (tool: {tool.name}, region: {region.value})")
 
     if dry_run:
         # Read-only preview: no lock, no write.
@@ -885,7 +891,6 @@ def _handle_use_default(args: argparse.Namespace) -> int:
         plan = tool.plan_revert(
             state=state, decisions=decisions, journal_records=journal_records
         )
-        _print_refuse_warnings(decisions)
 
         # Persist the retired journal ATOMICALLY WITH the revert (issue #48
         # cycle-state + issue #60 Bug 7): every RESTORE retires its record to
@@ -903,15 +908,12 @@ def _handle_use_default(args: argparse.Namespace) -> int:
                 return None
             return journal.render(retired_records)
 
-        written = apply_plan_locked(
+        apply_plan_locked(
             paths, plan, state=lock.state, journal_content=_journal_text
         )
-    if not written:
-        print("(no changes — already at default)")
-    else:
-        for tag in written:
-            print(f"  updated: {resolve_path(paths, tag)}")
-        print(f"  {_RESTART_NOTICE}")
+    # Silent success: stdout stays empty for byte-parity with the pinned
+    # upstream manager surface (issue #125). File changes remain observable
+    # through the filesystem contract.
     return 0
 
 
@@ -980,14 +982,20 @@ def _resolve_mcp_tool(value: str) -> "Tool":
 def _handle_mcp_install(args: argparse.Namespace) -> int:
     """Install a preset MCP server into a tool's MCP config (headless).
 
-    Resolves the tool + region + key from flags, delegates the one-shot IO
-    cycle to :func:`zai_python_helper.mcp.install_mcp`, and prints the outcome.
+    Resolves the tool + region + key from flags and delegates the one-shot IO
+    cycle to :func:`zai_python_helper.mcp.install_mcp`.
     The key is resolved via :func:`io.secrets.resolve_key` (env/flag/prompt) in
     real mode and NEVER printed in ``--dry-run`` — the preview builds the entry
     with a ``<redacted>`` placeholder so the rendered shape shows WHERE the key
     lands (``env.Z_AI_API_KEY`` / ``headers.Authorization``) without leaking it.
     ``--dry-run`` is read-only: it shows the entry that WOULD be written,
     writes nothing.
+
+    Silent on success in real mode: stdout stays empty for byte-parity with
+    the pinned upstream manager surface (issue #125); the former
+    ``{id}: installed for {tool}`` line is planned to return as an opt-in
+    ``--verbose`` flag (issue #128). Exit code 0 + the on-disk config are the
+    success contract.
     """
     from zai_python_helper.errors import ConfigurationError, ValidationError
     from zai_python_helper.mcp import (
@@ -1029,15 +1037,14 @@ def _handle_mcp_install(args: argparse.Namespace) -> int:
 
     key = resolve_key(getattr(args, "api_key", None))
     try:
-        changed = install_mcp(tool, mcp_id, key, region)
+        install_mcp(tool, mcp_id, key, region)
     except ValueError as e:
         # install_mcp/install_into_doc fail closed with a bare ValueError on a
         # malformed (non-object) MCP section to avoid overwriting user-owned
         # data. Translate it into the project's error contract here so the
         # CLI reports a one-line message instead of an uncaught traceback.
         raise ConfigurationError(str(e)) from e
-    label = "installed" if changed else "already installed (no change)"
-    print(f"  {mcp_id}: {label} for {tool.value}")
+    # Silent success (issue #125): `changed` only fed the former status line.
     return 0
 
 
@@ -1045,9 +1052,14 @@ def _handle_mcp_uninstall(args: argparse.Namespace) -> int:
     """Remove a preset MCP server from a tool's MCP config (headless, opt-in).
 
     Delegates to :func:`zai_python_helper.mcp.uninstall_mcp`. Idempotent: an
-    absent id writes nothing and reports "not installed". ``--dry-run`` is
-    read-only (the same contract as ``use zai``/``use default`` dry-run): it
-    reports whether the id WOULD be removed, without touching the config.
+    absent id writes nothing. ``--dry-run`` is read-only (the same contract as
+    ``use zai``/``use default`` dry-run): it reports whether the id WOULD be
+    removed, without touching the config.
+
+    Silent on success in real mode: stdout stays empty for byte-parity with
+    the pinned upstream manager surface (issue #125); the former
+    ``{id}: removed from {tool}`` line is planned to return as an opt-in
+    ``--verbose`` flag (issue #128).
     """
     from zai_python_helper.mcp import (
         is_installed,
@@ -1070,9 +1082,8 @@ def _handle_mcp_uninstall(args: argparse.Namespace) -> int:
         print(f"--dry-run: {mcp_id}: {label} from {tool.value}")
         return 0
 
-    changed = uninstall_mcp(tool, mcp_id)
-    label = "removed" if changed else "not installed (no change)"
-    print(f"  {mcp_id}: {label} from {tool.value}")
+    uninstall_mcp(tool, mcp_id)
+    # Silent success (issue #125): the former status line is #128's --verbose.
     return 0
 
 
