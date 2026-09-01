@@ -113,6 +113,14 @@ def _docker_run(home: Path, command: list[str]) -> subprocess.CompletedProcess[b
     # host ownership at every level, so CI semantics are unchanged.
     bind_root = Path(home_abs).parent
     assert Path(state_abs).is_relative_to(bind_root)
+    # Mount-surface cost of the parent mount (PR #127 review): bind_root is the
+    # per-worker pytest basetemp, so every SIBLING of these homes — other
+    # matrix cells' HOMEs and the shared journal tree — is also visible
+    # read-write inside the container. Accepted because the pinned parity
+    # commands touch only $HOME and $XDG_STATE_HOME, xdist scopes basetemp per
+    # worker, and the journals carry the fake parity token only. Do not place
+    # anything sensitive as a sibling of these homes without narrowing this
+    # mount to a dedicated sandbox directory.
     return subprocess.run(
         [
             "docker",
