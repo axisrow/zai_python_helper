@@ -317,8 +317,9 @@ def _open_transaction_coordinator(paths: Paths | None, state_fd: int) -> int:
     """Pin the stable namespace used by the transaction lock."""
     if paths is None:
         # Raw-path callers already use their writable state lock file for
-        # cross-process coordination. The pinned directory is still needed as
-        # the stable in-process inode key shared with Paths callers.
+        # cross-process coordination. The duplicated directory descriptor is
+        # also flocked below, providing a stable cross-process lease and the
+        # inode key shared with Paths callers.
         return os.dup(state_fd)
     lexical_home = paths.claude_settings.parent.parent
     if ".." in lexical_home.parts:
@@ -467,8 +468,8 @@ class ProcessLock:
        serializes threads, including state-path aliases. Needed because BSD
        ``flock`` does not block a second fd opened by the same process.
     3. A blocking ``flock`` lease on the pinned managed-HOME directory
-       descriptor serializes separate processes. The state lock remains a
-       compatibility lease for callers using the raw-path constructor.
+       descriptor serializes separate processes. Every caller also retains a
+       state-file lease for compatibility with the canonical state lock.
 
     A context manager: :meth:`__enter__` takes both layers, :meth:`__exit__`
     releases both. Nesting is rejected before the second lock is acquired.

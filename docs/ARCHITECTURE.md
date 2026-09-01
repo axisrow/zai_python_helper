@@ -172,8 +172,10 @@ coordinator file in HOME. An in-process inode-keyed lock supplements `flock`
 on BSD, where separate file descriptors in one process do not necessarily
 block each other. Replaceable default-HOME namespaces are rejected because
 they could split the state and configuration lock domains. This is advisory
-locking and is not reliable for all NFS configurations; deployments requiring
-these guarantees should use a local filesystem.
+locking. On NFS configurations that emulate `flock` with POSIX write locks,
+the read-only directory descriptor can cause commands to fail outright (and
+POSIX record locks do not apply to directories); deployments requiring these
+guarantees should use a local filesystem.
 
 Recovery manifests may contain historical absolute or symlinked journal-path
 metadata. That string is never used as an authority for I/O: recovery always
