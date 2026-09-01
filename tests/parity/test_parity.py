@@ -101,6 +101,18 @@ def _docker_run(home: Path, command: list[str]) -> subprocess.CompletedProcess[b
     state_root = home.parent / ".zai-parity-state"
     state_root.mkdir(mode=0o700, exist_ok=True)
     state_abs = str(state_root.resolve())
+    # Bind-mount the COMMON PARENT of HOME and the state root — never HOME or
+    # the state root themselves (issue #126). macOS Docker Desktop presents a
+    # bind mount's root inode as root:root inside the Linux VM while every
+    # entry below the mount root keeps its host uid/gid; the strict state-root
+    # ownership policy (#120) requires HOME (controlled for the transaction
+    # lock) and XDG_STATE_HOME (controlled/private state walk) to be owned by
+    # the invoking uid, i.e. by ``--user`` below. Keeping both one level below
+    # the mount root satisfies that policy on Docker Desktop without weakening
+    # it; on Linux the parent mount is equivalent because bind mounts preserve
+    # host ownership at every level, so CI semantics are unchanged.
+    bind_root = Path(home_abs).parent
+    assert Path(state_abs).is_relative_to(bind_root)
     return subprocess.run(
         [
             "docker",
@@ -117,9 +129,7 @@ def _docker_run(home: Path, command: list[str]) -> subprocess.CompletedProcess[b
             "-e",
             f"PATH={_CONTAINER_PATH}",
             "-v",
-            f"{home_abs}:{home_abs}",
-            "-v",
-            f"{state_abs}:{state_abs}",
+            f"{bind_root}:{bind_root}",
             IMAGE_TAG,
             *command,
         ],
