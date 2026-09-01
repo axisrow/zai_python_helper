@@ -21,6 +21,7 @@ pattern).
 import argparse
 import difflib
 import re
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -507,8 +508,11 @@ def _run_recovery(paths: Paths, recover_fn) -> None:
     """Roll forward any interrupted prior activation before a new run.
 
     If a recovery manifest survives (a prior ``use`` was hard-killed mid-way),
-    replay it to completion and report what was recovered. Best-effort and
-    silent when there is nothing to recover.
+    replay it to completion and report what was recovered on STDERR: stdout
+    is a strict process contract (the pinned two-line ``use zai`` output /
+    the silent ``use default`` contract, issue #125) and must stay free of
+    incidental diagnostics. Best-effort and silent when there is nothing to
+    recover.
     """
     # ``recover`` performs the existence check after opening the validated
     # helper directory and taking its lock.  Do not use a path-based
@@ -518,7 +522,8 @@ def _run_recovery(paths: Paths, recover_fn) -> None:
     if applied:
         print(
             "warning: recovered from an interrupted prior run "
-            f"(re-applied: {', '.join(applied)})"
+            f"(re-applied: {', '.join(applied)})",
+            file=sys.stderr,
         )
 
 
@@ -848,9 +853,7 @@ def _handle_use_default(args: argparse.Namespace) -> int:
     """
     tool = _resolve_tool(args)
     _resolve_mode_or_raise(args)  # validate custom-only flags for CLI symmetry
-    # ``--region`` is accepted and validated for CLI symmetry only: revert
-    # restores recorded priors, which are region-independent.
-    Region(getattr(args, "region", Region.GLOBAL.value))
+    region = Region(getattr(args, "region", Region.GLOBAL.value))
     paths = Paths.default()
     dry_run = getattr(args, "dry_run", False)
 
@@ -862,7 +865,10 @@ def _handle_use_default(args: argparse.Namespace) -> int:
     )
 
     if dry_run:
-        # Read-only preview: no lock, no write.
+        # Read-only preview: no lock, no write. The header renders here so
+        # the real run stays byte-silent (issue #125) while the preview
+        # keeps its full informational output.
+        print(f"Reverting to default provider (tool: {tool.name}, region: {region.value})")
         state = tool.read_state(paths)
         journal_records = OwnershipJournal(paths.ownership_json).read()
         decisions = tool.revert_decisions(journal_records, state)[0]

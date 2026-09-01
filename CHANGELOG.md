@@ -13,6 +13,10 @@
   on-disk config instead; `--dry-run` previews are unchanged and the
   informational output is planned to return as an opt-in `--verbose` flag
   (issue #128).
+- The `warning: recovered from an interrupted prior run` diagnostic (emitted
+  when a surviving recovery manifest is replayed before a `use` command) now
+  goes to stderr instead of stdout, keeping stdout a strict process contract
+  for both `use zai` and `use default`.
 - Automatic migration of state from pre-0.1 `~/.zai-python-helper` and the
   former `/var/tmp/zai-python-helper-<uid>` location has been removed. Only the
   canonical XDG state root is used.

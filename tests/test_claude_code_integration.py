@@ -559,15 +559,52 @@ class TestOwnershipJournalE2E:
 
         _run(["use", "zai", "--api-key", TOKEN])
 
-        out = capsys.readouterr().out
-        # The CLI warned that it recovered from an interrupted prior run.
-        assert "recovered from an interrupted prior run" in out
+        captured = capsys.readouterr()
+        # The recovery warning goes to STDERR so stdout stays a strict
+        # process contract (the pinned two-line activate output, issue #125).
+        assert "recovered from an interrupted prior run" in captured.err
+        assert captured.out == (
+            "Reloading GLM configuration to Claude Code...\n"
+            "GLM configuration reloaded to Claude Code successfully\n"
+        )
         # The manifest is consumed; the new activation completed cleanly.
         assert not paths.recovery_json.exists()
         env = json.loads(paths.claude_settings.read_text()).get("env", {})
         # The NEW activation's token wins (the manifest's settings was the
         # pre-empted run's intent; the new run replaces it).
         assert env["ANTHROPIC_AUTH_TOKEN"] == TOKEN
+
+    def test_use_default_recovery_case_is_stdout_silent(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """A recovery replay during ``use default`` keeps stdout EMPTY.
+
+        Cycle-review round 2 (PR #129): the recovery diagnostic used to print
+        to stdout, breaking the silent real-run contract (issue #125) with a
+        rc=0 run. It must surface on stderr instead.
+        """
+        monkeypatch.setenv("HOME", str(tmp_path))
+        paths = Paths.from_home(tmp_path, state_home=tmp_path)
+        paths.recovery_json.parent.mkdir(parents=True, exist_ok=True)
+        manifest = {
+            "entries": [
+                {
+                    "tag": "settings",
+                    "path": str(paths.claude_settings),
+                    "kind": "json",
+                    "content": json.dumps({"env": {"ANTHROPIC_AUTH_TOKEN": "sk-recovered"}}) + "\n",
+                }
+            ]
+        }
+        paths.recovery_json.write_text(json.dumps(manifest))
+
+        _run(["use", "default", "--region", "global"])
+
+        captured = capsys.readouterr()
+        assert "recovered from an interrupted prior run" in captured.err
+        assert captured.out == ""
+        # The manifest was replayed (roll-forward), not left behind.
+        assert not paths.recovery_json.exists()
 
 
 # ---------------------------------------------------------------------------
