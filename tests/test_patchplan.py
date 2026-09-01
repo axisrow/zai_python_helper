@@ -13,7 +13,6 @@ and a NOOP plan writes nothing.
 
 from __future__ import annotations
 
-import base64
 import errno
 import fcntl
 import json
@@ -24,7 +23,6 @@ import sys
 import tempfile
 import threading
 import time
-from contextlib import ExitStack
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -36,15 +34,12 @@ from hypothesis import strategies as st
 
 from zai_python_helper.core.planner import DeltaKind, FileDelta, FileTag, PatchPlan
 from zai_python_helper.patchplan import (
-    PinnedStateDirectory,
     ProcessLock,
     _read_at,
     apply_plan_locked,
     apply_plan_under_lock,
     has_pending_recovery,
-    migrate_legacy_state,
     recover,
-    state_transaction,
 )
 from zai_python_helper.paths import Paths
 
@@ -114,523 +109,35 @@ def test_read_at_does_not_double_close_reused_fd(tmp_path, payload):
         real_close(root_fd)
 
 
-def test_migrate_legacy_state_moves_journal_and_recovery(tmp_path):
-    """An upgrade preserves both ownership and interrupted-run state."""
-    paths = _paths(tmp_path)
-    legacy = tmp_path / ".zai-python-helper"
-    legacy.mkdir()
-    (legacy / "ownership.json").write_text('{"legacy": true}\n')
-    (legacy / "recovery.json").write_text('{"entries": []}\n')
-
-    assert migrate_legacy_state(paths) == ["ownership.json", "recovery.json"]
-    assert paths.ownership_json.read_text() == '{"legacy": true}\n'
-    assert paths.recovery_json.read_text() == '{"entries": []}\n'
-    assert not (legacy / "ownership.json").exists()
-    assert not (legacy / "recovery.json").exists()
-
-
-def test_migrate_legacy_state_rewrites_recovery_journal_path(tmp_path):
-    """Migrated recovery manifests must point at the new journal location."""
-    paths = _paths(tmp_path)
-    legacy = tmp_path / ".zai-python-helper"
-    legacy.mkdir()
-    (legacy / "ownership.json").write_text('{"legacy": true}\n')
-    (legacy / "recovery.json").write_text(json.dumps({
-        "entries": [],
-        "journal": {"tag": "ownership", "path": str(legacy / "ownership.json"), "content": "{}\n"},
-    }))
-
-    migrate_legacy_state(paths)
-    manifest = json.loads(paths.recovery_json.read_text())
-    assert manifest["journal"]["path"] == str(paths.ownership_json)
-
-
-@pytest.mark.parametrize("name", ["ownership.json", "recovery.json"])
-def test_migrate_legacy_state_prefers_newer_runtime_tree(tmp_path, name):
-    """A stale pre-0.1 HOME copy cannot override newer runtime state."""
-    home = tmp_path / "home"
-    home.mkdir()
-    home_legacy = home / ".zai-python-helper"
-    home_legacy.mkdir(mode=0o700)
-    runtime_legacy = tmp_path / "legacy-runtime"
-    runtime_legacy.mkdir(mode=0o700)
-    (home_legacy / name).write_text('{"source": "home"}\n')
-    (runtime_legacy / name).write_text('{"source": "runtime"}\n')
-    paths = replace(
-        Paths.from_home(home, state_home=tmp_path / "new-state"),
-        legacy_runtime_dir=runtime_legacy,
-    )
-
-    assert migrate_legacy_state(paths) == [name]
-    destination = paths.lock_file.parent / name
-    assert json.loads(destination.read_text()) == {"source": "runtime"}
-    assert not (runtime_legacy / name).exists()
-    assert not (home_legacy / name).exists()
-
-
-def test_migrate_legacy_state_reimports_runtime_generation_after_handoff(tmp_path):
-    """State written by a late old-runtime process supersedes active state."""
-    home = tmp_path / "home"
-    home.mkdir()
-    runtime = tmp_path / "legacy-runtime"
-    runtime.mkdir(mode=0o700)
-    paths = replace(
-        Paths.from_home(home, state_home=tmp_path / "new-state"),
-        legacy_runtime_dir=runtime,
-    )
-    (runtime / "ownership.json").write_text('{"generation": "first"}\n')
-    assert migrate_legacy_state(paths) == ["ownership.json"]
-
-    # An already-started old process can commit only after the retained lock
-    # is released. Its reappearing generation must win on the next transaction.
-    (runtime / "ownership.json").write_text('{"generation": "late"}\n')
-    paths.recovery_json.write_text('{"stale": true}\n')
-
-    assert migrate_legacy_state(paths) == ["ownership.json"]
-    assert json.loads(paths.ownership_json.read_text()) == {"generation": "late"}
-    assert not paths.recovery_json.exists()
-
-
-def test_migrate_legacy_state_reimports_home_generation_after_handoff(tmp_path):
-    """A late pre-0.1 process is reconciled after its retained lock releases."""
-    home = tmp_path / "home"
-    home.mkdir()
-    legacy = home / ".zai-python-helper"
-    legacy.mkdir(mode=0o700)
-    paths = Paths.from_home(home, state_home=tmp_path / "new-state")
-    (legacy / "ownership.json").write_text('{"generation": "first"}\n')
-    assert migrate_legacy_state(paths) == ["ownership.json"]
-
-    (legacy / "ownership.json").write_text('{"generation": "late"}\n')
-    assert migrate_legacy_state(paths) == ["ownership.json"]
-    assert json.loads(paths.ownership_json.read_text()) == {"generation": "late"}
-
-
-def test_migrate_legacy_state_uses_one_authoritative_generation(tmp_path):
-    """Runtime state cannot be combined with a stale HOME recovery manifest."""
-    home = tmp_path / "home"
-    home.mkdir()
-    home_legacy = home / ".zai-python-helper"
-    home_legacy.mkdir(mode=0o700)
-    runtime = tmp_path / "legacy-runtime"
-    runtime.mkdir(mode=0o700)
-    (runtime / "ownership.json").write_text('{"source": "runtime"}\n')
-    (home_legacy / "recovery.json").write_text('{"source": "home"}\n')
-    paths = replace(
-        Paths.from_home(home, state_home=tmp_path / "new-state"),
-        legacy_runtime_dir=runtime,
-    )
-
-    assert migrate_legacy_state(paths) == ["ownership.json"]
-    assert json.loads(paths.ownership_json.read_text()) == {"source": "runtime"}
-    assert not paths.recovery_json.exists()
-    assert not (home_legacy / "recovery.json").exists()
-
-
-@pytest.mark.parametrize("failure_stage", ["mirror", "cleanup"])
-def test_migrate_legacy_generation_resumes_after_interruption(
-    tmp_path, failure_stage
-):
-    """The pinned handoff record repairs interrupted mirror and cleanup phases."""
-    home = tmp_path / "home"
-    home.mkdir()
-    runtime = tmp_path / "legacy-runtime"
-    runtime.mkdir(mode=0o700)
-    ownership = b'{"generation": "runtime"}\n'
-    recovery = b'{"entries": []}\n'
-    (runtime / "ownership.json").write_bytes(ownership)
-    (runtime / "recovery.json").write_bytes(recovery)
-    paths = replace(
-        Paths.from_home(home, state_home=tmp_path / "new-state"),
-        legacy_runtime_dir=runtime,
-    )
-    failed = False
-
-    if failure_stage == "mirror":
-        original = PinnedStateDirectory.atomic_write
-
-        def interrupt(state, name, data, mode):
-            nonlocal failed
-            if state.path == paths.lock_file.parent and name == "recovery.json":
-                failed = True
-                raise OSError("interrupted active mirror")
-            original(state, name, data, mode)
-
-        patch = mock.patch.object(PinnedStateDirectory, "atomic_write", interrupt)
-    else:
-        original = PinnedStateDirectory.unlink
-
-        def interrupt(state, name, *, missing_ok=True):
-            nonlocal failed
-            if state.path == runtime and name == "recovery.json":
-                failed = True
-                raise OSError("interrupted source cleanup")
-            original(state, name, missing_ok=missing_ok)
-
-        patch = mock.patch.object(PinnedStateDirectory, "unlink", interrupt)
-
-    with patch, pytest.raises(OSError, match="interrupted"):
-        migrate_legacy_state(paths)
-    assert failed
-    handoff = paths.lock_file.parent / "legacy-handoff.json"
-    assert handoff.stat().st_mode & 0o777 == 0o600
-    assert json.loads(handoff.read_text())["in_progress"] is not None
-
-    assert migrate_legacy_state(paths) == ["ownership.json", "recovery.json"]
-    assert paths.ownership_json.read_bytes() == ownership
-    assert paths.recovery_json.read_bytes() == recovery
-    assert not (runtime / "ownership.json").exists()
-    assert not (runtime / "recovery.json").exists()
-    assert json.loads(handoff.read_text())["in_progress"] is None
-
-
-def test_pending_runtime_handoff_resumes_without_live_runtime_candidate(tmp_path):
-    """Persisted rewrite metadata survives an explicit state-root override."""
-    home = tmp_path / "home"
-    home.mkdir()
-    state_home = home / ".local" / "state"
-    runtime = tmp_path / "legacy-runtime"
-    runtime.mkdir(mode=0o700)
-    paths = replace(
-        Paths.from_home(home, state_home=state_home),
-        legacy_runtime_dir=runtime,
-    )
-    (runtime / "ownership.json").write_text('{"generation": "runtime"}\n')
-    (runtime / "recovery.json").write_text(
-        json.dumps(
-            {
-                "entries": [],
-                "journal": {
-                    "tag": "ownership",
-                    "path": str(runtime / "ownership.json"),
-                    "content": "{}\n",
-                },
-            }
-        )
-    )
-    original = PinnedStateDirectory.atomic_write
-
-    def interrupt_finalize(state, name, data, mode):
-        if (
-            state.path == paths.lock_file.parent
-            and name == "legacy-handoff.json"
-            and json.loads(data)["in_progress"] is None
-        ):
-            raise OSError("interrupted handoff finalization")
-        original(state, name, data, mode)
-
-    with mock.patch.object(PinnedStateDirectory, "atomic_write", interrupt_finalize):
-        with pytest.raises(OSError, match="interrupted handoff finalization"):
-            migrate_legacy_state(paths)
-
-    assert not (runtime / "ownership.json").exists()
-    assert not (runtime / "recovery.json").exists()
-    resumed = Paths.from_home(home, state_home=state_home)
-    assert resumed.legacy_runtime_dir is None
-
-    with mock.patch(
-        "zai_python_helper.patchplan._expected_legacy_runtime_dir",
-        return_value=runtime,
-    ):
-        assert migrate_legacy_state(resumed) == ["ownership.json", "recovery.json"]
-    manifest = json.loads(resumed.recovery_json.read_text())
-    assert manifest["journal"]["path"] == str(resumed.ownership_json)
-    handoff = resumed.lock_file.parent / "legacy-handoff.json"
-    assert json.loads(handoff.read_text())["in_progress"] is None
-
-
-def test_initial_reconciliation_preserves_existing_xdg_generation(tmp_path):
-    """An XDG generation outranks HOME debris left by an older migration."""
-    home = tmp_path / "home"
-    home.mkdir()
-    legacy = home / ".zai-python-helper"
-    legacy.mkdir(mode=0o700)
-    (legacy / "ownership.json").write_text('{"source": "stale-home"}\n')
-    (legacy / "recovery.json").write_text('{"source": "stale-home"}\n')
-    paths = Paths.from_home(home, state_home=tmp_path / "xdg-state")
-    with ProcessLock(paths) as lock:
-        assert lock.state is not None
-        lock.state.atomic_write(
-            "ownership.json", b'{"source": "active-xdg"}\n', 0o600
-        )
-        lock.state.atomic_write(
-            "recovery.json", b'{"source": "active-xdg"}\n', 0o600
-        )
-
-    assert migrate_legacy_state(paths) == []
-    assert json.loads(paths.ownership_json.read_text()) == {"source": "active-xdg"}
-    assert json.loads(paths.recovery_json.read_text()) == {"source": "active-xdg"}
-    assert not (legacy / "ownership.json").exists()
-    assert not (legacy / "recovery.json").exists()
-    handoff = json.loads((paths.lock_file.parent / "legacy-handoff.json").read_text())
-    assert handoff["initialized"] is True
-    assert handoff["in_progress"] is None
-
-
-def test_initial_xdg_cleanup_resumes_without_importing_home_subset(tmp_path):
-    """Interrupted stale-HOME cleanup retains the authoritative active snapshot."""
-    home = tmp_path / "home"
-    home.mkdir()
-    legacy = home / ".zai-python-helper"
-    legacy.mkdir(mode=0o700)
-    (legacy / "ownership.json").write_text('{"source": "stale-home"}\n')
-    (legacy / "recovery.json").write_text('{"source": "stale-home"}\n')
-    paths = Paths.from_home(home, state_home=tmp_path / "xdg-state")
-    with ProcessLock(paths) as lock:
-        assert lock.state is not None
-        lock.state.atomic_write(
-            "ownership.json", b'{"source": "active-xdg"}\n', 0o600
-        )
-    original = PinnedStateDirectory.unlink
-
-    def interrupt_cleanup(state, name, *, missing_ok=True):
-        if state.path == legacy and name == "recovery.json":
-            raise OSError("interrupted stale HOME cleanup")
-        original(state, name, missing_ok=missing_ok)
-
-    with mock.patch.object(PinnedStateDirectory, "unlink", interrupt_cleanup):
-        with pytest.raises(OSError, match="interrupted stale HOME cleanup"):
-            migrate_legacy_state(paths)
-
-    assert not (legacy / "ownership.json").exists()
-    assert (legacy / "recovery.json").exists()
-    assert migrate_legacy_state(paths) == []
-    assert json.loads(paths.ownership_json.read_text()) == {"source": "active-xdg"}
-    assert not paths.recovery_json.exists()
-    assert not (legacy / "recovery.json").exists()
-
-
-def test_changed_home_generation_supersedes_pending_active_cleanup(tmp_path):
-    """A queued pre-0.1 commit is not mistaken for stale cleanup residue."""
-    home = tmp_path / "home"
-    home.mkdir()
-    legacy = home / ".zai-python-helper"
-    legacy.mkdir(mode=0o700)
-    (legacy / "ownership.json").write_text('{"source": "stale-home"}\n')
-    (legacy / "recovery.json").write_text('{"source": "stale-home"}\n')
-    paths = Paths.from_home(home, state_home=tmp_path / "xdg-state")
-    with ProcessLock(paths) as lock:
-        assert lock.state is not None
-        lock.state.atomic_write(
-            "ownership.json", b'{"source": "active-xdg"}\n', 0o600
-        )
-    original = PinnedStateDirectory.unlink
-
-    def interrupt_cleanup(state, name, *, missing_ok=True):
-        if state.path == legacy and name == "recovery.json":
-            raise OSError("interrupted stale HOME cleanup")
-        original(state, name, missing_ok=missing_ok)
-
-    with mock.patch.object(PinnedStateDirectory, "unlink", interrupt_cleanup):
-        with pytest.raises(OSError, match="interrupted stale HOME cleanup"):
-            migrate_legacy_state(paths)
-
-    # The retained HOME lock is released by the crash path. A queued old
-    # process commits a distinct generation before the next invocation.
-    # Recreating byte-identical files still constitutes a new commit: inode
-    # identity, not content alone, distinguishes it from cleanup residue.
-    (legacy / "ownership.json").write_text('{"source": "stale-home"}\n')
-    (legacy / "recovery.json").write_text('{"source": "stale-home"}\n')
-
-    assert migrate_legacy_state(paths) == ["ownership.json", "recovery.json"]
-    assert json.loads(paths.ownership_json.read_text()) == {"source": "stale-home"}
-    assert json.loads(paths.recovery_json.read_text()) == {"source": "stale-home"}
-    assert not (legacy / "ownership.json").exists()
-    assert not (legacy / "recovery.json").exists()
-
-
-def test_migrate_legacy_state_waits_for_legacy_process_lock(tmp_path):
-    """Migration cannot copy/unlink state while an old process is committing."""
-    legacy = tmp_path / "legacy-state"
-    legacy.mkdir(mode=0o700)
-    (legacy / "ownership.json").write_text('{"version": "stale"}\n')
-    ready = legacy / "ready"
-    paths = replace(
-        Paths.from_home(tmp_path / "home", state_home=tmp_path / "new-state"),
-        legacy_runtime_dir=legacy,
-    )
-    script = """
-import fcntl, os, pathlib, sys, time
-root = pathlib.Path(sys.argv[1])
-fd = os.open(root / "lock", os.O_RDWR | os.O_CREAT, 0o600)
-fcntl.flock(fd, fcntl.LOCK_EX)
-(root / "ready").write_text("held")
-time.sleep(0.35)
-(root / "ownership.json").write_text('{"version": "final"}\\n')
-fcntl.flock(fd, fcntl.LOCK_UN)
-os.close(fd)
-"""
-    process = subprocess.Popen([sys.executable, "-c", script, str(legacy)])
-    deadline = time.monotonic() + 2
-    while not ready.exists() and time.monotonic() < deadline:
-        time.sleep(0.01)
-    assert ready.exists()
-
-    started = time.monotonic()
-    try:
-        assert migrate_legacy_state(paths) == ["ownership.json"]
-    finally:
-        process.wait(timeout=2)
-
-    assert time.monotonic() - started >= 0.25
-    assert paths.ownership_json.read_text() == '{"version": "final"}\n'
-    assert not (legacy / "ownership.json").exists()
-
-
-def test_state_transaction_retains_legacy_lock_through_commit_scope(tmp_path):
-    """An old process reaching its lock late stays blocked until commit exits."""
-    legacy = tmp_path / "legacy-state"
-    started = legacy / "started"
-    acquired = legacy / "acquired"
-    paths = replace(
-        Paths.from_home(tmp_path / "home", state_home=tmp_path / "new-state"),
-        legacy_runtime_dir=legacy,
-    )
-    script = """
-import fcntl, os, pathlib, sys
-root = pathlib.Path(sys.argv[1])
-fd = os.open(root / "lock", os.O_RDWR | os.O_CREAT, 0o600)
-(root / "started").write_text("waiting")
-fcntl.flock(fd, fcntl.LOCK_EX)
-(root / "acquired").write_text("entered")
-fcntl.flock(fd, fcntl.LOCK_UN)
-os.close(fd)
-"""
-
-    with state_transaction(paths):
-        process = subprocess.Popen([sys.executable, "-c", script, str(legacy)])
-        deadline = time.monotonic() + 2
-        while not started.exists() and time.monotonic() < deadline:
-            time.sleep(0.01)
-        assert started.exists()
-        time.sleep(0.1)
-        assert not acquired.exists()
-
-    process.wait(timeout=2)
-    assert acquired.read_text() == "entered"
-
-
-def test_state_transaction_reserves_missing_home_legacy_lock_tree(tmp_path):
-    """A pre-0.1 process cannot create and lock HOME state during commit."""
-    home = tmp_path / "home"
-    home.mkdir()
-    legacy = home / ".zai-python-helper"
-    started = legacy / "started"
-    acquired = legacy / "acquired"
-    paths = Paths.from_home(home, state_home=tmp_path / "new-state")
-    script = """
-import fcntl, os, pathlib, sys
-root = pathlib.Path(sys.argv[1])
-root.mkdir(mode=0o700, parents=True, exist_ok=True)
-fd = os.open(root / "lock", os.O_RDWR | os.O_CREAT, 0o600)
-(root / "started").write_text("waiting")
-fcntl.flock(fd, fcntl.LOCK_EX)
-(root / "acquired").write_text("entered")
-fcntl.flock(fd, fcntl.LOCK_UN)
-os.close(fd)
-"""
-
-    assert not legacy.exists()
-    with state_transaction(paths):
-        process = subprocess.Popen([sys.executable, "-c", script, str(legacy)])
-        deadline = time.monotonic() + 2
-        while not started.exists() and time.monotonic() < deadline:
-            time.sleep(0.01)
-        assert started.exists()
-        time.sleep(0.1)
-        assert not acquired.exists()
-
-    process.wait(timeout=2)
-    assert acquired.read_text() == "entered"
-
-
-def test_state_transaction_fails_closed_for_unpinnable_home_legacy_tree(tmp_path):
-    """A HOME symlink cannot make the transaction skip the old lock namespace."""
-    home = tmp_path / "home"
-    home.mkdir()
-    target = tmp_path / "legacy-target"
-    target.mkdir(mode=0o700)
-    (home / ".zai-python-helper").symlink_to(target, target_is_directory=True)
-    paths = Paths.from_home(home, state_home=tmp_path / "new-state")
-    entered = False
-
-    with pytest.raises(OSError):
-        with state_transaction(paths):
-            entered = True
-
-    assert entered is False
-
-
-def test_legacy_runtime_alias_of_active_root_is_not_relocked_or_migrated(tmp_path):
-    """One pinned directory cannot be both active destination and legacy source."""
-    home = tmp_path / "home"
-    home.mkdir()
-    runtime_root = tmp_path / "runtime-root"
-    runtime_root.mkdir(mode=0o700)
-    state_home = tmp_path / "state-link"
-    state_home.symlink_to(runtime_root, target_is_directory=True)
-    paths = Paths.from_home(home, state_home=state_home)
-    physical_helper = runtime_root / paths.lock_file.parent.relative_to(state_home)
-    paths = replace(paths, legacy_runtime_dir=physical_helper)
-    content = b'{"source": "active"}\n'
-    with ProcessLock(paths) as lock:
-        assert lock.state is not None
-        lock.state.atomic_write("ownership.json", content, 0o600)
-
-    assert migrate_legacy_state(paths) == []
-    assert paths.ownership_json.read_bytes() == content
-
-
-def test_pending_active_handoff_accepts_prior_canonical_journal_spelling(tmp_path):
-    """A pre-upgrade handoff resumes after Paths stops canonicalizing XDG."""
-    home = tmp_path / "home"
-    home.mkdir()
-    target = tmp_path / "state-target"
-    target.mkdir()
-    state_home = tmp_path / "state-link"
-    state_home.symlink_to(target, target_is_directory=True)
-    paths = Paths.from_home(home, state_home=state_home)
-    paths.lock_file.parent.mkdir(parents=True)
-    canonical_journal = target / paths.ownership_json.relative_to(state_home)
-    content = b'{"source": "active"}\n'
-    handoff = {
-        "version": 1,
-        "initialized": True,
-        "in_progress": {
-            "source": "active",
-            "journal_path": str(canonical_journal),
-            "files": {
-                "ownership.json": base64.b64encode(content).decode(),
-                "recovery.json": None,
-            },
-            "cleanup_baseline": {
-                "ownership.json": None,
-                "recovery.json": None,
-            },
-            "cleanup_identities": {
-                "ownership.json": None,
-                "recovery.json": None,
-            },
-        },
-    }
-    (paths.lock_file.parent / "legacy-handoff.json").write_text(
-        json.dumps(handoff)
-    )
-
-    assert migrate_legacy_state(paths) == []
-    assert paths.ownership_json.read_bytes() == content
-    completed = json.loads(
-        (paths.lock_file.parent / "legacy-handoff.json").read_text()
-    )
-    assert completed["in_progress"] is None
-
-
 # ---------------------------------------------------------------------------
 # ProcessLock: serialization
 # ---------------------------------------------------------------------------
 
 
 class TestProcessLock:
+    def test_old_state_locations_are_ignored(self, tmp_path):
+        """A fresh canonical root does not inspect or import pre-0.1 state."""
+        home = tmp_path / "home"
+        home.mkdir()
+        old_home_state = home / ".zai-python-helper"
+        old_home_state.mkdir()
+        (old_home_state / "ownership.json").write_text('{"old": true}\n')
+        old_runtime_state = tmp_path / "runtime-state"
+        old_runtime_state.mkdir()
+        (old_runtime_state / "ownership.json").write_text('{"old": true}\n')
+        state_home = tmp_path / "state"
+        paths = replace(
+            Paths.from_home(home, state_home=state_home),
+            legacy_runtime_dir=old_runtime_state,
+        )
+
+        with ProcessLock(paths):
+            pass
+
+        assert not paths.ownership_json.exists()
+        assert (old_home_state / "ownership.json").exists()
+        assert (old_runtime_state / "ownership.json").exists()
+
     def test_precreated_configured_root_symlink_to_attacker_target_fails_closed(
         self, tmp_path
     ):
@@ -1026,78 +533,6 @@ with ProcessLock(paths):
         max_examples=12,
         suppress_health_check=[HealthCheck.function_scoped_fixture],
     )
-    @given(attacker_kind=st.sampled_from(["foreign-owner", "symlink", "file"]))
-    def test_attacker_owned_legacy_runtime_root_does_not_deny_service(
-        self, tmp_path, attacker_kind
-    ):
-        """A foreign /var/tmp reservation is ignored, not raised to the victim."""
-        import zai_python_helper.patchplan as patchplan
-        attacker_root = tmp_path / f"attacker-{attacker_kind}"
-        attacker_target = tmp_path / f"target-{attacker_kind}"
-        if attacker_root.is_symlink():
-            attacker_root.unlink()
-        if attacker_kind == "foreign-owner":
-            attacker_root.mkdir(exist_ok=True)
-            marker = attacker_root / "attacker-marker"
-            marker.write_text("foreign uid")
-        elif attacker_kind == "symlink":
-            attacker_target.mkdir(exist_ok=True)
-            marker = attacker_target / "attacker-marker"
-            marker.write_text("symlink target")
-            attacker_root.symlink_to(attacker_target, target_is_directory=True)
-        else:
-            attacker_root.write_text("attacker file")
-            marker = attacker_root
-        preferred = tmp_path / ".local" / "state"
-        paths = replace(
-            Paths.from_home(tmp_path, state_home=preferred),
-            legacy_runtime_dir=attacker_root,
-        )
-
-        with ExitStack() as patches:
-            if attacker_kind == "foreign-owner":
-                real_fstat = patchplan.os.fstat
-                attacker_fds: set[int] = set()
-                real_open = patchplan.os.open
-                real_close = patchplan.os.close
-
-                def track_open(path, flags, *args, dir_fd=None, **kwargs):
-                    fd = real_open(path, flags, *args, dir_fd=dir_fd, **kwargs)
-                    if Path(path).name == attacker_root.name:
-                        attacker_fds.add(fd)
-                    return fd
-
-                def foreign_fstat(fd):
-                    result = real_fstat(fd)
-                    if fd in attacker_fds:
-                        return SimpleNamespace(
-                            st_uid=result.st_uid + 1,
-                            st_mode=result.st_mode,
-                        )
-                    return result
-
-                def track_close(fd):
-                    attacker_fds.discard(fd)
-                    real_close(fd)
-
-                patches.enter_context(mock.patch.object(patchplan.os, "open", track_open))
-                patches.enter_context(
-                    mock.patch.object(patchplan.os, "fstat", foreign_fstat)
-                )
-                patches.enter_context(
-                    mock.patch.object(patchplan.os, "close", track_close)
-                )
-            assert migrate_legacy_state(paths) == []
-        with ProcessLock(paths) as lock:
-            assert lock.state is not None
-            lock.state.atomic_write("ownership.json", b"{}\n", 0o600)
-        assert paths.ownership_json.read_text() == "{}\n"
-        assert marker.exists()
-
-    @settings(
-        max_examples=12,
-        suppress_health_check=[HealthCheck.function_scoped_fixture],
-    )
     @given(same_root=st.booleans())
     def test_nested_lock_fails_loudly_without_corrupting_outer_pinned_root(
         self, tmp_path, same_root
@@ -1314,8 +749,8 @@ with ProcessLock(paths):
 
 
 class TestRecover:
-    def test_recover_accepts_legacy_canonical_journal_path(self, tmp_path):
-        """Lexical state roots preserve pending pre-upgrade canonical journals."""
+    def test_recover_accepts_historical_canonical_journal_path(self, tmp_path):
+        """Lexical state roots preserve a pending historical journal path."""
         target = tmp_path / "state-target"
         target.mkdir()
         state_link = tmp_path / "state-link"
