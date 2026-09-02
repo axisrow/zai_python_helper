@@ -307,6 +307,35 @@ class TestProcessLock:
             with ProcessLock(paths):
                 pass
 
+    def test_state_root_beneath_home_survives_home_replacement(self, tmp_path):
+        """An explicit state root under HOME keeps its held capability when HOME moves."""
+        home = tmp_path / "home"
+        home.mkdir()
+        paths = Paths.from_home(home, state_home=home / "state")
+        attacker = tmp_path / "attacker"
+        attacker.mkdir()
+        attacker.chmod(0o777)
+        original = tmp_path / "home-original"
+
+        with ProcessLock(paths) as lock:
+            assert lock.state is not None
+            home.rename(original)
+            home.symlink_to(attacker, target_is_directory=True)
+            lock.state.atomic_write("ownership.json", b'{"pinned": true}\n', 0o600)
+
+        persisted = (
+            original
+            / "state"
+            / "zai-python-helper"
+            / paths.lock_file.parent.name
+            / "ownership.json"
+        )
+        assert persisted.read_text() == '{"pinned": true}\n'
+        assert not (attacker / "state" / "zai-python-helper").exists()
+        with pytest.raises(PermissionError, match="insecure state"):
+            with ProcessLock(paths):
+                pass
+
     def test_state_root_replacement_cannot_redirect_held_capability(self, tmp_path):
         """A root replacement after flock cannot redirect descriptor I/O."""
         state_home = tmp_path / "state"

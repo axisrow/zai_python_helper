@@ -171,11 +171,30 @@ across configured state-root aliases and retargets: `ProcessLock` applies
 coordinator file in HOME. An in-process inode-keyed lock supplements `flock`
 on BSD, where separate file descriptors in one process do not necessarily
 block each other. Replaceable default-HOME namespaces are rejected because
-they could split the state and configuration lock domains. This is advisory
+they could split the state and configuration lock domains.
+
+**Coordinator replacement on NFS.** Because the lock domain is a directory
+inode rather than a named file, an actor cannot reset it by unlinking or
+replacing a coordinator file; there is no such file. The per-state `lock`
+file is retained only as a compatibility lease for older releases in the
+same canonical state directory — unlinking or replacing it forfeits that
+compatibility but cannot widen the transaction domain. This is advisory
 locking. On NFS configurations that emulate `flock` with POSIX write locks,
 the read-only directory descriptor can cause commands to fail outright (and
 POSIX record locks do not apply to directories); deployments requiring these
 guarantees should use a local filesystem.
+
+**Same-UID threat boundary.** The fail-closed checks above defend against
+*other* principals: foreign-writable or foreign-owned ancestors (an owner can
+`chmod` a read-only directory and swap children between transactions), and
+user-retargetable symlinks on managed paths. Every process running as the
+invoking UID is inside the trust boundary — the helper does not defend a user
+against themselves, so a same-UID actor replacing ancestors or config files
+mid-transaction is out of scope by design. Managed configuration files are
+written through their resolved paths (so dotfile-manager symlinks keep
+working) while the transaction lock and all state I/O are descriptor-pinned;
+supporting user-replaceable HOME layouts would additionally require
+descriptor-pinned configuration I/O sharing the transaction capability.
 
 Recovery manifests may contain historical absolute or symlinked journal-path
 metadata. That string is never used as an authority for I/O: recovery always
