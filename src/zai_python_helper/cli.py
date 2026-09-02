@@ -678,13 +678,18 @@ def _warn_self_heal_destruction(
         for n in prior_doc.get("provider", {})
         if n in ALL_PROVIDER_NAMES and n != owned
     ]
+    # stderr, not stdout (issue #135): stdout on the real `use zai` path is a
+    # strict process contract (only the two pinned activate lines), while a
+    # warning about irreversible destruction must stay visible by default —
+    # it is deliberately NOT gated behind --verbose.
     print(
         "  warning: opencode.json carried multiple regional "
         "providers; the non-attributed entries"
         + (f" ({', '.join(unattributed)})" if unattributed else "")
         + " were removed to activate the selected region.  "
         "This is irreversible — the removed entries are not "
-        "recoverable via `use default`."
+        "recoverable via `use default`.",
+        file=sys.stderr,
     )
 
 
@@ -698,10 +703,10 @@ def _handle_use_zai(args: argparse.Namespace) -> int:
     nothing. On a clean success prints exactly the two pinned
     ``chelper auth reload`` lines (byte-parity contract, issue #125); the
     pre-existing OpenCode self-heal warning
-    (:func:`_warn_self_heal_destruction`) may additionally print to stdout
+    (:func:`_warn_self_heal_destruction`) may additionally print to **stderr**
     when a duplicate-regional doc is destructively rewritten — deliberate
-    visibility for an irreversible change (its channel is re-examined in
-    issue #128 alongside the other returning diagnostics). Idempotent: a
+    visibility for an irreversible change, kept off --verbose and out of the
+    stdout contract (issue #135). Idempotent: a
     second run with no drift is a no-op.
     """
     from zai_python_helper.constants import get_preset_model

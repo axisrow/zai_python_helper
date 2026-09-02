@@ -286,4 +286,8 @@ a deliberate Phase-2 divergence per the two-phase doctrine. `--verbose`
 changes stdout only: file bytes, modes, and exit codes are identical with and
 without it, and REFUSE refusals keep signalling through the exit code. `use
 zai` does not take the flag: its two pinned `chelper auth reload` lines ARE
-the parity contract. `--dry-run` previews stay verbose without the flag.
+the parity contract — nothing else it prints on success reaches stdout. The
+sole exception to its silence is the OpenCode duplicate-regional
+self-heal warning, which goes to **stderr** (issue #135): it is never
+gated behind `--verbose` because it signals an irreversible, destructive
+rewrite. `--dry-run` previews stay verbose without the flag.

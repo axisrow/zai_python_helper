@@ -648,18 +648,21 @@ class TestSelfHealDestructionWarning:
         )
 
         # Same call the CLI makes on BOTH the dry-run preview and the real
-        # activation path — assert it warns identically either way.
+        # activation path — assert it warns identically either way, on
+        # STDERR only (issue #135): stdout stays empty on this path.
         for _ in range(2):
             capsys.readouterr()
             _warn_self_heal_destruction(
                 state.get(FileTag.OPENCODE), journal_records, plan
             )
-            out = capsys.readouterr().out
-            assert "warning" in out
-            assert CHINA_NAME in out
-            assert "irreversible" in out
+            captured = capsys.readouterr()
+            out, err = captured.out, captured.err
+            assert out == ""
+            assert "warning" in err
+            assert CHINA_NAME in err
+            assert "irreversible" in err
             # Foreign (non-managed) providers must never be named as removed.
-            assert GLOBAL_NAME not in out.split("warning")[1].split("were removed")[0]
+            assert GLOBAL_NAME not in err.split("warning")[1].split("were removed")[0]
 
     def test_no_warning_when_state_is_not_duplicate(self, tool, tmp_path, capsys):
         from zai_python_helper.cli import _warn_self_heal_destruction
@@ -674,4 +677,6 @@ class TestSelfHealDestructionWarning:
         state = tool.read_state(paths)
         plan = tool.plan_zai(spec, Region.GLOBAL, state=state, auth_token=TOKEN)
         _warn_self_heal_destruction(state.get(FileTag.OPENCODE), {}, plan)
-        assert capsys.readouterr().out == ""
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert captured.err == ""
