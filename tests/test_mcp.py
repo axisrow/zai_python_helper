@@ -533,6 +533,42 @@ def test_cli_mcp_verbose_restores_status_lines(_isolate_home):
     assert "  zread: not installed (no change) from claude-code" in out
 
 
+def test_cli_mcp_verbose_matches_silent_run_exactly(_isolate_home):
+    """Paired #128 invariant for MCP: two fresh identical installs — one
+    silent, one ``--verbose`` — must produce byte-identical config files with
+    identical modes, the same exit code, and the same (empty) stderr; only
+    stdout differs.
+    """
+    import os
+
+    from zai_python_helper.mcp import Tool, tool_config_path
+
+    config_path = tool_config_path(Tool.CLAUDE_CODE, _isolate_home)
+    install_argv = ["mcp", "install", "zread", "--tool", "claude-code", "--api-key", _KEY]
+
+    results = {}
+    for label, extra in (("silent", []), ("verbose", ["--verbose"])):
+        rc, out, err = _run_cli([*install_argv, *extra])
+        snapshot = {
+            p.name: (p.read_bytes(), p.stat().st_mode & 0o777)
+            for p in sorted(config_path.parent.iterdir())
+            if p.is_file()
+        }
+        results[label] = (rc, snapshot, out, err, os.stat(config_path.parent).st_mode)
+        # Reset for the paired run.
+        rc2, _, _ = _run_cli(["mcp", "uninstall", "zread", "--tool", "claude-code"])
+        assert rc2 == 0
+
+    silent_rc, silent_files, silent_out, silent_err, _ = results["silent"]
+    verbose_rc, verbose_files, verbose_out, verbose_err, _ = results["verbose"]
+
+    assert silent_rc == verbose_rc == 0
+    assert verbose_files == silent_files
+    assert silent_err == verbose_err == ""
+    assert silent_out == ""
+    assert "  zread: installed for claude-code" in verbose_out
+
+
 def test_cli_mcp_install_dry_run_redacts_api_key(_isolate_home):
     """dry-run must NEVER print the real --api-key (cycle-review regression).
 

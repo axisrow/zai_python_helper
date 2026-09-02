@@ -470,27 +470,69 @@ class TestOwnershipJournalE2E:
         # ...and writes nothing (read-only preview).
         assert settings_path.read_text() == before
 
+    @staticmethod
+    def _snapshot_home(home: Path) -> dict[str, tuple[bytes, int]]:
+        """Snapshot every regular file under ``home`` as {relpath: (bytes, mode)}."""
+        return {
+            str(p.relative_to(home)): (p.read_bytes(), p.stat().st_mode & 0o777)
+            for p in sorted(home.rglob("*"))
+            if p.is_file()
+        }
+
+    def test_use_default_verbose_matches_silent_run_exactly(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """THE #128 invariant, pinned pairwise: ``--verbose`` changes stdout
+        ONLY. Two fresh identical scenarios — one reverted silently, one with
+        ``--verbose`` — must end with byte-identical files, identical modes,
+        identical exit codes, and identical (empty) stderr; only stdout differs.
+        """
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        def _scenario() -> None:
+            _seed(tmp_path, settings={"env": {"ANTHROPIC_API_KEY": "sk-original"}})
+            assert _run(["use", "zai", "--api-key", TOKEN]) == 0
+
+        # Run 1: silent revert (the #125 contract).
+        _scenario()
+        capsys.readouterr()
+        silent_rc = _run(["use", "default", "--region", "global"])
+        silent = self._snapshot_home(tmp_path)
+        silent_out, silent_err = capsys.readouterr()
+        assert silent_out == ""
+
+        # Run 2: fresh identical scenario, reverted with --verbose.
+        for p in sorted(tmp_path.rglob("*"), reverse=True):
+            p.unlink() if p.is_file() else p.rmdir()
+        _scenario()
+        capsys.readouterr()
+        verbose_rc = _run(["use", "default", "--region", "global", "--verbose"])
+        verbose = self._snapshot_home(tmp_path)
+        verbose_out, verbose_err = capsys.readouterr()
+
+        # Only stdout differs — everything else is identical.
+        assert silent_rc == verbose_rc == 0
+        assert verbose == silent
+        assert verbose_err == silent_err == ""
+        assert "Reverting to default provider (tool: claude_code, region: global)" in verbose_out
+        assert "  updated: " in verbose_out
+        assert "restart recommended for deterministic switching" in verbose_out
+
     def test_use_default_verbose_restores_feedback_lines(
         self, tmp_path, monkeypatch, capsys
     ):
         """Opt-in ``--verbose`` (issue #128) restores the feedback silenced in
-        #125 — header, ``updated:`` lines, restart notice — and changes
-        NOTHING else: same exit code, byte-identical files as the silent run.
+        #125 — header, ``updated:`` lines, restart notice.
         """
         monkeypatch.setenv("HOME", str(tmp_path))
         _seed(tmp_path, settings={"env": {"ANTHROPIC_API_KEY": "sk-original"}})
         _run(["use", "zai", "--api-key", TOKEN])
         capsys.readouterr()
 
-        # Reference: the silent run's on-disk result (already pinned empty).
-        rc = _run(["use", "default", "--region", "global", "--dry-run"])
-        assert rc == 0
-        capsys.readouterr()
-
         rc = _run(["use", "default", "--region", "global", "--verbose"])
         assert rc == 0
         out = capsys.readouterr().out
-        assert "Reverting to default provider (tool: claude_code, region: global)\n" in out
+        assert "Reverting to default provider (tool: claude_code, region: global)" in out
         assert "  updated: " in out
         assert "restart recommended for deterministic switching" in out
 
