@@ -501,6 +501,38 @@ def test_cli_mcp_install_uninstall_list_roundtrip(_isolate_home):
     assert out == ""
 
 
+def test_cli_mcp_verbose_restores_status_lines(_isolate_home):
+    """Opt-in ``--verbose`` (issue #128) restores the status lines silenced in
+    #125 — and changes NOTHING else: exit code 0 and the on-disk config are
+    identical with and without the flag.
+
+    ``use zai`` does not take the flag (its two pinned lines are the parity
+    contract); these three commands print nothing by default and the former
+    lines only with the flag.
+    """
+    argv = ["mcp", "install", "zread", "--tool", "claude-code", "--api-key", _KEY]
+
+    rc, out, _ = _run_cli([*argv, "--verbose"])
+    assert rc == 0
+    assert "  zread: installed for claude-code" in out
+
+    rc, out, _ = _run_cli([*argv, "--verbose"])
+    assert rc == 0
+    assert "  zread: already installed (no change) for claude-code" in out
+
+    rc, out, _ = _run_cli(
+        ["mcp", "uninstall", "zread", "--tool", "claude-code", "--verbose"]
+    )
+    assert rc == 0
+    assert "  zread: removed from claude-code" in out
+
+    rc, out, _ = _run_cli(
+        ["mcp", "uninstall", "zread", "--tool", "claude-code", "--verbose"]
+    )
+    assert rc == 0
+    assert "  zread: not installed (no change) from claude-code" in out
+
+
 def test_cli_mcp_install_dry_run_redacts_api_key(_isolate_home):
     """dry-run must NEVER print the real --api-key (cycle-review regression).
 

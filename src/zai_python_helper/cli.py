@@ -121,6 +121,10 @@ _SAFE_JSON_KEY_NAMES: frozenset[str] = frozenset(
     }
 )
 
+# Returned by --verbose on ``use default`` (issue #128). Not printed by the
+# default silent run (byte-parity, issue #125).
+_RESTART_NOTICE = "restart recommended for deterministic switching"
+
 
 def _normalize_secret_key(key: str) -> str:
     """Normalize a key for credential-name matching: upper, separators removed.
@@ -849,13 +853,16 @@ def _handle_use_default(args: argparse.Namespace) -> int:
     untouched (REFUSE — the field changed externally since activation).
     Idempotent.
 
-    Silent on success: the real run prints NOTHING to stdout, matching the
-    byte-for-byte parity contract with the pinned upstream manager surface
-    (issue #125). The informational output this used to print (header,
-    REFUSE warnings, per-file ``updated:`` lines, restart notice) is planned
-    to return as an opt-in ``--verbose`` flag (issue #128); the default stays
-    silent. ``--dry-run`` keeps its full preview output.
+    Silent on success by default: the real run prints NOTHING to stdout,
+    matching the byte-for-byte parity contract with the pinned upstream
+    manager surface (issue #125) — this silent default is PERMANENT. The
+    informational output (header, REFUSE warnings, per-file ``updated:``
+    lines, restart notice) returns behind the opt-in ``--verbose`` flag
+    (issue #128, the port's deliberate Phase-2 extension); ``--verbose``
+    changes stdout only — never files, exit codes, or semantics.
+    ``--dry-run`` keeps its full preview output.
     """
+    verbose = getattr(args, "verbose", False)
     tool = _resolve_tool(args)
     _resolve_mode_or_raise(args)  # validate custom-only flags for CLI symmetry
     region = Region(getattr(args, "region", Region.GLOBAL.value))
@@ -895,6 +902,13 @@ def _handle_use_default(args: argparse.Namespace) -> int:
         if lock.state is None:
             raise RuntimeError("process lock opened without pinned state")
         _run_recovery(paths, lambda _paths: recover_locked(paths, lock.state))
+        if verbose:
+            # Opt-in feedback (issue #128): the header returns only with
+            # --verbose; the default run stays byte-silent for parity (#125).
+            print(
+                f"Reverting to default provider "
+                f"(tool: {tool.name}, region: {region.value})"
+            )
         state = tool.read_state(paths)
         journal = OwnershipJournal(paths.ownership_json)
         journal_records = journal.read(state=lock.state)
@@ -919,12 +933,23 @@ def _handle_use_default(args: argparse.Namespace) -> int:
                 return None
             return journal.render(retired_records)
 
-        apply_plan_locked(
+        if verbose:
+            _print_refuse_warnings(decisions)
+
+        written = apply_plan_locked(
             paths, plan, state=lock.state, journal_content=_journal_text
         )
-    # Silent success: stdout stays empty for byte-parity with the pinned
-    # upstream manager surface (issue #125). File changes remain observable
-    # through the filesystem contract.
+    # Default success stays byte-silent for parity with the pinned upstream
+    # manager surface (issue #125). ``--verbose`` (issue #128) re-adds the
+    # feedback lines WITHOUT touching any file bytes, modes, or exit codes —
+    # output only.
+    if verbose:
+        if not written:
+            print("(no changes — already at default)")
+        else:
+            for tag in written:
+                print(f"  updated: {resolve_path(paths, tag)}")
+            print(f"  {_RESTART_NOTICE}")
     return 0
 
 
@@ -1012,11 +1037,12 @@ def _handle_mcp_install(args: argparse.Namespace) -> int:
     ``--dry-run`` is read-only: it shows the entry that WOULD be written,
     writes nothing.
 
-    Silent on success in real mode: stdout stays empty for byte-parity with
-    the pinned upstream manager surface (issue #125); the former
-    ``{id}: installed for {tool}`` line is planned to return as an opt-in
-    ``--verbose`` flag (issue #128). Exit code 0 + the on-disk config are the
-    success contract.
+    Silent on success in real mode by default: stdout stays empty for
+    byte-parity with the pinned upstream manager surface (issue #125) — this
+    silent default is PERMANENT. The former ``{id}: installed for {tool}``
+    line returns behind the opt-in ``--verbose`` flag (issue #128), which
+    changes stdout only. Exit code 0 + the on-disk config are the success
+    contract.
     """
     from zai_python_helper.errors import ConfigurationError, ValidationError
     from zai_python_helper.mcp import (
@@ -1058,14 +1084,18 @@ def _handle_mcp_install(args: argparse.Namespace) -> int:
 
     key = resolve_key(getattr(args, "api_key", None))
     try:
-        install_mcp(tool, mcp_id, key, region)
+        changed = install_mcp(tool, mcp_id, key, region)
     except ValueError as e:
         # install_mcp/install_into_doc fail closed with a bare ValueError on a
         # malformed (non-object) MCP section to avoid overwriting user-owned
         # data. Translate it into the project's error contract here so the
         # CLI reports a one-line message instead of an uncaught traceback.
         raise ConfigurationError(str(e)) from e
-    # Silent success (issue #125): `changed` only fed the former status line.
+    # Silent success by default (issue #125); the status line returns with
+    # opt-in --verbose (issue #128) — stdout only, files/exit codes unchanged.
+    if getattr(args, "verbose", False):
+        label = "installed" if changed else "already installed (no change)"
+        print(f"  {mcp_id}: {label} for {tool.value}")
     return 0
 
 
@@ -1077,10 +1107,11 @@ def _handle_mcp_uninstall(args: argparse.Namespace) -> int:
     ``use zai``/``use default`` dry-run): it reports whether the id WOULD be
     removed, without touching the config.
 
-    Silent on success in real mode: stdout stays empty for byte-parity with
-    the pinned upstream manager surface (issue #125); the former
-    ``{id}: removed from {tool}`` line is planned to return as an opt-in
-    ``--verbose`` flag (issue #128).
+    Silent on success in real mode by default: stdout stays empty for
+    byte-parity with the pinned upstream manager surface (issue #125) — this
+    silent default is PERMANENT. The former ``{id}: removed from {tool}`` line
+    returns behind the opt-in ``--verbose`` flag (issue #128), which changes
+    stdout only.
     """
     from zai_python_helper.mcp import (
         is_installed,
@@ -1103,8 +1134,12 @@ def _handle_mcp_uninstall(args: argparse.Namespace) -> int:
         print(f"--dry-run: {mcp_id}: {label} from {tool.value}")
         return 0
 
-    uninstall_mcp(tool, mcp_id)
-    # Silent success (issue #125): the former status line is #128's --verbose.
+    changed = uninstall_mcp(tool, mcp_id)
+    # Silent success by default (issue #125); the status line returns with
+    # opt-in --verbose (issue #128) — stdout only.
+    if getattr(args, "verbose", False):
+        label = "removed" if changed else "not installed (no change)"
+        print(f"  {mcp_id}: {label} from {tool.value}")
     return 0
 
 
@@ -1149,6 +1184,24 @@ def _handle_mcp_list(args: argparse.Namespace) -> int:
     print()
     print("Install with: zai-python-helper mcp install <id> --tool <tool>")
     return 0
+
+
+def _add_verbose_flag(parser: argparse.ArgumentParser) -> None:
+    """Attach the opt-in ``--verbose`` flag to a silent-by-default subparser.
+
+    Only the surfaces silenced for byte-parity (issue #125) carry it:
+    ``use default`` and ``mcp install`` / ``mcp uninstall`` (issue #128).
+    ``use zai`` deliberately does NOT: its two pinned ``chelper auth reload``
+    lines ARE the parity contract. ``--verbose`` changes stdout only — never
+    file bytes, modes, or exit codes — and the no-flag default stays silent
+    permanently.
+    """
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="print progress lines (default output is silent for parity)",
+    )
 
 
 def _add_use_flags(parser: argparse.ArgumentParser) -> None:
@@ -1299,6 +1352,7 @@ def build_parser() -> argparse.ArgumentParser:
         parents=[sub_flags],
     )
     _add_use_flags(p_use_default)
+    _add_verbose_flag(p_use_default)
     p_use_default.set_defaults(func=_handle_use_default)
 
     # `status` — read-only observability
@@ -1363,6 +1417,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--api-key",
         help="Z.ai auth token (else resolved from ZAI_API_KEY env / prompt)",
     )
+    _add_verbose_flag(p_mcp_install)
     p_mcp_install.set_defaults(func=_handle_mcp_install)
 
     p_mcp_uninstall = mcp_sub.add_parser(
@@ -1377,6 +1432,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=_tool_choices,
         help="target tool",
     )
+    _add_verbose_flag(p_mcp_uninstall)
     p_mcp_uninstall.set_defaults(func=_handle_mcp_uninstall)
 
     p_mcp_list = mcp_sub.add_parser(

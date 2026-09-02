@@ -10,9 +10,18 @@
   Scripts that parsed the former status lines (`Reverting to default
   provider …`, `  <id>: installed/removed for <tool>`, REFUSE warnings,
   `updated:` lines, the restart notice) must rely on the exit code and the
-  on-disk config instead; `--dry-run` previews are unchanged and the
-  informational output is planned to return as an opt-in `--verbose` flag
-  (issue #128).
+  on-disk config instead, or pass the new opt-in `--verbose` flag (issue
+  #128) to restore them; `--dry-run` previews are unchanged.
+
+### Added
+
+- Opt-in `--verbose` flag on `use default`, `mcp install`, and `mcp
+  uninstall` (issue #128): with the flag the commands print the progress
+  lines silenced for parity (issue #125) — the revert header, fail-closed
+  REFUSE warnings, `updated: <path>` lines, the restart notice, and the MCP
+  `{id}: installed/removed for {tool}` status lines. Without the flag the
+  output stays byte-silent permanently. `--verbose` changes stdout only:
+  file bytes, modes, and exit codes are identical either way.
 - The `warning: recovered from an interrupted prior run` diagnostic (emitted
   when a surviving recovery manifest is replayed before a `use` command) now
   goes to stderr instead of stdout, keeping stdout a strict process contract
