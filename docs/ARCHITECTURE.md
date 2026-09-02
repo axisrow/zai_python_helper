@@ -272,3 +272,18 @@ canonicalized; formatting and final newlines are part of the contract.
 `--dry-run` and `status`, plus the Python ownership journal/backup bookkeeping,
 are explicit Python-port extensions without an upstream 0.0.7 analogue. They
 are not parity matrix actions and must not be used as parity expectations.
+
+### Silent-by-default CLI output and `--verbose` (issues #125, #128)
+
+Because the parity harness compares raw stdout, `use default`, `mcp install`,
+and `mcp uninstall` are **silent on success by default** — the upstream
+managers print nothing, so empty stdout is the byte-accurate target. This
+silent default is permanent. The informational output the port used to print
+(the revert header, fail-closed REFUSE warnings, per-file `updated:` lines,
+the restart notice, and `<id>: installed/removed for <tool>` status lines)
+returns behind the opt-in `--verbose` flag on exactly those three commands —
+a deliberate Phase-2 divergence per the two-phase doctrine. `--verbose`
+changes stdout only: file bytes, modes, and exit codes are identical with and
+without it, and REFUSE refusals keep signalling through the exit code. `use
+zai` does not take the flag: its two pinned `chelper auth reload` lines ARE
+the parity contract. `--dry-run` previews stay verbose without the flag.

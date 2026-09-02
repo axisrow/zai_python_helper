@@ -29,6 +29,15 @@ Restore default Anthropic configuration:
 zai-python-helper use default
 ```
 
+> **Output is silent by default (on purpose).** For byte-for-byte parity with
+> the upstream `@z_ai/coding-helper` manager, `use default`, `mcp install`,
+> and `mcp uninstall` print nothing to stdout on success; the exit code and
+> the on-disk config are the contract. Pass `--verbose` to print the progress
+> lines (`Reverting to default provider …`, REFUSE warnings, `updated:` paths,
+> the restart notice, `<id>: installed/removed for <tool>`). `--verbose`
+> changes output only — never files or exit codes. `--dry-run` previews stay
+> verbose without the flag.
+
 ## Model Selection Modes
 
 | Mode | Description | Use Case |

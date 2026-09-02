@@ -470,6 +470,108 @@ class TestOwnershipJournalE2E:
         # ...and writes nothing (read-only preview).
         assert settings_path.read_text() == before
 
+    @staticmethod
+    def _snapshot_home(home: Path) -> dict[str, tuple[bytes, int]]:
+        """Snapshot every regular file under ``home`` as {relpath: (bytes, mode)}."""
+        return {
+            str(p.relative_to(home)): (p.read_bytes(), p.stat().st_mode & 0o777)
+            for p in sorted(home.rglob("*"))
+            if p.is_file()
+        }
+
+    def test_use_default_verbose_matches_silent_run_exactly(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """THE #128 invariant, pinned pairwise: ``--verbose`` changes stdout
+        ONLY. Two fresh identical scenarios — one reverted silently, one with
+        ``--verbose`` — must end with byte-identical files, identical modes,
+        identical exit codes, and identical (empty) stderr; only stdout differs.
+        """
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        def _scenario() -> None:
+            _seed(tmp_path, settings={"env": {"ANTHROPIC_API_KEY": "sk-original"}})
+            assert _run(["use", "zai", "--api-key", TOKEN]) == 0
+
+        # Run 1: silent revert (the #125 contract).
+        _scenario()
+        capsys.readouterr()
+        silent_rc = _run(["use", "default", "--region", "global"])
+        silent = self._snapshot_home(tmp_path)
+        silent_out, silent_err = capsys.readouterr()
+        assert silent_out == ""
+
+        # Run 2: fresh identical scenario, reverted with --verbose.
+        for p in sorted(tmp_path.rglob("*"), reverse=True):
+            p.unlink() if p.is_file() else p.rmdir()
+        _scenario()
+        capsys.readouterr()
+        verbose_rc = _run(["use", "default", "--region", "global", "--verbose"])
+        verbose = self._snapshot_home(tmp_path)
+        verbose_out, verbose_err = capsys.readouterr()
+
+        # Only stdout differs — everything else is identical.
+        assert silent_rc == verbose_rc == 0
+        assert verbose == silent
+        assert verbose_err == silent_err == ""
+        assert "Reverting to default provider (tool: claude_code, region: global)" in verbose_out
+        assert "  updated: " in verbose_out
+        assert "restart recommended for deterministic switching" in verbose_out
+
+    def test_use_default_verbose_restores_feedback_lines(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """Opt-in ``--verbose`` (issue #128) restores the feedback silenced in
+        #125 — header, ``updated:`` lines, restart notice.
+        """
+        monkeypatch.setenv("HOME", str(tmp_path))
+        _seed(tmp_path, settings={"env": {"ANTHROPIC_API_KEY": "sk-original"}})
+        _run(["use", "zai", "--api-key", TOKEN])
+        capsys.readouterr()
+
+        rc = _run(["use", "default", "--region", "global", "--verbose"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Reverting to default provider (tool: claude_code, region: global)" in out
+        assert "  updated: " in out
+        assert "restart recommended for deterministic switching" in out
+
+    def test_use_default_verbose_names_refused_keys(self, tmp_path, monkeypatch, capsys):
+        """``--verbose`` re-surfaces the fail-closed REFUSE explanation that
+        the silent default hides (issue #128); the externally-changed value is
+        still preserved and the exit code is unchanged.
+        """
+        monkeypatch.setenv("HOME", str(tmp_path))
+        _seed(tmp_path)
+        _run(["use", "zai", "--api-key", TOKEN])
+        capsys.readouterr()
+
+        settings_path = Paths.from_home(tmp_path, state_home=tmp_path).claude_settings
+        doc = json.loads(settings_path.read_text())
+        doc["env"]["ANTHROPIC_AUTH_TOKEN"] = "sk-edited-by-user"
+        settings_path.write_text(json.dumps(doc))
+
+        rc = _run(["use", "default", "--region", "global", "--verbose"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "warning" in out.lower()
+        assert "ANTHROPIC_AUTH_TOKEN" in out
+        # The refusal semantics are unchanged: the user's edit survives.
+        env = json.loads(settings_path.read_text()).get("env", {})
+        assert env.get("ANTHROPIC_AUTH_TOKEN") == "sk-edited-by-user"
+
+    def test_use_zai_does_not_accept_verbose(self, tmp_path, monkeypatch):
+        """``use zai`` is excluded from --verbose (issue #128): its two pinned
+        ``chelper auth reload`` lines ARE the parity contract (issue #125), so
+        the flag must not exist on that subparser.
+        """
+        monkeypatch.setenv("HOME", str(tmp_path))
+        with pytest.raises(SystemExit) as excinfo:
+            build_parser().parse_args(
+                ["use", "zai", "--api-key", TOKEN, "--verbose"]
+            )
+        assert excinfo.value.code == 2
+
     def test_use_default_idempotent_after_revert(self, tmp_path, monkeypatch, capsys):
         """A second ``use default`` after revert is a no-op (REFUSE/RESTORE settle)."""
         monkeypatch.setenv("HOME", str(tmp_path))

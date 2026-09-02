@@ -501,6 +501,81 @@ def test_cli_mcp_install_uninstall_list_roundtrip(_isolate_home):
     assert out == ""
 
 
+def test_cli_mcp_verbose_restores_status_lines(_isolate_home):
+    """Opt-in ``--verbose`` (issue #128) restores the status lines silenced in
+    #125 — and changes NOTHING else: exit code 0 and the on-disk config are
+    identical with and without the flag.
+
+    ``use zai`` does not take the flag (its two pinned lines are the parity
+    contract); these three commands print nothing by default and the former
+    lines only with the flag.
+    """
+    argv = ["mcp", "install", "zread", "--tool", "claude-code", "--api-key", _KEY]
+
+    rc, out, _ = _run_cli([*argv, "--verbose"])
+    assert rc == 0
+    assert "  zread: installed for claude-code" in out
+
+    rc, out, _ = _run_cli([*argv, "--verbose"])
+    assert rc == 0
+    assert "  zread: already installed (no change) for claude-code" in out
+
+    rc, out, _ = _run_cli(
+        ["mcp", "uninstall", "zread", "--tool", "claude-code", "--verbose"]
+    )
+    assert rc == 0
+    assert "  zread: removed from claude-code" in out
+
+    rc, out, _ = _run_cli(
+        ["mcp", "uninstall", "zread", "--tool", "claude-code", "--verbose"]
+    )
+    assert rc == 0
+    assert "  zread: not installed (no change) from claude-code" in out
+
+
+def test_cli_mcp_verbose_matches_silent_run_exactly(_isolate_home):
+    """Paired #128 invariant for MCP: two fresh identical installs — one
+    silent, one ``--verbose`` — must produce byte-identical config files with
+    identical modes, the same exit code, and the same (empty) stderr; only
+    stdout differs.
+    """
+    import os
+
+    from zai_python_helper.mcp import Tool, tool_config_path
+
+    config_path = tool_config_path(Tool.CLAUDE_CODE, _isolate_home)
+    install_argv = ["mcp", "install", "zread", "--tool", "claude-code", "--api-key", _KEY]
+
+    results = {}
+    for label, extra in (("silent", []), ("verbose", ["--verbose"])):
+        # Each scenario starts FRESH: no config file at all (creation path,
+        # not the empty-section path an uninstall-reset would leave behind).
+        config_path.unlink(missing_ok=True)
+        rc, out, err = _run_cli([*install_argv, *extra])
+        snapshot = {
+            str(p.relative_to(config_path.parent)): (
+                p.read_bytes(),
+                p.stat().st_mode & 0o777,
+            )
+            for p in sorted(config_path.parent.rglob("*"))
+        }
+        results[label] = (rc, snapshot, out, err, os.stat(config_path.parent).st_mode)
+        assert rc == 0
+
+    silent_rc, silent_files, silent_out, silent_err, silent_dir_mode = results["silent"]
+    verbose_rc, verbose_files, verbose_out, verbose_err, verbose_dir_mode = results[
+        "verbose"
+    ]
+
+    assert silent_rc == verbose_rc == 0
+    # Full config-dir state — every file AND the directory mode — identical.
+    assert verbose_files == silent_files
+    assert verbose_dir_mode == silent_dir_mode
+    assert silent_err == verbose_err == ""
+    assert silent_out == ""
+    assert "  zread: installed for claude-code" in verbose_out
+
+
 def test_cli_mcp_install_dry_run_redacts_api_key(_isolate_home):
     """dry-run must NEVER print the real --api-key (cycle-review regression).
 
