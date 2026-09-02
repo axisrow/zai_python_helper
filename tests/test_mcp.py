@@ -548,22 +548,29 @@ def test_cli_mcp_verbose_matches_silent_run_exactly(_isolate_home):
 
     results = {}
     for label, extra in (("silent", []), ("verbose", ["--verbose"])):
+        # Each scenario starts FRESH: no config file at all (creation path,
+        # not the empty-section path an uninstall-reset would leave behind).
+        config_path.unlink(missing_ok=True)
         rc, out, err = _run_cli([*install_argv, *extra])
         snapshot = {
-            p.name: (p.read_bytes(), p.stat().st_mode & 0o777)
-            for p in sorted(config_path.parent.iterdir())
-            if p.is_file()
+            str(p.relative_to(config_path.parent)): (
+                p.read_bytes(),
+                p.stat().st_mode & 0o777,
+            )
+            for p in sorted(config_path.parent.rglob("*"))
         }
         results[label] = (rc, snapshot, out, err, os.stat(config_path.parent).st_mode)
-        # Reset for the paired run.
-        rc2, _, _ = _run_cli(["mcp", "uninstall", "zread", "--tool", "claude-code"])
-        assert rc2 == 0
+        assert rc == 0
 
-    silent_rc, silent_files, silent_out, silent_err, _ = results["silent"]
-    verbose_rc, verbose_files, verbose_out, verbose_err, _ = results["verbose"]
+    silent_rc, silent_files, silent_out, silent_err, silent_dir_mode = results["silent"]
+    verbose_rc, verbose_files, verbose_out, verbose_err, verbose_dir_mode = results[
+        "verbose"
+    ]
 
     assert silent_rc == verbose_rc == 0
+    # Full config-dir state — every file AND the directory mode — identical.
     assert verbose_files == silent_files
+    assert verbose_dir_mode == silent_dir_mode
     assert silent_err == verbose_err == ""
     assert silent_out == ""
     assert "  zread: installed for claude-code" in verbose_out
