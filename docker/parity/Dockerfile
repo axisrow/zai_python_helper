@@ -62,14 +62,13 @@ RUN python -m pip install --no-cache-dir /wheels/zai_python_helper-*.whl \
 # run fully offline inside `docker run`:
 #   - claude-shim: a no-op `claude` on PATH so `chelper auth reload claude` sees
 #     the tool as present (we don't ship the real Claude Code package here).
-#   - fetch-mock.cjs: NODE_OPTIONS=--require this to short-circuit the upstream's
-#     only network call (GET api.z.ai/api/coding/paas/v4/models) -> 200 [] so a
-#     fake key validates without touching the real Z.ai endpoint.
+# The runner is offline-safe by construction: it writes the config directly and
+# applies it via `auth reload`, which never hits the validating API path
+# (issue #138 removed the unused fetch-mock.cjs preload shim).
 # Both COPYs must land in the same commit as the fixtures themselves, else this
 # build step fails fast (desired — no silent parity skip).
 COPY docker/parity/fixtures/claude-shim /usr/local/bin/claude
 RUN chmod +x /usr/local/bin/claude
-COPY tests/parity/fixtures/fetch-mock.cjs /opt/parity/fetch-mock.cjs
 COPY docker/parity/upstream-runner.mjs /opt/parity/upstream-runner.mjs
 
 # Smoke entrypoints for the parity test (and ad-hoc `docker run` checks).
