@@ -1207,7 +1207,7 @@ Pure path arithmetic — no IO, no existence check (mirrors
 
 ### `install_mcp()`
 
-*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/mcp.py#L553)*
+*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/mcp.py#L556)*
 
 ```python
 install_mcp(tool: Tool | str, mcp_id: str, key: str | None, region: Region, home: str | Path | None, presets: list[McpPreset] | None, reader: ConfigReader, writer: ConfigWriter) -> bool
@@ -1230,7 +1230,7 @@ fake filesystem in tests) can bypass the defaults.
 
 ### `uninstall_mcp()`
 
-*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/mcp.py#L606)*
+*function — [source](https://github.com/axisrow/zai_python_helper/blob/main/src/zai_python_helper/mcp.py#L609)*
 
 ```python
 uninstall_mcp(tool: Tool | str, mcp_id: str, home: str | Path | None, reader: ConfigReader, writer: ConfigWriter) -> bool

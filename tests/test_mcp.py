@@ -29,6 +29,7 @@ from zai_python_helper.mcp import (
     tool_config_path,
     uninstall_from_doc,
     uninstall_mcp,
+    write_config,
 )
 from zai_python_helper.paths import Paths
 from zai_python_helper.regions import Region
@@ -308,6 +309,36 @@ def test_opencode_mcp_config_uses_upstream_four_space_indent(_isolate_home):
 
     uninstall_mcp(Tool.OPENCODE, "zread", home=_isolate_home)
     assert path.read_text(encoding="utf-8") == '{\n    \"mcp\": {}\n}'
+
+
+def test_write_config_indent_routes_through_indent_for_tag(_isolate_home, monkeypatch):
+    """write_config picks the indent via JsonBackend._indent_for_tag (issue #146).
+
+    If a config file's upstream indent changes in ``_indent_for_tag`` (new
+    tags, other defaults), ``write_config`` must follow — it must not keep a
+    private copy of the widths.  Pin the routing by overriding the helper and
+    asserting the written file uses the override.
+    """
+    monkeypatch.setattr(JsonBackend, "_indent_for_tag", staticmethod(lambda tag: 7))
+    write_config(tool_config_path(Tool.OPENCODE, _isolate_home), {"mcp": {}})
+    assert '       "mcp": {' in tool_config_path(
+        Tool.OPENCODE, _isolate_home
+    ).read_text(encoding="utf-8")
+
+    monkeypatch.setattr(JsonBackend, "_indent_for_tag", staticmethod(lambda tag: 3))
+    write_config(tool_config_path(Tool.CRUSH, _isolate_home), {"mcpServers": {}})
+    assert '   "mcpServers": {' in tool_config_path(
+        Tool.CRUSH, _isolate_home
+    ).read_text(encoding="utf-8")
+
+
+def test_opencode_write_config_preserves_four_space_indent(_isolate_home):
+    """write_config keeps OpenCode's nonstandard four-space indent on rewrite."""
+    path = tool_config_path(Tool.OPENCODE, _isolate_home)
+    write_config(path, {"foreign": True})
+    text = path.read_text(encoding="utf-8")
+    assert '    "foreign": true' in text
+    assert text == '{\n    "foreign": true\n}'
 
 
 def test_install_mcp_preserves_foreign_and_is_idempotent(_isolate_home):
