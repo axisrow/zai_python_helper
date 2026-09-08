@@ -528,21 +528,24 @@ def write_config(path: Path, doc: dict[str, Any]) -> None:
     directory is created if missing.
     """
     from zai_python_helper.backends import JsonBackend
+    from zai_python_helper.core.planner import FileTag
 
     config_path = Path(path)
-    # OpenCode's upstream MCP manager renders opencode.json with four-space
-    # indentation (the same format used by its activate/revert writer).  The
-    # other tool managers use the backend default of two spaces.  Keep the
-    # writer seam's simple ``(path, doc)`` contract while selecting the
-    # tool-specific format from the canonical path.
-    indent = (
-        4
+    # Map the canonical path to its FileTag so the indent width comes from
+    # JsonBackend._indent_for_tag (issue #146) — a private helper, used here
+    # knowingly as the single source of truth for per-file JSON indentation.
+    # Every non-OpenCode tag maps to the same two-space backend default, so
+    # CLAUDE_JSON stands in for "not OpenCode" below.  Keep the writer seam's
+    # simple ``(path, doc)`` contract while selecting the tool-specific format
+    # from the canonical path.
+    tag = (
+        FileTag.OPENCODE
         if config_path.name == "opencode.json"
         and config_path.parent.name == "opencode"
         and config_path.parent.parent.name == ".config"
-        else 2
+        else FileTag.CLAUDE_JSON
     )
-    JsonBackend.write(config_path, doc, indent=indent)
+    JsonBackend.write(config_path, doc, indent=JsonBackend._indent_for_tag(tag))
 
 
 # --------------------------------------------------------------------------- #
