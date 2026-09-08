@@ -922,6 +922,11 @@ read(path: Path) -> str
 
 Return the raw text of `path`, or `""` if it does not exist.
 
+Reads with `newline=""` — NO universal-newline translation — so a
+CRLF rc file keeps its `\r\n` endings in the returned text and a
+subsequent write round-trips foreign lines byte-for-byte (issue #152;
+upstream's fs layer behaves the same way).
+
 #### `install_block()`
 
 ```python

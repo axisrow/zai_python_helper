@@ -167,12 +167,19 @@ class ShellBackend:
 
     @staticmethod
     def read(path: Path) -> str:
-        """Return the raw text of ``path``, or ``""`` if it does not exist."""
+        """Return the raw text of ``path``, or ``""`` if it does not exist.
+
+        Reads with ``newline=""`` — NO universal-newline translation — so a
+        CRLF rc file keeps its ``\\r\\n`` endings in the returned text and a
+        subsequent write round-trips foreign lines byte-for-byte (issue #152;
+        upstream's fs layer behaves the same way).
+        """
         p = Path(path)
         if not p.exists():
             return ""
         try:
-            return p.read_text(encoding="utf-8")
+            with p.open("r", encoding="utf-8", newline="") as f:
+                return f.read()
         except OSError as e:
             raise ConfigurationError(f"Failed to read {p}: {e}") from e
 
