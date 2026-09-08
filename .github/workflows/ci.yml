@@ -46,7 +46,12 @@ jobs:
           docker build -f docker/parity/Dockerfile -t zai-parity:smoke .
       - name: Run full upstream parity suite
         # The test auto-detects docker via `_docker_available()`; no env hint
-        # is needed. The image built above is reused (not rebuilt) because the
-        # test's `_ensure_image()` sees it already present.
+        # is needed for that. The image built above is reused (not rebuilt)
+        # because the test's `_ensure_image()` sees it already present.
+        # ZAI_PARITY_STRICT turns any raw drift into a hard failure instead
+        # of pytest.xfail (issue #137): a green parity job must prove
+        # byte-for-byte parity, not record silent drift.
         run: |
           pytest tests/parity/ -v
+        env:
+          ZAI_PARITY_STRICT: "1"
