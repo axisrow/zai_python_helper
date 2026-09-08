@@ -4,7 +4,24 @@ import os
 import subprocess
 import sys
 
-from zai_python_helper.cli import build_parser
+from zai_python_helper.cli import _tool_display_name, build_parser
+
+
+def test_tool_display_name_known_tools():
+    """Registered tools map to their human display names."""
+    assert _tool_display_name("claude_code") == "Claude Code"
+    assert _tool_display_name("opencode") == "OpenCode"
+    assert _tool_display_name("crush") == "Crush"
+    assert _tool_display_name("factory_droid") == "Factory Droid"
+
+
+def test_tool_display_name_unknown_tool_falls_back_to_canonical_name():
+    """A tool added to the registry without a display entry must not KeyError (issue #147).
+
+    Pins the fail-safe choice: unknown name → graceful fallback to the
+    canonical registry name, so the reload message still renders.
+    """
+    assert _tool_display_name("new_hot_tool") == "new_hot_tool"
 
 
 def test_root_help():

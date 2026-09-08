@@ -693,6 +693,23 @@ def _warn_self_heal_destruction(
     )
 
 
+# Display names for the fixed upstream reload messages. A tool registered
+# without an entry here falls back to its canonical registry name instead of
+# raising KeyError (issue #147) — the table-by-fixed-keys class already
+# produced bugs, so the lookup is fail-safe by construction.
+_TOOL_DISPLAY_NAMES = {
+    "claude_code": "Claude Code",
+    "opencode": "OpenCode",
+    "crush": "Crush",
+    "factory_droid": "Factory Droid",
+}
+
+
+def _tool_display_name(name: str) -> str:
+    """Human label for a tool name; unknown names pass through unchanged."""
+    return _TOOL_DISPLAY_NAMES.get(name, name)
+
+
 def _handle_use_zai(args: argparse.Namespace) -> int:
     """Make Z.ai the default provider for the selected tool.
 
@@ -838,12 +855,7 @@ def _handle_use_zai(args: argparse.Namespace) -> int:
     # Match the pinned upstream `chelper auth reload <tool>` CLI.  File
     # changes remain observable through the filesystem contract; stdout is a
     # stable process contract and must not expose paths or configuration.
-    display_name = {
-        "claude_code": "Claude Code",
-        "opencode": "OpenCode",
-        "crush": "Crush",
-        "factory_droid": "Factory Droid",
-    }[tool.name]
+    display_name = _tool_display_name(tool.name)
     print(f"Reloading GLM configuration to {display_name}...")
     print(f"GLM configuration reloaded to {display_name} successfully")
     return 0
