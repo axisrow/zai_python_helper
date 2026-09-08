@@ -64,46 +64,7 @@ from zai_python_helper.paths import Paths
 __all__ = ["CheckResult", "HttpProbe", "ProbeResult", "render_check", "run_doctor"]
 
 
-_CLI_API_TIMEOUT = 5.0
 _CLI_PLANS = {"glm_coding_plan_global", "glm_coding_plan_china"}
-
-
-def _validate_cli_api_key(api_key: str, plan: str) -> tuple[bool, str | None]:
-    """Validate the credentials used by the upstream ``chelper doctor``.
-
-    The upstream doctor uses the coding-plan models endpoint, rather than the
-    Claude-compatible endpoint written to ``settings.json``.  Keep this probe
-    deliberately small and bounded: doctor is a diagnostic command and must
-    turn an unavailable network into a visible failed check, not hang or
-    raise.
-    """
-    if plan not in _CLI_PLANS:
-        return False, "Unsupported GLM Coding Plan"
-    if plan == "glm_coding_plan_global":
-        endpoint = "https://api.z.ai/api/coding/paas/v4/models"
-    else:
-        endpoint = "https://open.bigmodel.cn/api/coding/paas/v4/models"
-    request = urllib.request.Request(
-        endpoint,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        method="GET",
-    )
-    try:
-        # Do not let a credential-bearing request follow a redirect to another
-        # origin (or downgrade transport).  A redirect is a failed validation.
-        opener = urllib.request.build_opener(_NoRedirectHandler)
-        with opener.open(request, timeout=_CLI_API_TIMEOUT) as response:
-            ok = response.status == 200
-            return ok, None if ok else "Network connection failed"
-    except urllib.error.HTTPError as error:
-        if error.code == 401:
-            return False, "API Key is invalid or expired"
-        return False, "Network connection failed"
-    except Exception:  # noqa: BLE001 - doctor must degrade gracefully offline.
-        return False, "Network connection failed"
 
 
 def run_cli_doctor(paths: Paths, *, progress_stream=None) -> int:
@@ -111,27 +72,16 @@ def run_cli_doctor(paths: Paths, *, progress_stream=None) -> int:
 
     The rich :func:`run_doctor` pipeline is the Python API and intentionally
     has more diagnostics than upstream.  The public CLI, however, is also a
-    parity surface; keep its non-TTY output byte-compatible with chelper 0.0.7.
-    This deliberately performs only the checks exposed by that CLI.
+    parity surface; keep its non-TTY output byte-compatible with chelper 0.0.7,
+    with one deliberate divergence (issue #145): upstream's ``API Key &
+    Network`` check read ``~/.chelper/config.yaml``, a legacy file that this
+    project never writes (no ``init`` command survives; the format was removed
+    in #122), so the check could never pass and is gone.  The plan is detected
+    from ``settings.json`` — the file this tool actually writes.
     """
     if progress_stream is not None:
         print("- Running health check...", file=progress_stream)
 
-    def _configured() -> tuple[str | None, str | None]:
-        home = paths.claude_settings.parent.parent
-        path = home / ".chelper" / "config.yaml"
-        try:
-            text = path.read_text()
-        except OSError:
-            return None, None
-        values = {}
-        for line in text.splitlines():
-            if ":" in line and not line[:1].isspace():
-                key, value = line.split(":", 1)
-                values[key.strip()] = value.strip()
-        return values.get("plan"), values.get("api_key")
-
-    plan, api_key = _configured()
     results: list[tuple[bool, str, str | None]] = [
         (
             bool(os.environ.get("PATH")),
@@ -139,13 +89,8 @@ def run_cli_doctor(paths: Paths, *, progress_stream=None) -> int:
             None if os.environ.get("PATH") else "PATH is empty",
         ),
     ]
-    if not (plan and api_key):
-        results.append((False, "API Key & Network", "API key not configured"))
-    else:
-        api_ok, api_message = _validate_cli_api_key(api_key, plan)
-        results.append((api_ok, "API Key & Network", api_message))
     settings = paths.claude_settings
-    detected_plan = plan if plan in _CLI_PLANS else None
+    detected_plan = None
     try:
         import json
 

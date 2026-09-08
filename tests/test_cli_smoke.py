@@ -118,8 +118,6 @@ def test_invoke_doctor_empty_home_uses_health_stdout_and_progress_stderr(tmp_pat
     assert result.stdout == (
         "\n=== Health Check Results ===\n\n"
         "✓ PATH\n"
-        "✗ API Key & Network\n"
-        "  API key not configured\n"
         "✗ GLM Coding Plan\n"
         "  GLM Coding Plan not configured. Run 'chelper init' to configure.\n"
         "✗ Tool: Claude Code (claude-code)\n"
