@@ -28,8 +28,15 @@ const managers = {
 };
 const manager = managers[tool];
 if (!manager) throw new Error(`unknown tool: ${tool}`);
-const preset = PRESET_MCP_SERVICES.find((item) => item.id === mcpId);
-if (!preset) throw new Error(`unknown MCP: ${mcpId}`);
+
+// Preset lookup only for the actions that actually use `preset` (mcp-install);
+// activate/revert/mcp-uninstall take no preset, so an early unconditional
+// lookup would throw `unknown MCP: undefined` for them.
+function resolvePreset() {
+  const preset = PRESET_MCP_SERVICES.find((item) => item.id === mcpId);
+  if (!preset) throw new Error(`unknown MCP: ${mcpId}`);
+  return preset;
+}
 
 function activateViaCli() {
   const configDir = join(homedir(), '.chelper');
@@ -66,6 +73,6 @@ function activateViaCli() {
 
 if (action === 'activate') activateViaCli();
 else if (action === 'revert') manager.unloadGLMConfig();
-else if (action === 'mcp-install') manager.installMCP(preset, token, plan);
+else if (action === 'mcp-install') manager.installMCP(resolvePreset(), token, plan);
 else if (action === 'mcp-uninstall') manager.uninstallMCP(mcpId);
 else throw new Error(`unknown action: ${action}`);
