@@ -17,6 +17,7 @@ from zai_python_helper.shell_block import (
     MANAGED_BLOCK_BEGIN,
     MANAGED_BLOCK_END,
     install_owned_block,
+    managed_block_lines,
     owns_owned_block,
     remove_owned_block,
 )
@@ -121,6 +122,30 @@ class TestForeignSurvival:
             "before\n\n"
             "export VALUE='line1\n\nline3'\n"
         )
+
+    def test_round_trip_on_empty_file_is_empty(self):
+        """Regression (issue #144): the block is the whole file (EOF edge).
+
+        ``install_owned_block("")`` produces just the block + trailing
+        newline; removing it must yield the empty file, not a dangling
+        ``"\\n"`` left over from the split of the trailing newline.
+        """
+        assert remove_owned_block(install_owned_block("")) == ""
+
+    def test_round_trip_block_at_eof_without_trailing_newline(self):
+        """Issue #144, second EOF edge: block ends the file with NO trailing
+        newline. Removal must yield the content lines byte-exactly — no
+        fabricated trailing newline, no lost one.
+        """
+        block = "\n".join(managed_block_lines())
+        assert remove_owned_block("content\n\n" + block) == "content"
+
+    def test_remove_block_only_file_with_extra_blank_line(self):
+        """Issue #144: block + one blank trailing line. Removing the block
+        leaves exactly the blank line — and nothing else.
+        """
+        block = "\n".join(managed_block_lines())
+        assert remove_owned_block(block + "\n\n") == "\n"
 
     def test_multiple_installs_single_block(self):
         text = install_owned_block(install_owned_block(install_owned_block(FOREIGN)))
