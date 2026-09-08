@@ -993,8 +993,6 @@ def _handle_doctor(args: argparse.Namespace) -> int:
     The delegated function does its own rendering, so this handler neither
     prints nor catches — it just returns the int.
     """
-    import sys
-
     from zai_python_helper.doctor import run_cli_doctor
 
     return run_cli_doctor(Paths.default(), progress_stream=sys.stderr)
