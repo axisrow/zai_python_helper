@@ -16,6 +16,12 @@ user-written export.
 
 The fence strings are intentionally distinctive (``>>> ... <<<``) so they do
 not collide with other tools' markers and are grep-able.
+
+EOL policy (issue #152): transforms preserve each foreign line's original
+line ending — matching upstream, which never rewrites surviving rc-file
+lines. Fence matching ignores a single trailing ``\\r`` (a CRLF residue), and
+a newly appended block uses the file's dominant line ending (CRLF only when
+CRLF lines outnumber LF lines).
 """
 
 from __future__ import annotations
@@ -42,6 +48,29 @@ def managed_block_lines() -> list[str]:
     return [MANAGED_BLOCK_BEGIN, *MANAGED_BLOCK_BODY_LINES, MANAGED_BLOCK_END]
 
 
+def _is_fence(line: str, marker: str) -> bool:
+    """True iff ``line`` IS the fence ``marker``, ignoring a trailing ``\\r``.
+
+    Lines come from ``text.split("\\n")``; in a CRLF file each line therefore
+    ends with a residual ``\\r``. Fences must still be recognizable so a block
+    we installed into a CRLF file is found again (issue #152). A fence with
+    any OTHER trailing content (spaces, comment suffix) still does not match.
+    """
+    return line == marker or line == marker + "\r"
+
+
+def _dominant_eol(text: str) -> str:
+    """The line ending to use for newly written block lines (issue #152).
+
+    CRLF only when CRLF lines outnumber LF lines; otherwise LF (so an all-LF
+    file keeps byte-identical behavior). Mirrors upstream, whose rc-file
+    rewrite preserves the surviving lines' original endings.
+    """
+    crlf = text.count("\r\n")
+    lf = text.count("\n") - crlf
+    return "\r\n" if crlf > lf else "\n"
+
+
 def _find_block_range(text: str) -> tuple[int, int] | None:
     """Locate the managed block as a ``(begin_line_idx, end_line_idx)`` pair.
 
@@ -63,11 +92,11 @@ def _find_block_range(text: str) -> tuple[int, int] | None:
     begin_idx = None
     end_idx = None
     for i, line in enumerate(lines):
-        if line == MANAGED_BLOCK_BEGIN:
+        if _is_fence(line, MANAGED_BLOCK_BEGIN):
             if begin_idx is not None:
                 return None  # duplicate BEGIN — ambiguous
             begin_idx = i
-        elif line == MANAGED_BLOCK_END:
+        elif _is_fence(line, MANAGED_BLOCK_END):
             if end_idx is not None:
                 return None  # duplicate END — ambiguous
             end_idx = i
@@ -108,14 +137,17 @@ def install_owned_block(text: str) -> str:
         # A marker is present: well-formed pair → no-op; malformed → refuse.
         return text
 
-    block = "\n".join(managed_block_lines())
+    eol = _dominant_eol(text)
+    block = eol.join(managed_block_lines())
     if not text:
         # Empty / absent file → block is the whole file.
         return block + "\n"
 
     # Ensure exactly one blank line between existing content and the block.
-    stripped = text.rstrip("\n")
-    return stripped + "\n\n" + block + "\n"
+    # The block is appended in the file's dominant EOL so it round-trips in
+    # CRLF files too; foreign lines are never touched (issue #152).
+    stripped = text.rstrip("\r\n")
+    return stripped + eol + eol + block + eol
 
 
 def remove_owned_block(text: str) -> str:
@@ -141,6 +173,7 @@ def remove_owned_block(text: str) -> str:
     # too, but do not normalize blank lines elsewhere in the user's file.
     before = lines[:begin_idx]
     after = lines[end_idx + 1 :]
-    if before and before[-1] == "":
+    # A blank separator line in a CRLF file is a lone "\r" after the split.
+    if before and before[-1] in ("", "\r"):
         before.pop()
     return "\n".join(before + after)

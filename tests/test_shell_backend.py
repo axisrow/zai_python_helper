@@ -84,7 +84,14 @@ class TestPureRemove:
         the current contract so a future change is deliberate.
         """
         # Block absent → foreign inside nothing is preserved trivially.
-        text = "before\n" + MANAGED_BLOCK_BEGIN + "\n" + "INSIDE\n" + MANAGED_BLOCK_END + "\nafter\n"
+        text = (
+            "before\n"
+            + MANAGED_BLOCK_BEGIN
+            + "\n"
+            + "INSIDE\n"
+            + MANAGED_BLOCK_END
+            + "\nafter\n"
+        )
         out = remove_owned_block(text)
         assert "before" in out
         assert "after" in out
@@ -99,13 +106,7 @@ class TestForeignSurvival:
         assert out == FOREIGN
 
     def test_round_trip_with_comments_and_blank_lines(self):
-        text = (
-            "# my config\n"
-            "\n"
-            'export FOO=bar\n'
-            "\n"
-            "# end\n"
-        )
+        text = "# my config\n\nexport FOO=bar\n\n# end\n"
         out = remove_owned_block(install_owned_block(text))
         assert out == text
 
@@ -118,10 +119,7 @@ class TestForeignSurvival:
             + MANAGED_BLOCK_END
             + "\n"
         )
-        assert remove_owned_block(text) == (
-            "before\n\n"
-            "export VALUE='line1\n\nline3'\n"
-        )
+        assert remove_owned_block(text) == ("before\n\nexport VALUE='line1\n\nline3'\n")
 
     def test_round_trip_on_empty_file_is_empty(self):
         """Regression (issue #144): the block is the whole file (EOF edge).
@@ -267,6 +265,73 @@ class TestShellBackendIO:
 
     def test_read_missing_file_returns_empty(self, tmp_path):
         assert ShellBackend.read(tmp_path / "nope") == ""
+
+
+class TestCrlfRoundTrip:
+    """Issue #152: CRLF rc files keep their ``\\r\\n`` endings through every
+    backend mutation — foreign lines round-trip byte-for-byte, matching the
+    upstream fs layer (verified against @z_ai/coding-helper 0.0.7 in the
+    parity Docker stand). The appended block uses the file's dominant EOL
+    (CRLF), and fences are recognized despite the trailing ``\\r``.
+    """
+
+    CRLF_FOREIGN = 'export A=1\r\n\r\nalias ll="ls -l"\r\n'
+
+    def test_remove_preserves_foreign_crlf_bytes(self, tmp_path):
+        """The issue #152 reproducer: removing the block from a CRLF file
+        must not silently convert the file to LF."""
+        rc = tmp_path / "rc"
+        crlf = self.CRLF_FOREIGN + "\r\n".join(managed_block_lines()) + "\r\n"
+        rc.write_bytes(crlf.encode())
+        assert ShellBackend.remove_block(rc)
+        assert rc.read_bytes() == self.CRLF_FOREIGN.encode()
+
+    def test_remove_is_noop_when_block_absent_crlf(self, tmp_path):
+        """No block → no write at all; the CRLF file is left untouched."""
+        rc = tmp_path / "rc"
+        crlf = self.CRLF_FOREIGN + MANAGED_BLOCK_BEGIN + "\r\n"
+        rc.write_bytes(crlf.encode())
+        assert not ShellBackend.remove_block(rc)  # lone BEGIN: fail-closed
+        assert rc.read_bytes() == crlf.encode()
+
+    def test_install_appends_block_in_crlf(self, tmp_path):
+        rc = tmp_path / "rc"
+        rc.write_bytes(self.CRLF_FOREIGN.encode())
+        assert ShellBackend.install_block(rc)
+        raw = rc.read_bytes().decode()
+        assert owns_owned_block(raw)
+        # Foreign prefix intact, block written in the file's dominant EOL.
+        assert raw.startswith(self.CRLF_FOREIGN)
+        assert "\r\n".join(managed_block_lines()) + "\r\n" in raw
+
+    def test_install_then_remove_round_trips_crlf_exactly(self, tmp_path):
+        rc = tmp_path / "rc"
+        rc.write_bytes(self.CRLF_FOREIGN.encode())
+        assert ShellBackend.install_block(rc)
+        assert not ShellBackend.install_block(rc)  # found despite CRLF → NOOP
+        assert ShellBackend.remove_block(rc)
+        assert rc.read_bytes() == self.CRLF_FOREIGN.encode()
+
+    def test_pure_install_dominant_eol_lf_wins_in_mostly_lf_file(self):
+        mixed = "a\nb\r\nc\n"
+        out = install_owned_block(mixed)
+        # LF dominates → block in LF; the one CRLF foreign line survives.
+        assert out.startswith("a\nb\r\nc\n\n")
+        assert "\n".join(managed_block_lines()) in out
+
+    def test_pure_remove_collapses_crlf_separator_blank_line(self):
+        crlf = "before\r\n\r\n" + "\r\n".join(managed_block_lines()) + "\r\n"
+        # "before" keeps its own \r\n ending (the LF analog yields "before\n").
+        assert remove_owned_block(crlf) == "before\r\n"
+
+    def test_pure_owns_finds_block_despite_trailing_cr(self):
+        crlf = "\r\n".join(managed_block_lines())
+        assert owns_owned_block(crlf)
+
+    def test_pure_malformed_fences_still_fail_closed_in_crlf(self):
+        reversed_crlf = MANAGED_BLOCK_END + "\r\n" + MANAGED_BLOCK_BEGIN + "\r\nx\r\n"
+        assert not owns_owned_block(reversed_crlf)
+        assert remove_owned_block(reversed_crlf) == reversed_crlf
 
 
 @pytest.mark.parametrize("path_attr", ["claude_settings", "zshrc"])
