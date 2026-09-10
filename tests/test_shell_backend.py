@@ -145,6 +145,34 @@ class TestForeignSurvival:
         block = "\n".join(managed_block_lines())
         assert remove_owned_block(block + "\n\n") == "\n"
 
+    def test_round_trip_preserves_extra_trailing_blank_lines(self):
+        """Regression (issue #154): an rc file ending in SEVERAL newlines must
+        survive install→remove byte-for-byte. Install used to rstrip the whole
+        trailing run and re-append exactly one newline, collapsing e.g. three
+        trailing newlines to one. Upstream (checked against
+        @z_ai/coding-helper 0.0.7 in the parity Docker stand) never collapses
+        trailing blank lines on its rc mutation, so we preserve them too.
+        """
+        text = "export FOO=1\n\n\n"
+        assert remove_owned_block(install_owned_block(text)) == text
+
+    def test_install_keeps_trailing_run_and_adds_separator_blank(self):
+        """Install shape for a multi-newline tail: the original trailing run is
+        kept verbatim, the block goes after it (still one blank line before
+        the fence), and the file keeps ending with exactly one newline.
+        """
+        out = install_owned_block("export FOO=1\n\n\n")
+        assert out.startswith("export FOO=1\n\n\n\n")
+        assert out.endswith(MANAGED_BLOCK_END + "\n")
+
+    def test_round_trip_preserves_extra_trailing_blank_lines_on_disk(self, tmp_path):
+        rc = tmp_path / ".zshrc"
+        raw = "export FOO=1\n\n\n"
+        rc.write_bytes(raw.encode())
+        assert ShellBackend.install_block(rc)
+        assert ShellBackend.remove_block(rc)
+        assert rc.read_bytes() == raw.encode()
+
     def test_multiple_installs_single_block(self):
         text = install_owned_block(install_owned_block(install_owned_block(FOREIGN)))
         assert text.count(MANAGED_BLOCK_BEGIN) == 1

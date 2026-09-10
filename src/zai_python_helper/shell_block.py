@@ -122,10 +122,12 @@ def install_owned_block(text: str) -> str:
     """Return ``text`` with our managed block appended (idempotent).
 
     Foreign lines are NEVER modified — the block is appended after the
-    existing content. A single blank line separates the block from preceding
-    content (only when the file is non-empty and not already blank-ended),
-    and the result always ends with exactly one trailing newline so the file
-    is well-formed whether it pre-existed or not.
+    existing content. The file's trailing newline run is kept verbatim and a
+    single blank line separates the block from it, so an install→remove
+    round-trip restores the original trailing blank lines byte-for-byte
+    (issue #154 — upstream's rc mutation never collapses them either). The
+    result always ends with exactly one trailing newline so the file is
+    well-formed whether it pre-existed or not.
 
     If a well-formed block is already present this is a no-op (returns
     ``text`` unchanged) so the planner's equality check naturally yields a
@@ -143,11 +145,16 @@ def install_owned_block(text: str) -> str:
         # Empty / absent file → block is the whole file.
         return block + "\n"
 
-    # Ensure exactly one blank line between existing content and the block.
-    # The block is appended in the file's dominant EOL so it round-trips in
-    # CRLF files too; foreign lines are never touched (issue #152).
+    # Append after the file's ORIGINAL trailing newline run (kept verbatim —
+    # issue #154), adding exactly one blank separator line before the block.
+    # ``remove`` pops that one blank back, so install→remove is byte-identical
+    # for any trailing-run length. A file with no trailing newline at all gets
+    # the same single separator blank as before. The block is appended in the
+    # file's dominant EOL so it round-trips in CRLF files too; foreign lines
+    # are never touched (issue #152).
     stripped = text.rstrip("\r\n")
-    return stripped + eol + eol + block + eol
+    tail = text[len(stripped) :] or eol
+    return stripped + tail + eol + block + eol
 
 
 def remove_owned_block(text: str) -> str:
